@@ -5,7 +5,7 @@
 install_self() {
     need_root
     install -d -m 0755 "$XHY_APP_DIR" || die "无法创建 $XHY_APP_DIR"
-    local src="$XHY_RUNNING" tmp
+    local src="${XHY_RUNNING:-}" tmp
     if [[ -n "$src" ]] && [[ "$(readlink -f "$src" 2>/dev/null || echo "$src")" == "$(readlink -f "$XHY_SELF" 2>/dev/null || echo "$XHY_SELF")" ]]; then
         chmod 0755 "$XHY_SELF" 2>/dev/null || true
         return 0

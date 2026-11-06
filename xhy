@@ -13,6 +13,11 @@ export XHY_DEV=1
 export XHY_APP_DIR="${XHY_APP_DIR:-$REPO}"
 export XHY_SCRIPT_DIR="$REPO"
 export XHY_SELF="$REPO/xhy"
+# 这两个变量在单文件里由 entry/prelude.sh 定义；开发入口不加载 prelude，
+# 必须自己补上，否则 install_self 在 set -u 下直接死在 XHY_RUNNING 上。
+# 开发模式下「正在运行的就是 $REPO/xhy」，与 XHY_SELF 同路径 => install_self 什么都不做。
+export XHY_RUNNING="${XHY_RUNNING:-$REPO/xhy}"
+export XHY_INSTALL_URL="${XHY_INSTALL_URL:-https://github.com/jmwangde3/xray-hy/releases/latest/download/install.sh}"
 
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
     PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '

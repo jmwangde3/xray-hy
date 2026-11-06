@@ -105,7 +105,7 @@ fi
 set -Eeuo pipefail
 
 XHY_VERSION="1.0.0"
-XHY_BUILD="55e4c3638b68"
+XHY_BUILD="dc6d501039f1"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -2403,7 +2403,7 @@ XHY_TARGETS_TSV
 install_self() {
     need_root
     install -d -m 0755 "$XHY_APP_DIR" || die "无法创建 $XHY_APP_DIR"
-    local src="$XHY_RUNNING" tmp
+    local src="${XHY_RUNNING:-}" tmp
     if [[ -n "$src" ]] && [[ "$(readlink -f "$src" 2>/dev/null || echo "$src")" == "$(readlink -f "$XHY_SELF" 2>/dev/null || echo "$XHY_SELF")" ]]; then
         chmod 0755 "$XHY_SELF" 2>/dev/null || true
         return 0
