@@ -197,7 +197,7 @@ firewall_apply() {
 # full rules dump, so rules added later by the admin are never overwritten.
 install_firewall_service() {
     local runner="/usr/local/bin/xhy"
-    [[ -x "$runner" ]] || runner="${XHY_HOME}/xhy"
+    [[ -x "$runner" ]] || runner="$XHY_SELF"
     if [[ "$XHY_INIT" == "systemd" ]]; then
         cat >/etc/systemd/system/xray-hy-firewall.service <<EOF
 [Unit]

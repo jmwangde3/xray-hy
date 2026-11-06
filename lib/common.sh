@@ -1,8 +1,18 @@
 #!/usr/bin/env bash
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="0.1.0"
-XHY_HOME="${XHY_HOME:-/opt/xray-hy}"
+XHY_VERSION="${XHY_VERSION:-1.0.0}"
+# 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
+XHY_BUILD="${XHY_BUILD:-dev}"
+
+# 单文件发布后，"脚本目录"只有两种含义：
+#   已安装 -> /usr/local/lib/xray-hy（软链 /usr/local/bin/xhy 指过去）
+#   仓库内 -> 仓库根（xhy 是开发入口，直接 source lib/）
+# 测试会显式给出 XHY_SCRIPT_DIR，因此这里全部用「已存在就不覆盖」的写法。
+XHY_SCRIPT_DIR="${XHY_SCRIPT_DIR:-${XHY_APP_DIR:-/usr/local/lib/xray-hy}}"
+XHY_APP_DIR="${XHY_APP_DIR:-$XHY_SCRIPT_DIR}"
+XHY_SELF="${XHY_SELF:-$XHY_APP_DIR/xhy}"
+XHY_HOME="${XHY_HOME:-$XHY_APP_DIR}"
 XHY_ETC="${XHY_ETC:-/etc/xray-hy}"
 XHY_CONFDIR="$XHY_ETC/confs"
 XHY_NODES="$XHY_ETC/nodes"

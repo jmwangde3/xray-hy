@@ -2,7 +2,7 @@
 
 模块化 Xray 部署管理脚本。一个仓库同时覆盖 **Debian/Ubuntu (systemd)** 与 **Alpine (OpenRC)**，支持五种节点模式并存（含 Xray 原生 Hysteria2）、多节点管理、系统加固、版本钉死与后续更新。
 
-> 仓库：`https://github.com/jmwangde3/xray-hy`（当前为私有仓库，推送与自更新依赖已配置的 git 凭据）
+> 仓库：`https://github.com/jmwangde3/xray-hy`（公开仓库，克隆不需要账号或 token）
 >
 > **合规声明**：本项目是通用网络软件的配置自动化工具，仅供学习、研究及在**符合所在地法律法规与服务商条款**的前提下使用。在中国境内，未经主管部门批准自行建立或使用非法定信道进行国际联网属于违规行为；请勿将本脚本用于任何违法用途。使用者需自行承担合规责任。
 
@@ -14,7 +14,7 @@
 
 | 关注点 | 本项目的做法 |
 |---|---|
-| 供应链 | 以**本地 git 工作树**安装，运行时不下载任何脚本；更新走 `git pull --ff-only` 且先看 diff。不提供也不推荐 `curl \| bash`。 |
+| 供应链 | **单文件发布**：`install.sh` 由 `build.sh` 从 `lib/` 拼接生成，带构建号（commit + 源码哈希）。安装时先落盘再执行、自更新先过 `bash -n` 并比对构建号才整文件替换，**不会**把下载内容直接管道进 shell。仓库内开发仍走 git 工作树，`xhy update script` 拉新构建后先比对再替换。 |
 | 下载校验 | Xray 发布包的 `.dgst` SHA-256 **强制校验**，拿不到摘要直接中止（多数一键脚本在这里会警告后继续）。cloudflared 官方 raw 二进制无校验和，做 ELF + `--version` 自检并明确提示。 |
 | 配置安全 | 每次变更先在临时文件渲染、用 `xray run -test -c` 整体校验，**失败自动回滚该节点**，不影响已有节点。 |
 | SSH | **从不修改 `sshd_config`**，只读取当前端口用于防火墙放行，避免远程锁死自己。 |
@@ -23,7 +23,7 @@
 | REALITY | 上游官方警告：认证失败的流量会被转发到 target，CDN 后面的站点会让服务器变成开放转发器。因此内置 TLS 1.3 / H2 / 无跳转 / 非 CDN 校验，并默认加上 `limitFallback*` 限速。 |
 | 并发与磁盘 | 全局 `flock` 串行化所有配置变更，且服务命令显式关闭锁 fd（防 OpenRC 守护进程继承导致死锁）；**快照是整套状态 tar**（config + confs + nodes + state），回滚不会出现配置与节点注册表不一致；自动生成 logrotate 策略（weekly / 保留 4 份 / 32M 触发） |
 | 内存 | 依据物理内存与 cgroup `memory.max` 给 Xray 设 `GOMEMLIMIT`（取 1/4，下限 32MiB），128–256MB 小鸡不易被 OOM Kill |
-| 自更新 | `git pull --ff-only` 后对入口与所有 `lib/*.sh` 跑 `bash -n`，任一失败整组回滚到更新前 commit，不会留下跑不起来的入口 |
+| 自更新 | `xhy update script` 下载新构建 → `bash -n` 语法检查 → 比对构建号 → 确认后原子替换；任一步失败本地脚本保持原样，旧版本自动备份在 `/etc/xray-hy/backups/`。克隆方式则走 `git pull --ff-only` |
 
 参考与致谢：`XTLS/Xray-core`、`XTLS/Xray-install`、`zxcvos/Xray-script`（交互式菜单、target 校验、规则开关）、`audsiui/xray-jb`（多节点注册表与四模式划分）、`0xevn/xray-reality-setup`（加固项与文档结构）、`ICMP-UNREACHABLE/Minimal-Xray-Script`、`miku111/XrayOnAlpine`。
 
@@ -39,71 +39,85 @@ IPv6 双栈防火墙与慢速爆破双窗口、DNS 并发查询取消的根因�
 
 ## 2. 快速开始
 
+两种方式任选其一，**都不要同时用**（会在两个位置各装一份 `xhy`）。
+
+### 方式 A：一条命令（推荐，不需要 git）
+
 ```sh
 # 以 root 执行
-gh repo clone jmwangde3/xray-hy /opt/xray-hy      # 私有仓库，需先 gh auth login
-# 或：git clone https://github.com/jmwangde3/xray-hy.git /opt/xray-hy
+bash <(curl -fsSL https://github.com/jmwangde3/xray-hy/releases/latest/download/install.sh)
+```
+
+就这一条：它先做完整安装（依赖 → 脚本本体 → Xray → 服务 → BBR → 防火墙 → 空配置自检），装完 `xhy` 已在 PATH 里，接着输 `xhy` 打开菜单即可。
+
+**全新 Alpine 服务器**（默认没有 bash，也可能没有 curl）改用这条 —— busybox 自带的 wget 就够：
+
+```sh
+wget -qO- https://github.com/jmwangde3/xray-hy/releases/latest/download/install.sh | sh
+```
+
+脚本开头是 POSIX sh：检测到没有 bash 会自己 `apk add bash`，再带着完整安装流程重新执行，所以这两条命令行为完全一致。缺 curl 也不用装，`| sh` 这条用的是 wget。
+
+### 方式 B：git clone（想改代码、想随时看 diff）
+
+```sh
+# 以 root 执行
+
+# 1) 补齐前提：仓库公开，git 不需要任何账号或 token
+#    Alpine（官方镜像默认没有 git 和 bash）：
+apk add --no-cache git bash
+#    Debian / Ubuntu（一般自带，缺了再补）：
+#    apt-get update && apt-get install -y git
+
+# 2) 克隆到固定目录（卸载 / 更新时路径别换）
+git clone https://github.com/jmwangde3/xray-hy.git /opt/xray-hy
 cd /opt/xray-hy
-./xhy install           # 依赖 -> Xray -> 服务 -> BBR -> 防火墙 -> 空配置自检
+
+# 3) 安装（仓库是模块化的，xhy 入口会加载 lib/，所以必须在克隆目录里跑）
+bash xhy install
 xhy                     # 打开交互菜单（install 已创建 /usr/local/bin/xhy 软链）
 ```
 
-> `./xhy` 与 `bash xhy` 等价：入口首段是 POSIX sh，检测不到 bash 时会先装 bash 再 `exec` 自己。
-> **`install` 不需要 git** —— git 只被 `xhy update script` 使用。
+`bash xhy install` 与 `./xhy install` 等价；直接敲 `./xhy` 若报 `Permission denied`，先 `chmod +x xhy`。
 
-### 2.1 全新机器：没有 bash、没有 git
+### 两种方式差别
 
-Alpine 官方镜像默认既没有 bash 也没有 git，而仓库是私有的（`git clone` 还要 token）。
-最省事的路径是**把代码打包传上去**，全程不碰 git：
+| | 方式 A（一条命令） | 方式 B（git clone） |
+|---|---|---|
+| 需要 git | 否 | 是 |
+| 需要先装 bash | 否（脚本自动装） | Alpine 需要 `apk add bash` |
+| 脚本位置 | `/usr/local/lib/xray-hy/xhy`（单文件，自包含） | `/opt/xray-hy/`（模块化工作树，`lib/` 必须保留） |
+| `xhy` 软链指向 | `/usr/local/lib/xray-hy/xhy` | `/opt/xray-hy/xhy` |
+| `xhy update script` | 下载新构建 → 语法检查 → 整文件替换 | `git pull --ff-only`（先看 diff） |
+| 适合 | 一次性部署、全新小鸡 | 二次开发、想审计每一行改动 |
 
-**Windows 侧（PowerShell / Git Bash 均可，Win10+ 自带 `tar` 与 `scp`）**
+节点数据两种方式都存在 `/etc/xray-hy/`，与脚本位置无关。
 
-```powershell
-cd H:\AI工作区\workbuddy
-tar --exclude=xray-hy/.git -czf xray-hy.tar.gz xray-hy
-scp xray-hy.tar.gz root@<服务器IP>:/tmp/
-```
-
-**服务器侧（root）**
-
-```sh
-cd /tmp
-tar -xzf xray-hy.tar.gz                       # 得到 /tmp/xray-hy
-sh /tmp/xray-hy/bootstrap.sh /tmp/xray-hy     # 装依赖 -> 复制到 /opt/xray-hy -> 体检 -> preflight
-cd /opt/xray-hy && ./xhy install
-```
-
-`bootstrap.sh` 只依赖 busybox，做的事按顺序打印 `[1/5] … [5/5]`：
-装 `bash curl ca-certificates openssl coreutils unzip iptables ip6tables` → 复制到 `/opt/xray-hy`
-→ 体检 DNS / 软件源 / GitHub 可达性 → 跑 `xhy preflight`。每步都有超时上限（默认 180s，`XHY_PKG_TIMEOUT` 可调）。
-
-只体检不改动：
+### 2.1 只想先体检、不安装
 
 ```sh
-sh /tmp/xray-hy/bootstrap.sh --check
+xhy preflight        # 安装前只读预检（root、内核、磁盘、端口、依赖、GitHub 可达）
+xhy check            # 已安装后的全量自检
 ```
-
-不用 scp 也可以：`apk add bash git` 之后走上面的 `git clone`，或把 tar.gz 用 `base64` 贴进终端。
 
 ### 2.2 「跑了没反应」怎么定位
 
-脚本以前把 `apk add bash` 的输出全部丢进 `/dev/null`，一旦软件源不通就会静静地卡几分钟 —— 看起来和死掉一样。
-现在每步都有 `==> [n/6]` banner 和超时上限，卡住先看停在哪一步。按顺序试：
+脚本每一步都有 `==> [n/7]` banner 和超时上限，卡住先看停在哪一步。按顺序试：
 
 | 现象 | 含义 | 处理 |
 |---|---|---|
-| `bash: not found` | bash 没装（且你直接敲了 `bash`） | `apk add bash`，或改用 `sh xhy install` 让脚本自己装 |
-| `xhy: No such file or directory` | 当前目录没有 `xhy` | `cd /opt/xray-hy` 再执行；`pwd; ls xhy` 确认 |
-| 卡在 `[1/6] 依赖` | 软件源/DNS 不通，或 apk 锁被占 | 另开会话跑 `apk update`、`ps w \| grep apk`；换源 `sed -i 's#dl-cdn.alpinelinux.org#mirrors.aliyun.com#g' /etc/apk/repositories` |
-| 卡在 `[3/6] 下载并校验 Xray` | 到 GitHub 的线路不通 | `curl -I https://github.com` 验证；失败时按 `fetch` 打印的 curl 退出码处置 |
+| `curl: command not found`（Alpine 用了方式 A 第一条） | 没有 curl | 改用 `wget -qO- ... \| sh`，或 `apk add curl` 后重试 |
+| 卡在 `[1/7] 依赖` | 软件源/DNS 不通，或 apk 锁被占 | 另开会话跑 `apk update`、`ps w \| grep apk`；换源 `sed -i 's#dl-cdn.alpinelinux.org#mirrors.aliyun.com#g' /etc/apk/repositories` |
+| 卡在 `[2/7] 脚本本体` | GitHub release 地址 404 或线路不通 | `curl -I <install.sh 的 URL>` 看返回码；404 说明 release 还没发 |
+| 卡在 `[4/7] 下载并校验 Xray` | 到 GitHub 的线路不通 | `curl -I https://github.com` 验证；失败时按 `fetch` 打印的 curl 退出码处置 |
 | 十几秒后报「另一个 xhy 实例…」 | 上一轮没退干净，配置锁还在 | `ps w \| grep '[x]hy'`，杀掉残留进程后重试 |
-| 什么都不打印就退出 | 检查 `echo $?`；`sh -x xhy install` 逐行看 | 用 `XHY_TRACE=1 ./xhy install` 拿到行号 |
+| 什么都不打印就退出 | 检查 `echo $?` | 用 `XHY_TRACE=1 bash <(curl -fsSL <url>)` 逐行看到哪一步 |
 
 一键体检（不需要先装任何东西，纯 busybox）：
 
 ```sh
 { uname -a; head -3 /etc/os-release 2>/dev/null
-  command -v bash || echo "缺少 bash"; command -v git || echo "缺少 git"
+  command -v bash || echo "缺少 bash"; command -v curl || echo "缺少 curl（Alpine 可用 wget 方式）"
   (nslookup github.com >/dev/null 2>&1 && echo "DNS ok") || echo "DNS 失败"
   curl -sS -o /dev/null -m 10 -w 'github HTTP %{http_code}\n' https://github.com 2>/dev/null || echo "curl 不可用"
   ps w | grep -E '[x]hy|[a]pk' || echo "没有卡住的 xhy/apk 进程"; } 2>&1
@@ -144,7 +158,7 @@ xhy check                                 # 全量环境自检
 | CF Tunnel | 可选；WS 只监听 `127.0.0.1`，cloudflared 由独立服务托管，Token 存 0600 文件；分享链接按 CF 边缘 TLS 生成 |
 | 防火墙 | `safe`（默认）/ `strict` / `off`；**同时构建 iptables 与 ip6tables 链** —— 只防 IPv4 等于给 `:::22` 留了后门；每次变更前备份两个 family 的规则转储 |
 | 伪装站 | `conf/targets.tsv` 地区库（US/GB/JP/HK/TW/SG/FR/DE/IN/CA/AU/NL/…），按 VPS 出口国家自动匹配，逐个做 TLS 1.3、HTTP/2、无重定向、非 CDN 校验；支持 `xhy target` 指定地区或手动固定 target/SNI |
-| 后续更新 | `xhy update script`（git ff-only） / `core` / `geodata` / `config`（重建全部节点）/ `all` |
+| 后续更新 | `xhy update script`（单文件：新构建整文件替换；克隆：git ff-only）/ `core` / `geodata` / `config`（重建全部节点）/ `all` |
 | 五种模式 | `direct`、`tunnel`、`reality`、`xhttp`、`hy2`（Xray 原生 Hysteria2 入站，UDP/QUIC + 自签证书 + `pinSHA256` 分享链接） |
 | 导出链接 | `xhy link --all` / `--uri` / `--qr` |
 | 额外补充 | 多节点并存与独立增删、**端口跨模式全局唯一检查**、**`DUAL_STACK=on` 双栈监听**、**`xhy preflight` 安装前只读预检**（内核修复线 / 端口 / 磁盘 / 内存 / MPTCP / GitHub 可达 / 依赖）、**Hysteria2 的 UDP 双栈放行与自签证书 pin**、节点注册表、**`flock` 并发锁（服务命令关闭锁 fd）**、配置变更原子校验+回滚、**最近 5 份整套状态快照 + `xhy rollback`**、更新 Xray 时二进制自动回滚、更新脚本后全量 `bash -n`、按内存/cgroup 设 `GOMEMLIMIT`、日志自动轮转、系统级关闭 MPTCP（钉死旧版的关键缓解）、私网/回国 IP/广告域名阻断开关、DoH 选择、日志级别与关闭、geodata 更新（带大小校验）、REALITY fallback 限速、系统自检报告、CLI 与菜单双入口、卸载可选保留配置 |
@@ -220,8 +234,13 @@ xhy config set TARGET_REGION jp     # 或 auto
 ## 6. 目录结构
 
 ```
-/opt/xray-hy/                 脚本 git 工作树（= 本仓库）
-├── xhy                       主入口，POSIX sh shim 自动 re-exec 到 bash
+本仓库（开发布局，方式 B 克隆下来的就是它）
+├── xhy                       开发入口：加载 lib/ 与 entry/main.sh
+├── install.sh                构建产物：单文件、自包含（build.sh 生成，不手改）
+├── build.sh                  拼接器：entry/ + lib/ + conf/ -> install.sh
+├── entry/
+│   ├── prelude.sh            POSIX sh 开头段（没有 bash 先装、再 exec）+ bash 环境变量
+│   └── main.sh               用法、各命令实现、main 分发
 ├── lib/
 │   ├── common.sh             日志/状态/原子写/校验/工具函数
 │   ├── platform.sh           发行版、init、架构、SSH 端口检测，依赖安装
@@ -232,8 +251,13 @@ xhy config set TARGET_REGION jp     # 或 auto
 │   ├── nodes.sh              五种模式 inbound 渲染、节点注册表、整体重建、快照
 │   ├── links.sh              vless:// 链接与二维码
 │   └── update.sh             脚本/核心/geodata/配置更新、自检
-├── conf/targets.tsv          可自行编辑的地区伪装站候选
+├── conf/targets.tsv          可自行编辑的地区伪装站候选（构建时内嵌进 install.sh）
 └── test/                     离线测试（无需 root / 网络 / 真实 Xray）
+
+方式 A 安装后（单文件布局，逻辑与仓库完全一致）
+/usr/local/lib/xray-hy/
+├── xhy                       install.sh 的副本
+└── conf/targets.tsv          首次用到伪装站时从内嵌数据生成（之后可直接编辑）
 
 /etc/xray-hy/                 运行时数据（0700）
 ├── config.json               渲染后的完整配置（0600）
@@ -255,14 +279,15 @@ xhy config set TARGET_REGION jp     # 或 auto
 ## 7. 更新与回滚
 
 ```sh
-xhy update script     # git fetch -> 展示 log/diff -> 确认 -> pull --ff-only
+xhy update script     # 单文件：下载新构建 -> bash -n -> 比对构建号 -> 确认后原子替换
+                      # 克隆方式：git fetch -> 展示 log/diff -> 确认 -> pull --ff-only
 xhy update core       # 按版本通道重装 Xray（强制校验），自动验证现有配置兼容性
 xhy update geodata    # 只更新 geoip.dat / geosite.dat，失败保留旧文件
 xhy update config     # 从节点注册表重建全部 inbound + 重载 + 刷新防火墙
 xhy update all        # 以上全部 + 自检
 ```
 
-脚本更新**不会**触碰 `/etc/xray-hy`。`update script` 拉取后会对 `xhy` 和所有 `lib/*.sh` 跑 `bash -n`，任一文件语法错误就整组回滚到更新前的 commit；所有会改配置的命令都持有全局 `flock`，并发执行不会互相踩。
+脚本更新**不会**触碰 `/etc/xray-hy`。`update script` 拿到新脚本后先 `bash -n` 语法检查、再比对构建号，任一步不对就放弃且本地文件分毫未动；确认替换前旧版本会备份到 `/etc/xray-hy/backups/`。所有会改配置的命令都持有全局 `flock`，并发执行不会互相踩。
 
 若配置渲染或校验失败，新增节点会被回滚，已有配置保持原样。
 

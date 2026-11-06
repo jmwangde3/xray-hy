@@ -1,9 +1,9 @@
 # HANDOFF — xray-hy
 
 > 交接时间：2026-11-06 13:56 (UTC+8)
-> 更新：2026-11-06 15:35 —— 见 §11（无 bash / 无 git 的引导路径 + 卡死可见化）
-> 仓库：<https://github.com/jmwangde3/xray-hy>（**私有**，main 分支，工作树干净）
-> 基线 commit：`53cb4c6`（本文档为在此基础上的一次 docs 提交）
+> 更新：2026-11-06 15:45 —— **发布方式改为单文件 `install.sh`**（§12），`bootstrap.sh` 与 tar.gz 方案已废弃
+> 仓库：<https://github.com/jmwangde3/xray-hy>（**已公开**，main 分支）
+> 基线 commit：`9139ae8`（本文档描述其上的单文件发布改造）
 > 生产服务器：`8.222.223.248`（Alpine 3.23 / OpenRC / Xray 26.10.31）
 
 ---
@@ -17,42 +17,43 @@
 1. **不要在生产机直接 `xhy install`。** 默认钉死 `v26.3.27`，会把现有 `26.10.31` 降级；新服务名与现有 `xray` 服务直接冲突。迁移必须先在维护窗口停旧服务（见 §6.4）。
 2. **SSH 已改为仅密钥登录。** 密码认证关闭，端口保持 22。私钥在运维机 `C:\Users\jmwan\OneDrive\.ssh\id_ed25519`（无口令），指纹 `SHA256:yh9qpakC4Kp/fJdO65XMchdxod959t7hC4YfbJpRNaM`。root 密码现在只对云控制台 VNC 有效。⚠️ 该私钥位于 OneDrive 同步目录内，见 §6.3。
 3. **传输选型已定：REALITY。** 结论与理由见 §5。
-4. **仓库是私有的。** 要公开：
-   ```sh
-   gh repo edit jmwangde3/xray-hy --visibility public --accept-visibility-change-consequences
-   ```
+4. **仓库已公开**（2026-11-06 15:3x），`git clone` / release 下载都不再需要凭据。
 
 ---
 
 ## 3. 仓库与代码结构
 
-### 3.1 取代码 / 更新
+### 3.1 取代码 / 更新（2026-11-06 起有两种方式）
 
 ```sh
-git clone https://github.com/jmwangde3/xray-hy.git /opt/xray-hy   # 需要 gh 已登录或 PAT
-cd /opt/xray-hy && ./xhy install
+# 方式 A：一条命令（推荐，不需要 git；Alpine 无 curl 时用 wget -qO- ... | sh）
+bash <(curl -fsSL https://github.com/jmwangde3/xray-hy/releases/latest/download/install.sh)
+
+# 方式 B：克隆工作树（想改代码时用）
+git clone https://github.com/jmwangde3/xray-hy.git /opt/xray-hy
+cd /opt/xray-hy && bash xhy install     # Alpine 先 apk add --no-cache git bash
 ```
 
-**没有 git / 没有 bash 的机器**（Alpine 官方镜像默认两者都没有，且仓库是私有的）：
-从 Windows 打包 `scp` 上去，用 `bootstrap.sh` 装依赖并摊到 `/opt/xray-hy`，全程不碰 git ——
-具体命令见 `README` §2.1。`install` 本身**不依赖 git**，git 只被 `xhy update script` 使用。
-
-脚本**以本地 git 工作树安装**，运行时绝不下载任何脚本；`xhy update script` 走 `git pull --ff-only`，拉完对所有 `.sh` 跑 `bash -n`，任一失败整组回滚到旧 commit。
+两者差异、装在哪、`xhy` 指向哪，见 README §2 的对照表，**不要混用**。
+`xhy update script`：单文件方式下载新构建 → `bash -n` → 比对构建号 → 原子替换；克隆方式走 `git pull --ff-only`。
 
 ### 3.2 模块地图
 
-| 文件 | 行数 | 职责 | 改动时注意 |
-|---|---|---|---|
-| `xhy` | ~390 | 入口、CLI 解析、交互菜单、`cmd_install` | 首段是 POSIX sh，负责在 Alpine 上 `exec bash`，**不要改成纯 bash** |
-| `lib/common.sh` | ~250 | 日志、状态、原子写、全局 flock、`fetch`、SHA-256 | `atomic_write` 末尾必须 `return 0`，否则清理失败会误判写入失败 |
-| `lib/platform.sh` | ~142 | 发行版/init/架构/SSH 端口探测、依赖安装 | `detect_ssh_port` 只读，绝不改 `sshd_config` |
-| `lib/core.sh` | ~202 | 版本通道、下载+强制校验、x25519、cloudflared、hy2 证书 | `.dgst` 拿不到必须中止，不能降级为警告 |
-| `lib/service.sh` | ~250 | systemd / OpenRC 服务、`GOMEMLIMIT`、logrotate | 所有 `svc_*` 必须 `9>&-`，否则 OpenRC 子进程继承锁 fd 会死锁 |
-| `lib/hardening.sh` | ~270 | BBR、双栈 iptables 链、SSH 防爆破 | 只维护自有链 `XHY-IN`，绝不 flush INPUT |
-| `lib/target.sh` | ~166 | 伪装站地区库 + 在线校验 | `pick_target` 的诊断输出必须走 stderr |
-| `lib/nodes.sh` | ~540 | 5 种 inbound 渲染、节点注册表、快照/回滚 | 最容易出问题的一块，见 §3.4 |
-| `lib/links.sh` | ~85 | `vless://` / `hysteria2://` 链接、二维码 | — |
-| `lib/update.sh` | ~237 | 更新、`self_check`、`preflight_check` | — |
+| 文件 | 职责 | 改动时注意 |
+|---|---|---|
+| `entry/prelude.sh` | POSIX sh 开头段（无 bash 先装 + re-exec）+ bash 环境变量/构建号 | **首段必须是 POSIX sh**（dash/ash 要能跑），`install.sh` 由它拼接生成，**不要直接改 install.sh** |
+| `entry/main.sh` | 用法、`cmd_*`、`install_self`、`main` 分发 | `install_self` 区分「本地文件运行」与「管道运行」 |
+| `lib/common.sh` | 日志、状态、原子写、全局 flock、`fetch`、SHA-256 | `atomic_write` 末尾必须 `return 0`，否则清理失败会误判写入失败 |
+| `lib/platform.sh` | 发行版/init/架构/SSH 端口探测、依赖安装 | `detect_ssh_port` 只读，绝不改 `sshd_config` |
+| `lib/core.sh` | 版本通道、下载+强制校验、x25519、cloudflared、hy2 证书 | `.dgst` 拿不到必须中止，不能降级为警告 |
+| `lib/service.sh` | systemd / OpenRC 服务、`GOMEMLIMIT`、logrotate | 所有 `svc_*` 必须 `9>&-`，否则 OpenRC 子进程继承锁 fd 会死锁 |
+| `lib/hardening.sh` | BBR、双栈 iptables 链、SSH 防爆破 | 只维护自有链 `XHY-IN`，绝不 flush INPUT |
+| `lib/target.sh` | 伪装站地区库 + 在线校验；`targets_tsv` 占位被 build 内嵌数据覆盖 | `pick_target` 的诊断输出必须走 stderr |
+| `lib/nodes.sh` | 5 种 inbound 渲染、节点注册表、快照/回滚 | 最容易出问题的一块，见 §3.4 |
+| `lib/links.sh` | `vless://` / `hysteria2://` 链接、二维码 | — |
+| `lib/update.sh` | 更新、`self_check`、`preflight_check` | `update_script` 已改为下载-校验-替换，无 git 依赖 |
+| `build.sh` | 拼接器：prelude + lib + 内嵌 targets + main → `install.sh` | 构建号 = commit + 源码哈希；`--check` 验证产物与源码一致 |
+| `xhy` | 开发入口（加载 lib/），供克隆方式使用 | 用户侧入口是 install.sh / /usr/local/bin/xhy |
 
 ### 3.3 运行时数据
 
@@ -157,7 +158,7 @@ Xray 上游有两个互相冲突的边界：
 # 0. 维护窗口 + 带外控制台（VNC）就绪
 # 1. 装到非 443 端口先验证（避免冲突）
 git clone https://github.com/jmwangde3/xray-hy.git /opt/xray-hy
-cd /opt/xray-hy && ./xhy preflight
+cd /opt/xray-hy && bash xhy preflight
 # 2. 停旧服务并禁用其自启
 rc-service xray stop && rc-update del xray
 rc-service iptables-xray stop && rc-update del iptables-xray
@@ -175,10 +176,11 @@ cp -a /usr/local/etc/xray /root/xray-legacy-$(date +%F)
 ## 7. 常用命令速查
 
 ```sh
-sh bootstrap.sh --check       # 纯 busybox 体检：DNS / 软件源 / GitHub / 卡住的进程
-sh bootstrap.sh <dir|tar.gz>  # 装依赖 -> 摊到 /opt/xray-hy -> preflight
+# 方式 A（推荐，无 git）：Alpine 无 curl 就把 curl 换成 wget -qO- ... | sh
+bash <(curl -fsSL https://github.com/jmwangde3/xray-hy/releases/latest/download/install.sh)
+
 xhy preflight                 # 安装前只读预检（内核修复线/MPTCP/端口/依赖/GitHub 可达）
-xhy install                   # 依赖 + Xray + 服务 + BBR + 防火墙（分 6 步打印 banner）
+xhy install                   # 依赖 + 脚本本体 + Xray + 服务 + BBR + 防火墙（分 7 步打印 banner）
 xhy check                     # 环境自检（版本两条边界、MPTCP、IPv6 链、配置语法、服务状态）
 
 xhy add reality --port 443 --host 1.2.3.4
@@ -199,10 +201,11 @@ xhy service [start|stop|restart|status]
 xhy uninstall
 ```
 
-测试：
+测试（仓库内）：
 
 ```sh
-bash test/run-all.sh          # 67 项断言（21 + 18 + 28），无需 root / 网络 / 真实 Xray
+./build.sh                    # 生成 install.sh（改动 lib/ 或 entry/ 之后必须重跑）
+bash test/run-all.sh          # bash -n + build --check + 67 项断言，无需 root / 网络
 ```
 
 ---
@@ -259,3 +262,59 @@ bash test/run-all.sh          # 67 项断言（21 + 18 + 28），无需 root / �
 **验证**：`bash -n` 全过（xhy + 8 个 lib + bootstrap），`test/run-all.sh` 67 项断言仍全过（21 + 18 + 28）。
 
 **未解决**：新服务器 IP 没给，无法远程确认它到底卡在哪一步。需要一次现场输出（README §2.2 的一键体检）才能断定是 DNS、软件源还是 GitHub 线路。
+
+## 12. 2026-11-06 15:45 · 发布方式改为单文件 install.sh（取代 §11 的 tar.gz 方案）
+
+用户要求把使用方式简化成一行命令，并且仓库已设为公开。最终形态：
+
+```sh
+# 有 bash + curl 的机器（Debian/Ubuntu/RHEL）
+bash <(curl -fsSL https://github.com/jmwangde3/xray-hy/releases/latest/download/install.sh)
+# 全新 Alpine（无 bash 无 curl）：busybox wget 就够
+wget -qO- https://github.com/jmwangde3/xray-hy/releases/latest/download/install.sh | sh
+```
+
+### 结构改动
+
+| 变化 | 说明 |
+|---|---|
+| 新增 `entry/prelude.sh` | POSIX sh 开头段：无 bash 先装（apk/apt/dnf/yum + timeout + 排查提示）→ 找到脚本本体（本地文件直接 exec；管道喂进来的按 URL 重取）→ `exec bash`。**dash -n 已验证** |
+| 新增 `entry/main.sh` | 原 `xhy` 的命令主体（usage/cmd_*/main）原样搬过来 |
+| `xhy` 改为开发入口 | 30 行：export XHY_DEV/XHY_APP_DIR → source lib/ + entry/main.sh。克隆方式照常 `bash xhy install` |
+| 新增 `build.sh` | 拼接 prelude + lib/*.sh + 内嵌 targets.tsv + main → `install.sh`；构建号 = `<短commit>-<源码哈希前8位>`；`--check` 校验产物与源码一致；写盘前先 `bash -n` |
+| `install.sh` | 仓库根的构建产物，随 release 发布（资产名 `install.sh`），**不手改** |
+| 删除 `bootstrap.sh` | 单文件方式不再需要 tar.gz；§11 的 tar.gz + scp 流程作废 |
+| `lib/common.sh` | 路径块重写：`XHY_APP_DIR`（默认 `/usr/local/lib/xray-hy`）、`XHY_SELF`、`XHY_SCRIPT_DIR`，「已存在就不覆盖」，测试显式给 `XHY_SCRIPT_DIR` 不受影响 |
+| `lib/target.sh` | `targets_ensure`：单文件运行时把内嵌的 targets.tsv 落盘到 `$XHY_SCRIPT_DIR/conf/targets.tsv`，之后可直接编辑 |
+| `lib/update.sh` | `update_script` 重写：下载新构建 → `bash -n` → 比对 `XHY_BUILD` → diff 预览 → 确认 → 原子替换（旧版备份到 backups/）。**无 git 依赖** |
+| `lib/hardening.sh` | 开机防火墙服务 runner 兜底改 `$XHY_SELF` |
+| `entry/main.sh::cmd_install` | 7 步：依赖 → **脚本本体与软链** → 数据目录 → Xray → 服务 → BBR/防火墙 → 渲染启动 |
+| `entry/main.sh::cmd_uninstall` | 额外清 `$XHY_SELF` 与 `$XHY_APP_DIR/conf`；`XHY_DEV=1`（仓库内）不删，防误删工作树 |
+
+### 安装位置（两种方式不同，别混）
+
+- 方式 A：`/usr/local/lib/xray-hy/xhy`（自包含单文件）+ `/usr/local/bin/xhy` 软链
+- 方式 B：`/opt/xray-hy/xhy`（依赖同目录 `lib/`，**目录不能挪/删**）+ `/usr/local/bin/xhy` 软链
+
+### 发布流程（维护者）
+
+```sh
+./build.sh && bash test/run-all.sh
+git add -A && git commit -m "..." && git push
+gh release create v<版本> install.sh --title "..." --notes "..."
+# 之后 releases/latest/download/install.sh 永远指向最新版
+```
+
+### 验证记录（本机 Git Bash）
+
+- `bash install.sh --version` / `--help` ✔
+- `bash <(cat install.sh) --version` ✔（模拟 `bash <(curl ...)`，BASH_SOURCE 是 /dev/fd/63）
+- `dash -n` 对 POSIX 前缀（102 行）✔；`dash install.sh --version` ✔（模拟 Alpine 的 sh → 装 bash → exec）
+- `test/run-all.sh` 全过（含 `build.sh --check` 产物一致性）
+- `bash build.sh` 两次构建构建号一致（`9139ae8-10db063f`）
+
+### 已知边界
+
+- 管道方式（`| sh`）下 stdin 是管道，脚本会 `</dev/tty` 接回终端；无 tty 的自动化环境 `ask`/`confirm` 走默认值（既有约定）。
+- `install_self` 在管道运行时需要**再下载一次**同一 URL（BASH_SOURCE 是管道读不回来），约 115 KB，可接受。
+- 仓库若改名/转移，`entry/prelude.sh` 里的默认 `XHY_INSTALL_URL` 要同步改（也可用环境变量 `XHY_INSTALL_URL` 覆盖）。

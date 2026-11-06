@@ -3,7 +3,22 @@
 
 TARGETS_FILE="${XHY_SCRIPT_DIR:-$XHY_HOME}/conf/targets.tsv"
 
+# 单文件发布没有 conf/ 目录：数据内嵌在脚本里，首次用到时落盘。
+# 落盘的好处是管理员仍可直接编辑该文件增删候选，行为与仓库内一致。
+targets_ensure() {
+    [[ -s "$TARGETS_FILE" ]] && return 0
+    mkdir -p "$(dirname "$TARGETS_FILE")" 2>/dev/null || return 1
+    targets_tsv >"$TARGETS_FILE" || return 1
+    chmod 0644 "$TARGETS_FILE" 2>/dev/null || true
+}
+
+# 仓库内运行时的占位实现；build.sh 会用 conf/targets.tsv 的内嵌副本覆盖它。
+targets_tsv() {
+    die "缺少伪装站数据文件 $TARGETS_FILE（仓库内请保留 conf/targets.tsv）"
+}
+
 target_rows() {
+    targets_ensure || die "找不到伪装站数据文件: $TARGETS_FILE"
     [[ -r "$TARGETS_FILE" ]] || die "找不到伪装站数据文件: $TARGETS_FILE"
     # Strip any UTF-8 BOM *before* filtering: a BOM keeps the leading "#" from
     # matching the comment filter, and the header line would then be listed as a

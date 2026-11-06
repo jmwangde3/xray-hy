@@ -1,49 +1,50 @@
 #!/usr/bin/env bash
 # xray-hy / script, core, geodata and configuration updates.
 
-# The project is installed as a real git worktree. Updating means a fast-forward
-# pull of *local* files that you can diff first -- never `curl | bash` at runtime.
+# 单文件发布后，更新脚本 = 下载新的 install.sh -> 语法检查 -> 原子替换自己。
+# 不依赖 git，也不会把下载到的内容直接喂给 shell：先落到临时文件、跑
+# `bash -n`、比对构建号，确认后整文件替换。配置与节点数据完全不动。
 update_script() {
-    local wd="$XHY_SCRIPT_DIR"
-    if [[ ! -d "$wd/.git" ]]; then
-        warn "$wd 不是 git 工作树，跳过脚本自更新（请手动替换文件或重新 clone）。"
-        return 1
-    fi
     need_root
-    info "当前版本: $XHY_VERSION  commit: $(git -C "$wd" rev-parse --short HEAD 2>/dev/null || echo '?')"
-    if ! git -C "$wd" remote | grep -q .; then
-        warn "未配置 git remote，无法拉取更新。"
+    info "当前版本: $XHY_VERSION (build $XHY_BUILD)"
+    info "检查更新: $XHY_INSTALL_URL"
+    local tmp newbuild
+    tmp="$(mktemp "${TMPDIR:-/tmp}/xhy-update.XXXXXX")" || die "无法创建临时文件"
+    if ! fetch "$XHY_INSTALL_URL" "$tmp"; then
+        rm -f "$tmp"
+        warn "拉取失败，保持当前版本 $XHY_VERSION"
         return 1
     fi
-    git -C "$wd" fetch --quiet || { warn "fetch 失败，检查网络或 remote 配置"; return 1; }
-    local behind
-    behind="$(git -C "$wd" rev-list --count HEAD..@{u} 2>/dev/null || echo 0)"
-    if [[ "$behind" == "0" ]]; then
-        ok "脚本已是最新"
+    if ! bash -n "$tmp" >/dev/null 2>&1; then
+        rm -f "$tmp"
+        die "下载的脚本未通过 bash -n 语法检查，已放弃（本地脚本未改动）"
+    fi
+    newbuild="$(sed -n 's/^XHY_BUILD="\(.*\)"$/\1/p' "$tmp" | head -1)"
+    if [[ -z "$newbuild" ]]; then
+        rm -f "$tmp"
+        die "下载的脚本里找不到构建号，可能不是本项目的 install.sh，已放弃"
+    fi
+    if [[ "$newbuild" == "$XHY_BUILD" ]]; then
+        rm -f "$tmp"
+        ok "脚本已是最新 ($XHY_VERSION build $newbuild)"
         return 0
     fi
-    info "远端有 $behind 个新提交："
-    git -C "$wd" --no-pager log --oneline HEAD..@{u} | head -20
-    git -C "$wd" --no-pager diff --stat HEAD..@{u}
-    confirm "应用这些更新（仅快进，不改动 /etc/xray-hy 配置）？" "y" || { info "已取消"; return 0; }
-    local old dirty f bad=0
-    old="$(git -C "$wd" rev-parse HEAD)"
-    dirty="$(git -C "$wd" status --porcelain)"
-    git -C "$wd" pull --ff-only --quiet || die "pull 失败（本地有改动？请先 git -C $wd status 查看）"
-    # Never leave a syntactically broken entrypoint behind: syntax-check every
-    # pulled shell file and roll back the whole update if any of them fails.
-    for f in "$wd"/xhy "$wd"/lib/*.sh; do
-        bash -n "$f" >/dev/null 2>&1 || { warn "语法检查失败: $f"; bad=1; }
-    done
-    if (( bad )); then
-        if [[ -z "$dirty" ]]; then
-            git -C "$wd" reset --hard "$old" >/dev/null 2>&1 || true
-            die "更新后的脚本未通过 bash -n，已自动回滚到 $old"
-        fi
-        die "更新后的脚本未通过 bash -n；工作区有本地改动，请手动执行 git -C $wd reset --hard $old"
+    info "发现新构建: $newbuild（当前 $XHY_BUILD）"
+    if have_cmd diff; then
+        diff -u "$XHY_SELF" "$tmp" | head -40 || true
     fi
-    create_symlink
-    ok "脚本已更新（全部 shell 文件通过语法检查），配置与节点数据保持不变"
+    if ! confirm "替换 $XHY_SELF 为这个构建？配置与节点数据不受影响。" "y"; then
+        rm -f "$tmp"
+        info "已取消"
+        return 0
+    fi
+    backup_file "$XHY_SELF"
+    if ! install -m 0755 "$tmp" "$XHY_SELF.new" || ! mv -f "$XHY_SELF.new" "$XHY_SELF"; then
+        rm -f "$tmp" "$XHY_SELF.new"
+        die "替换失败，旧版本仍在 $XHY_SELF"
+    fi
+    rm -f "$tmp"
+    ok "已更新到 build $newbuild；当前进程仍是旧版，下次执行 xhy 生效"
 }
 
 update_core() {
@@ -114,8 +115,8 @@ update_all() {
 self_check() {
     printf '\n========== xray-hy 环境检查 ==========\n'
     platform_summary
-    printf '脚本版本 : %s\n' "$XHY_VERSION"
-    printf '脚本目录 : %s\n' "$XHY_SCRIPT_DIR"
+    printf '脚本版本 : %s (build %s)\n' "$XHY_VERSION" "$XHY_BUILD"
+    printf '脚本路径 : %s\n' "$XHY_SELF"
     printf '配置目录 : %s\n' "$XHY_ETC"
     printf '%s\n' "--------------------------------------"
     core_status
