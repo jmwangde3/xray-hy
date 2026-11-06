@@ -33,14 +33,27 @@ update_script() {
 
 update_core() {
     need_root
-    local ver
+    init_dirs
+    local ver rollback=""
     ver="$(xray_resolve_version)"
     info "版本通道 $(xray_channel) -> 目标 $ver"
-    xray_install "$ver"
-    if [[ -s "$XHY_ETC/config.json" ]]; then
-        xray_config_test || die "新版本与现有配置不兼容，请检查 $XHY_ETC/config.json 后重试"
-        config_reload
+    # Keep the working binary so an incompatible new core can be rolled back
+    # automatically (idea borrowed from easyxray's version switch).
+    if [[ -x "$XRAY_BIN" ]]; then
+        rollback="$(mktemp "$XHY_BACKUP/xray-rollback.XXXXXX" 2>/dev/null || true)"
+        if [[ -n "$rollback" ]] && cp -a "$XRAY_BIN" "$rollback"; then :; else rollback=""; fi
     fi
+    xray_install "$ver"
+    if [[ -s "$XHY_ETC/config.json" ]] && ! xray_config_test >/dev/null 2>&1; then
+        if [[ -n "$rollback" ]]; then
+            cp -a "$rollback" "$XRAY_BIN"
+            err "新版本 $ver 无法加载现有配置，已自动回滚到原二进制。"
+        fi
+        die "请检查 $XHY_ETC/config.json，或改用兼容版本"
+    fi
+    if [[ -s "$XHY_ETC/config.json" ]]; then config_reload; fi
+    [[ -n "$rollback" ]] && rm -f "$rollback"
+    ok "Xray 更新完成: $("$XRAY_BIN" version 2>/dev/null | head -1)"
 }
 
 update_geodata() {
@@ -50,7 +63,13 @@ update_geodata() {
     for f in geoip.dat geosite.dat; do
         info "更新 $f"
         if fetch "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/$f" "$XRAY_ASSET/$f.new"; then
-            [[ -s "$XRAY_ASSET/$f.new" ]] || { warn "$f 下载为空，保留旧文件"; rm -f "$XRAY_ASSET/$f.new"; continue; }
+            local sz
+            sz="$(stat -c%s "$XRAY_ASSET/$f.new" 2>/dev/null || echo 0)"
+            if (( sz < 102400 )); then
+                warn "$f 下载内容异常 (${sz} bytes)，保留旧文件"
+                rm -f "$XRAY_ASSET/$f.new"
+                continue
+            fi
             backup_file "$XRAY_ASSET/$f"
             mv "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f"
             chmod 0644 "$XRAY_ASSET/$f"
@@ -85,13 +104,30 @@ self_check() {
     printf '配置目录 : %s\n' "$XHY_ETC"
     printf '%s\n' "--------------------------------------"
     core_status
+    local inst mptcp v6rules
+    inst="$(xray_installed_version)"
+    if [[ "$inst" == [0-9]* ]] && version_lt "v$inst" "$XHY_MIN_SAFE_VERSION"; then
+        warn "Xray $inst 低于安全版本 $XHY_MIN_SAFE_VERSION (MPTCP / CVE-2026-98432)，请执行 xhy core update"
+    fi
+    mptcp="$(sysctl -n net.mptcp.enabled 2>/dev/null || echo '内核未暴露')"
+    printf 'MPTCP    : %s (应为 0)\n' "$mptcp"
+    [[ "$mptcp" == "1" ]] && warn "MPTCP 已启用，建议 xhy bbr on 关闭它"
     printf '%s\n' "--------------------------------------"
     bbr_status
     printf '%s\n' "--------------------------------------"
     firewall_status | head -4
+    if have_cmd ip6tables; then
+        v6rules="$(ip6tables -S 2>/dev/null | grep -c "$FW_CHAIN" || true)"
+        printf 'IPv6 链规则: %s 条\n' "${v6rules:-0}"
+        [[ "${v6rules:-0}" == "0" ]] && warn "IPv6 未受保护，SSH 可能绕过防爆破"
+    else
+        warn "未安装 ip6tables，IPv6 未受保护"
+    fi
     printf '%s\n' "--------------------------------------"
     target_show
     printf '节点数量 : %s\n' "$(node_count)"
+    printf '配置快照 : %s 份 (xhy snapshots / xhy rollback)\n' \
+        "$(ls -1 "$XHY_SNAPSHOTS"/config.*.json 2>/dev/null | wc -l)"
     printf '%s\n' "--------------------------------------"
     if [[ -s "$XHY_ETC/config.json" ]] && [[ -x "$XRAY_BIN" ]]; then
         if xray_config_test >/dev/null 2>&1; then ok "配置语法: 通过"; else err "配置语法: 失败"; fi

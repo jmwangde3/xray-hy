@@ -53,9 +53,11 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
   配置
     config                      路由/DNS/日志开关菜单（也可直接 set）
     config set KEY VALUE        直接改设置，见下方 KEY
+    snapshots                   列出最近 5 份配置快照
+    rollback [快照路径]         回滚到最近一份（或指定）配置
     target                      伪装站选择 / 校验菜单
-    firewall [apply|strict|off|status]
-    bbr [on|status]
+    firewall [apply|strict|off|status]   双栈 IPv4 + IPv6
+    bbr [on|status]             含 MPTCP 关闭 (CVE-2026-98432)
 
   版本与更新
     core [status|channel pinned|channel latest|channel vX.Y.Z|update]
@@ -331,6 +333,8 @@ main() {
         del)        node_del "${1:?需要模式}" "${2:?需要端口}" ;;
         config)     if [[ "${1:-}" == "set" ]]; then cmd_config_set "${2:?需要 KEY}" "${3:?需要 VALUE}";
                     else cmd_config_menu; fi ;;
+        snapshots)  list_snapshots ;;
+        rollback)   rollback_config "${1:-}" ;;
         target)     target_menu ;;
         firewall)   case "${1:-status}" in
                         apply)  firewall_apply safe ;;

@@ -73,8 +73,18 @@ outbounds_json() {
 }
 
 rebuild_config() {
-    local joined="" sep="" f
+    local joined="" sep="" f snap n=0
     init_dirs
+    # Snapshot the last known-good config; keep the 5 most recent. This is the
+    # safety net for `xhy rollback` (inspired by easyxray's apply/rollback).
+    if [[ -s "$XHY_ETC/config.json" ]]; then
+        snap="$XHY_SNAPSHOTS/config.$(date +%Y%m%d%H%M%S).json"
+        cp -a "$XHY_ETC/config.json" "$snap" 2>/dev/null || true
+        while IFS= read -r f; do
+            n=$((n + 1))
+            if (( n > 5 )); then rm -f "$f"; fi
+        done < <(ls -1t "$XHY_SNAPSHOTS"/config.*.json 2>/dev/null)
+    fi
     for f in "$XHY_CONFDIR"/*.json; do
         [[ -s "$f" ]] || continue
         joined+="$sep$(cat "$f")"
@@ -396,4 +406,28 @@ node_rebuild_all() {
     rebuild_config
     xray_config_test || { err "重建后的配置校验失败"; return 1; }
     config_reload || warn "配置已写入，但服务未能重启（尚未 install 或服务未启用？）"
+}
+
+list_snapshots() {
+    local f
+    if ! ls "$XHY_SNAPSHOTS"/config.*.json >/dev/null 2>&1; then
+        warn "暂无快照"; return 0
+    fi
+    for f in $(ls -1t "$XHY_SNAPSHOTS"/config.*.json 2>/dev/null); do
+        printf '%s  (%s bytes)\n' "$f" "$(stat -c%s "$f" 2>/dev/null || echo '?')"
+    done
+}
+
+rollback_config() {
+    local target="${1:-}"
+    need_root
+    if [[ -z "$target" ]]; then
+        target="$(ls -1t "$XHY_SNAPSHOTS"/config.*.json 2>/dev/null | head -1)"
+    fi
+    [[ -s "$target" ]] || die "没有可用的配置快照"
+    cp -a "$XHY_ETC/config.json" "$XHY_SNAPSHOTS/config.pre-rollback.$(date +%s).json" 2>/dev/null || true
+    cp -a "$target" "$XHY_ETC/config.json"
+    xray_config_test || die "快照配置校验失败，未重载服务"
+    config_reload
+    ok "已回滚到 $target"
 }

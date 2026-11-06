@@ -8,13 +8,19 @@ XHY_CONFDIR="$XHY_ETC/confs"
 XHY_NODES="$XHY_ETC/nodes"
 XHY_STATE="$XHY_ETC/state.env"
 XHY_BACKUP="$XHY_ETC/backups"
+XHY_SNAPSHOTS="$XHY_ETC/snapshots"
 XHY_LOGDIR="${XHY_LOGDIR:-/var/log/xray-hy}"
 
 XRAY_BIN="${XRAY_BIN:-/usr/local/bin/xray}"
 XRAY_ASSET="${XRAY_ASSET:-/usr/local/share/xray}"
 CF_BIN="${CF_BIN:-/usr/local/bin/cloudflared}"
 
-XHY_PINNED_VERSION="v26.3.27"
+# v26.10.31 is the first Xray release that disables MPTCP by default.
+# XTLS/Xray-core#7291 / CVE-2026-98432 (CVSS 9.8): Go 1.24+ enables MPTCP
+# on listeners, which makes an exposed Go proxy trivially root-able remotely.
+# Older pinned versions remain possible but always produce a loud warning.
+XHY_PINNED_VERSION="v26.10.31"
+XHY_MIN_SAFE_VERSION="v26.10.31"
 XHY_RELEASE_DL="https://github.com/XTLS/Xray-core/releases/download"
 XHY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases"
 XHY_CF_DL="https://github.com/cloudflare/cloudflared/releases/latest/download"
@@ -58,9 +64,9 @@ confirm() {
 }
 
 init_dirs() {
-    mkdir -p "$XHY_ETC" "$XHY_CONFDIR" "$XHY_LOGDIR" "$XHY_BACKUP" "$XHY_NODES"
+    mkdir -p "$XHY_ETC" "$XHY_CONFDIR" "$XHY_LOGDIR" "$XHY_BACKUP" "$XHY_NODES" "$XHY_SNAPSHOTS"
     chmod 0755 "$XHY_ETC" "$XHY_CONFDIR" "$XHY_LOGDIR" "$XHY_BACKUP" 2>/dev/null || true
-    chmod 0700 "$XHY_NODES" 2>/dev/null || true
+    chmod 0700 "$XHY_NODES" "$XHY_SNAPSHOTS" 2>/dev/null || true
     [[ -f "$XHY_STATE" ]] || : >"$XHY_STATE"
     chmod 0600 "$XHY_STATE" 2>/dev/null || true
 }

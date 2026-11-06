@@ -3,11 +3,24 @@
 
 xray_channel() { state_get XRAY_CHANNEL "pinned"; }
 
+# Compare vX.Y.Z without relying on `sort -V` (absent in busybox).
+version_num() {
+    local v="${1#v}"; v="${v%%-*}"
+    local IFS='.' p=()
+    read -r -a p <<<"$v"
+    printf '%d%03d%03d\n' "${p[0]:-0}" "${p[1]:-0}" "${p[2]:-0}"
+}
+version_lt() { (( $(version_num "$1") < $(version_num "$2") )); }
+
 xray_set_channel() {
     case "$1" in
         pinned|latest|v[0-9]*) state_set XRAY_CHANNEL "$1" ;;
         *) die "版本通道只能是 pinned / latest / vX.Y.Z，收到: $1" ;;
     esac
+    if [[ "$1" == v* ]] && version_lt "$1" "$XHY_MIN_SAFE_VERSION"; then
+        warn "警告: $1 低于安全版本 $XHY_MIN_SAFE_VERSION。"
+        warn "该版本受 XTLS#7291 / CVE-2026-98432 (MPTCP, CVSS 9.8) 影响，仅建议在有其它缓解措施时使用。"
+    fi
 }
 
 xray_resolve_version() {
@@ -36,7 +49,14 @@ xray_installed_version() {
 # Download a pinned-or-latest Xray release. The .dgst checksum is MANDATORY:
 # unlike most one-key scripts, a missing digest aborts instead of continuing.
 xray_install() {
-    local ver="$1" asset tmp unpack f
+    local ver="$1" asset tmp unpack f oldver
+    # Keep the currently working binary before replacing it. A failed download
+    # never reaches this point; a failed post-install check can still roll back.
+    if [[ -x "$XRAY_BIN" ]]; then
+        oldver="$(xray_installed_version)"
+        install -d -m 0700 "$XHY_BACKUP"
+        cp -a "$XRAY_BIN" "$XHY_BACKUP/xray-${oldver//[^0-9A-Za-z._-]/_}-$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
+    fi
     asset="Xray-linux-${XHY_ARCH}.zip"
     tmp="$(mktemp -d)" || die "无法创建临时目录"
     unpack="$tmp/unpack"
