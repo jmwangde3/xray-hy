@@ -55,7 +55,7 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
     add <mode> [--port N] [选项] 添加节点
     list                        列出所有节点
     link [--all|--uri|--qr]     导出 vless:// 链接
-    del <mode> <port>           删除节点
+    del [mode] [port]           删除节点；省略参数时列出编号选择
     menu                        交互式菜单
 
     mode: direct | tunnel | reality | xhttp | hy2
@@ -63,6 +63,16 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
               --masq --up --down   (hy2 专用)
     默认端口: direct 8080 / tunnel 10086 / reality 443 / xhttp 8081 / hy2 8443(UDP)
     hy2 用 Xray 内置 Hysteria2 入站(v26.3.27+)，自签证书 + pinSHA256 链接
+
+  伪装站 / REALITY 名词（xhy target 里输入 6 可随时查看）
+    target(dest)  服务端主动去连的目的地址（IP:端口 或 域名:端口），未认证流量
+                  原样转发到这里，所以必须是真实、稳定、长期存在的 HTTPS 站点。
+    SNI           客户端握手时声明的域名；serverNames 是 Xray 里的 SNI 白名单，
+                  必须被 target 的证书覆盖。
+    目标站挂在 CDN 后面时，dest 要写「源站 IP」、SNI 仍写域名，例如：
+        xhy add reality --port 443 --target 1.2.3.4:443 --sni www.example.com
+    交互菜单 8) 伪装站 → 3) 手动指定 支持同一写法（1.2.3.4:443,sni=www.example.com），
+    校验会用 --resolve 打该 IP，测证书是否真的覆盖这个域名。
 
   配置
     config                      路由/DNS/日志开关菜单（也可直接 set）
@@ -182,14 +192,24 @@ EOF
     case "$mode" in
         reality)
             if confirm "手动指定 REALITY target / SNI？" "n"; then
-                # 一条输入：host[:port][,sni=xxx]；不写 sni= 时 SNI 与 target 同名，
-                # 绝大多数情况两者就是同一个域，没必要问两遍。
+                # 一条输入：host[:port][,sni=xxx]；不写 sni= 时 SNI 与 target 同名。
+                # 目标站在 CDN 后面时用「源站 IP + 域名 SNI」：1.2.3.4:443,sni=www.example.com
                 local t_in ts
-                t_in="$(ask 'target (域名[:443]，SNI 不同才加 ,sni=其他域名)')"
+                cat <<'EOF'
+  输入示例：
+    www.example.com                    域名，dest 与 SNI 相同
+    1.2.3.4:443,sni=www.example.com   源站 IP + 域名 SNI（站点在 CDN 后时用这个）
+    www.example.com:8443              非 443 端口
+EOF
+                t_in="$(ask 'target')"
                 [[ -n "$t_in" ]] || return 0
                 ts="${t_in#*,sni=}"; [[ "$ts" == "$t_in" ]] && ts=""
                 t_in="${t_in%%,*}"
                 [[ "$t_in" == *:* ]] || t_in="${t_in}:443"
+                if is_ip_literal "${t_in%%:*}" && [[ -z "$ts" ]]; then
+                    err "target 是 IP 时必须加 ,sni=域名（dest 用 IP、SNI 用域名）"
+                    return 1
+                fi
                 opts+=(--target "$t_in" --sni "${ts:-${t_in%%:*}}")
             else
                 info "按地区自动选择伪装站并做 TLS 1.3 / H2 校验..."
@@ -349,9 +369,11 @@ EOF
             1) cmd_add_interactive ;;
             2) node_list; ask '按回车继续' '' ;;
             3) link_all; ask '按回车继续' '' ;;
-            4) local m p
-               m="$(ask '模式' 'reality')"; p="$(ask '端口' '443')"
-               [[ -f "$(node_file "$m" "$p")" ]] && node_del "$m" "$p" || warn "节点不存在" ;;
+            4) if node_pick; then
+                   if confirm "确认删除节点 ${MODE}_${PORT}？恢复需 xhy rollback" "n"; then
+                       node_del "$MODE" "$PORT"
+                   fi
+               fi ;;
             5) cmd_install ;;
             6) self_check ;;
             7) cmd_config_menu ;;
@@ -417,7 +439,16 @@ main() {
         export)     cmd_export "$@" ;;
         backup)     backup_create "$@" ;;
         restore)    backup_restore "${1:?用法: xhy restore <备份文件>}" ;;
-        del)        node_del "${1:?需要模式}" "${2:?需要端口}" ;;
+        del)        if [[ -z "${1:-}" ]]; then
+                        # 不带参数：列出节点编号让人选，避免盲猜 mode/port
+                        if node_pick; then
+                            if confirm "确认删除节点 ${MODE}_${PORT}？恢复需 xhy rollback" "n"; then
+                                node_del "$MODE" "$PORT"
+                            fi
+                        fi
+                    else
+                        node_del "${1:?需要模式}" "${2:?需要端口}"
+                    fi ;;
         config)     if [[ "${1:-}" == "set" ]]; then cmd_config_set "${2:?需要 KEY}" "${3:?需要 VALUE}";
                     else cmd_config_menu; fi ;;
         snapshots)  list_snapshots ;;

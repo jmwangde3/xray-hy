@@ -30,39 +30,101 @@ target_list_regions() {
     target_rows | cut -d'|' -f1 | sort -u | tr '\n' ' '
 }
 
+# 是不是 IPv4 字面量。用于区分「dest 写源站 IP」和「dest 写域名」。
+# 只认 v4：v6 目标在 REALITY 里罕见，且 "2001:db8::1:443" 的端口切分会误判，
+# 与其悄悄给出错误结果，不如明确不支持。
+is_ip_literal() {
+    [[ "$1" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]
+}
+
+# 概念说明：target/dest、SNI、serverNames 三个词最容易被混用。
+target_help() {
+    cat <<'EOF'
+  ---- REALITY 名词（这几个词经常被混着说）----
+  target / dest  服务端主动去连的「目的地址」，形如 IP:端口 或 域名:端口。
+                 REALITY 把未通过认证的探测流量原样转发过去，所以它必须是一个
+                 真实存在、长期稳定的 HTTPS 站点 —— 这就是「伪装站」。
+  SNI            客户端 TLS 握手时明文声明的域名（ClientHello.server_name）。
+                 服务端按 SNI 选证书；REALITY 也拿它判断「像不像正常访问」。
+  serverNames    Xray 配置字段，= 允许的 SNI 白名单，一般写一个域名。
+                 它必须被 target 的证书覆盖，否则回落握手证书对不上，一眼假。
+
+  ---- 为什么有时要「IP 和域名分开填」----
+  站点挂 CDN 时，域名解析到的是 CDN 边缘 IP。此时 dest 若也写域名，REALITY
+  就是在替 CDN 做转发，特征不像源站。正确做法：dest 写源站 IP、SNI 仍写域名，
+  握手特征与真实站点一致。例：
+      target=47.88.102.65:443   SNI=www.easeus.com
+  校验会带 --resolve 打这个 IP，验证证书确实覆盖该域名、且没有 CDN 头。
+EOF
+}
+
 # Verify a candidate really speaks TLS 1.3 + HTTP/2, does not redirect and is
 # not sitting behind a CDN. Xray itself warns that a CDN-fronted target turns
 # the node into an open port forwarder.
+#
+# $1 = target（IP 或域名，可带 :port），$2 = SNI（可省，省则等于 target 的域名部分）。
+# target 是 IP 时必须给 SNI：校验会用 --resolve 把 SNI 域名钉到该 IP 上，
+# 测的就是「真实回落到这台源站」的效果，而不是公共 DNS 解析出的 CDN 边缘。
 target_validate() {
-    local host="$1" tls_out="" hdr="" rc=0
+    local host="$1" sni="${2:-}" tls_out="" hdr="" rc=0 probe="" use_openssl=0
     [[ -n "$host" ]] || return 1
     host="${host%%:*}"
 
-    if [[ -x "$XRAY_BIN" ]] && XRAY_LOCATION_ASSET="$XRAY_ASSET" \
-            "$XRAY_BIN" tls ping "${host}:443" >/tmp/xhy-tlsping.$$ 2>&1; then
-        tls_out="$(cat /tmp/xhy-tlsping.$$)"
+    if is_ip_literal "$host"; then
+        if [[ -z "$sni" ]]; then
+            warn "  $host : target 是 IP，必须同时指定 SNI 域名（否则回落到该 IP 时证书对不上）"
+            return 1
+        fi
+        probe="$sni"; use_openssl=1
+    else
+        probe="${sni:-$host}"
+        if [[ "$probe" != "$host" ]]; then use_openssl=1; fi
+    fi
+
+    if [[ -x "$XRAY_BIN" ]] && (( use_openssl == 0 )); then
+        if XRAY_LOCATION_ASSET="$XRAY_ASSET" \
+                "$XRAY_BIN" tls ping "${host}:443" >/tmp/xhy-tlsping.$$ 2>&1; then
+            tls_out="$(cat /tmp/xhy-tlsping.$$)"
+        fi
     else
         tls_out="$(printf 'Q' | openssl s_client -connect "${host}:443" \
-            -servername "$host" -tls1_3 2>/dev/null | grep -iE 'Protocol|Cipher' | head -5)"
+            -servername "$probe" -tls1_3 2>/dev/null \
+            | grep -iE 'Protocol|Cipher' | head -5 || true)"
     fi
     rm -f "/tmp/xhy-tlsping.$$"
 
     if [[ -n "$tls_out" ]] && ! grep -qiE 'TLS ?v?1\.3|TLS_AES|TLS_CHACHA' <<<"$tls_out"; then
-        warn "  $host : 未确认 TLS 1.3"; rc=1
+        warn "  $probe : 未确认 TLS 1.3"; rc=1
     fi
 
-    hdr="$(curl -sS -I --http2 -m 12 "https://${host}/" 2>/dev/null | tr -d '\r' || true)"
-    if [[ -z "$hdr" ]]; then
-        warn "  $host : 无法建立 HTTPS 连接"; return 1
+    if (( use_openssl == 1 )) && is_ip_literal "$host"; then
+        hdr="$(curl -sS -I --http2 -m 12 --resolve "${probe}:443:${host}" \
+            "https://${probe}/" 2>/dev/null | tr -d '\r' || true)"
+    else
+        hdr="$(curl -sS -I --http2 -m 12 "https://${probe}/" 2>/dev/null | tr -d '\r' || true)"
     fi
-    grep -qiE '^HTTP/2( |$)' <<<"$hdr" || { warn "  $host : 不支持 HTTP/2"; rc=1; }
+    if [[ -z "$hdr" ]]; then
+        if is_ip_literal "$host"; then
+            warn "  ${probe} @ ${host} : 无法建立 HTTPS 连接（该 IP 的证书不覆盖此 SNI，或源站不服务该域名）"
+        else
+            warn "  ${probe} : 无法建立 HTTPS 连接"
+        fi
+        return 1
+    fi
+    grep -qiE '^HTTP/2( |$)' <<<"$hdr" || { warn "  ${probe} : 不支持 HTTP/2"; rc=1; }
     if grep -qiE '^location:' <<<"$hdr"; then
-        warn "  $host : 会重定向，不适合作为 target"; rc=1
+        warn "  ${probe} : 会重定向，不适合作为 target"; rc=1
     fi
     if grep -qiE '^(cf-ray|cf-cache-status|x-cache|via):|^server:[[:space:]]*cloudflare' <<<"$hdr"; then
-        warn "  $host : 位于 CDN 之后，不推荐作为 REALITY target"; rc=1
+        warn "  ${probe} : 位于 CDN 之后，不推荐作为 REALITY target"; rc=1
     fi
-    (( rc == 0 )) && ok "  $host : TLS 1.3 / H2 / 无跳转 / 非 CDN"
+    if (( rc == 0 )); then
+        if is_ip_literal "$host"; then
+            ok "  ${probe} @ ${host} : TLS 1.3 / H2 / 无跳转 / 非 CDN（源站直连）"
+        else
+            ok "  ${probe} : TLS 1.3 / H2 / 无跳转 / 非 CDN"
+        fi
+    fi
     return "$rc"
 }
 
@@ -106,7 +168,7 @@ pick_target() {
             else
                 [[ "$r" == "auto" || "$r" == "other" ]] || continue
             fi
-            if target_validate "$tgt" >&2; then
+            if target_validate "$tgt" "${sni:-${tgt%%:*}}" >&2; then
                 found="$tgt|${sni:-${tgt%%:*}}|$label"
                 break
             fi
@@ -148,7 +210,8 @@ target_menu() {
   2) 指定地区
   3) 手动指定 target / SNI
   4) 清除自定义设置
-  5) 校验指定域名
+  5) 校验指定域名或 IP+SNI
+  6) 名词说明（target / dest / SNI / serverNames）
   0) 返回
 EOF
         case "$(ask '选择' '0')" in
@@ -158,17 +221,42 @@ EOF
                target_rows | grep -q "^${r}|" || { warn "可用地区: $(target_list_regions)"; continue; }
                state_del TARGET_CUSTOM; state_del TARGET_SNI; state_set TARGET_REGION "$r"; pick_target ;;
             3) local h s
-               h="$(ask 'target 域名(可带 :443，SNI 不同才加 ,sni=其他域名)')"
+               cat <<'EOF'
+  输入格式（三种都行）：
+    www.example.com                     域名，dest 与 SNI 相同
+    1.2.3.4:443,sni=www.example.com     源站 IP + 域名 SNI（目标在 CDN 后时用这个）
+    www.example.com:8443                非 443 端口
+EOF
+               h="$(ask 'target（输入 6 可看详细说明）')"
                [[ -n "$h" ]] || continue
                s="${h#*,sni=}"; [[ "$s" == "$h" ]] && s=""
                h="${h%%,*}"
                [[ "$h" == *:* ]] || h="${h}:443"
+               if is_ip_literal "${h%%:*}" && [[ -z "$s" ]]; then
+                   err "target 是 IP 时必须加 ,sni=域名（dest 用 IP、SNI 用域名，两者不能省）"
+                   continue
+               fi
                s="${s:-${h%%:*}}"
-               target_validate "$h" || confirm '校验未完全通过，仍要使用？' 'n' || continue
+               target_validate "$h" "$s" || confirm '校验未完全通过，仍要使用？' 'n' || continue
                state_set TARGET_CUSTOM "$h"; state_set TARGET_SNI "$s"
-               ok "已固定 target=$h SNI=$s" ;;
+               ok "已固定 target=$h SNI=$s"
+               info "已存在的 REALITY 节点不会自动套用新 target：需 xhy del 后重新 add" ;;
             4) state_del TARGET_CUSTOM; state_del TARGET_SNI; state_set TARGET_REGION auto; ok "已清除" ;;
-            5) local v; v="$(ask '要校验的域名')"; [[ -n "$v" ]] && target_validate "$v" ;;
+            5) local v vs
+               cat <<'EOF'
+  格式同选项 3：域名 / 域名:端口 / IP:端口,sni=域名
+EOF
+               v="$(ask '要校验的 target')"
+               [[ -n "$v" ]] || continue
+               vs="${v#*,sni=}"; [[ "$vs" == "$v" ]] && vs=""
+               v="${v%%,*}"
+               [[ "$v" == *:* ]] || v="${v}:443"
+               if is_ip_literal "${v%%:*}" && [[ -z "$vs" ]]; then
+                   err "校验 IP 时必须给 ,sni=域名"; continue
+               fi
+               vs="${vs:-${v%%:*}}"
+               target_validate "$v" "$vs" && ok "校验通过" || warn "校验未完全通过（见上面每条原因）" ;;
+            6) target_help; ask '按回车继续' '' ;;
             0) return 0 ;;
         esac
     done

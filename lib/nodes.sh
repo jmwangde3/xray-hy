@@ -352,7 +352,10 @@ node_add() {
         reality)
             if [[ -n "$target" ]]; then
                 tgt="$target"; t_sni="${sni:-${target%%:*}}"
-                target_validate "$tgt" || confirm "校验未通过，仍要使用？" "n" || return 1
+                if is_ip_literal "${tgt%%:*}" && [[ -z "$sni" ]]; then
+                    die "target 是 IP 时必须同时给 --sni 域名（dest=IP、SNI=域名，例：--target 1.2.3.4:443 --sni www.example.com）"
+                fi
+                target_validate "$tgt" "$t_sni" || confirm "校验未通过，仍要使用？" "n" || return 1
             else
                 picked="$(pick_target)" || return 1
                 [[ -n "$picked" ]] || { err "伪装站选择失败"; return 1; }
@@ -374,6 +377,10 @@ node_add() {
                 security="reality"
                 if [[ -n "$target" ]]; then
                     tgt="$target"; t_sni="${sni:-${target%%:*}}"
+                    if is_ip_literal "${tgt%%:*}" && [[ -z "$sni" ]]; then
+                        die "target 是 IP 时必须同时给 --sni 域名（dest=IP、SNI=域名）"
+                    fi
+                    target_validate "$tgt" "$t_sni" || confirm "校验未通过，仍要使用？" "n" || return 1
                 else
                     picked="$(pick_target)" || return 1
                     [[ -n "$picked" ]] || { err "伪装站选择失败"; return 1; }
@@ -458,6 +465,41 @@ node_add() {
     fi
     ok "节点 ${mode}_${port} 已添加"
     link_from_env "$envf"
+}
+
+# 交互式选择节点：列出编号 → 选中后把该节点的字段载入全局 MODE/PORT 等。
+# 供菜单「删除节点」与不带参数的 `xhy del` 使用；取消返回 1。
+node_pick() {
+    local -a files=()
+    local f i=0 pick
+    for f in "$XHY_NODES"/*.env; do
+        [[ -f "$f" ]] || continue
+        files+=("$f")
+    done
+    if (( ${#files[@]} == 0 )); then
+        warn "暂无节点"
+        return 1
+    fi
+    printf '  %-3s %-8s %-6s %-30s %s\n' "#" "模式" "端口" "连接地址 / SNI" "创建时间"
+    printf '  %s\n' "-------------------------------------------------------------------------"
+    for f in "${files[@]}"; do
+        node_load "$f"
+        i=$((i + 1))
+        printf '  %-3s %-8s %-6s %-30s %s\n' "$i" "$MODE" "$PORT" \
+            "${SNI:-${NODE_HOST:-?}}" "${CREATED:-?}"
+    done
+    pick="$(ask '选择节点编号（回车取消）' '')"
+    [[ -n "$pick" ]] || return 1
+    if [[ ! "$pick" =~ ^[0-9]+$ ]]; then
+        err "请输入数字编号"
+        return 1
+    fi
+    if (( pick < 1 || pick > ${#files[@]} )); then
+        err "编号超出范围（1-${#files[@]}）"
+        return 1
+    fi
+    node_load "${files[$((pick - 1))]}"
+    ok "已选择节点 ${MODE}_${PORT}"
 }
 
 node_del() {
