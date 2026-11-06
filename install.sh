@@ -105,7 +105,7 @@ fi
 set -Eeuo pipefail
 
 XHY_VERSION="1.0.0"
-XHY_BUILD="9139ae8-10db063f"
+XHY_BUILD="5e2d7fa244ce"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -2411,10 +2411,15 @@ install_self() {
     else
         info "当前是从管道运行的，重新下载一份脚本到 $XHY_SELF ..."
         fetch "$XHY_INSTALL_URL" "$tmp" || die "下载脚本本体失败（见上面的 curl 错误码）"
-        # 取到的必须是同一个构建，否则「装完的」和「刚跑的」不是一回事。
-        if ! grep -q "^XHY_BUILD=\"$XHY_BUILD\"$" "$tmp"; then
+        # 拿到的必须是本项目（有构建号）。构建号不同只说明 release 已更新，
+        # 装「最新这份」正是期望行为；真正的风险（下到非本项目内容）由下面的
+        # 构建号存在性检查兜底。
+        if ! grep -q '^XHY_BUILD="[0-9a-f]\{12\}"$' "$tmp"; then
             rm -f "$tmp"
-            die "下载到的脚本构建号与当前不一致（地址可能已指到新版本），请重跑同一条命令"
+            die "下载到的脚本缺少构建号，可能不是本项目的 install.sh，已放弃"
+        fi
+        if ! grep -q "^XHY_BUILD=\"$XHY_BUILD\"$" "$tmp"; then
+            warn "下载到的构建 $(sed -n 's/^XHY_BUILD=\"\(.*\)\"$/\1/p' "$tmp" | head -1) 与当前运行的不同（release 已更新），将安装最新这份"
         fi
         chmod 0755 "$tmp"
     fi

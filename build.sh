@@ -5,8 +5,9 @@
 #   ./build.sh --check         只判断 install.sh 是否与源码一致（不写文件）
 #   ./build.sh --stdout        打到标准输出（调试用）
 #
-# 构建号 = <git 短 hash>-<源码内容前 8 位>，只由源码决定，因此可以重复构建、
-# 可以做 --check。install.sh 自身不参与计算，避免自我递归。
+# 构建号 = 源码内容哈希前 12 位，只由源码决定，因此可以重复构建、可以做
+# --check。**不能**把 git commit 混进构建号：install.sh 本身要入库，一旦
+# commit 变了构建号就跟着变，--check 会永远失败（自引用）。
 set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,10 +39,9 @@ inputs_hash() {
     { cat "$PRELUDE" "$MAIN" "$TARGETS"
       for l in "${LIBS[@]}"; do cat "$ROOT/lib/$l.sh"; done
     } | { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else openssl dgst -sha256; fi; } \
-      | grep -oE '[0-9a-f]{64}' | head -1 | cut -c1-8
+      | grep -oE '[0-9a-f]{64}' | head -1 | cut -c1-12
 }
-commit="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo nogit)"
-BUILD="${commit}-$(inputs_hash)"
+BUILD="$(inputs_hash)"
 
 # 去掉各 lib 的 shebang：拼进单文件后它是中间行，只是噪音。
 strip_shebang() { sed '1{/^#!/d;}' "$1"; }
