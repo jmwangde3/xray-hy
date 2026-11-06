@@ -72,4 +72,10 @@ chk "falls back when region empty" "pick_target 2>/dev/null | grep -q 'fallback.
 printf '\357\273\277# bom header\nsg|SG|sg-first|sg.test:443|sg.test\n' >"$TARGETS_FILE"
 chk "BOM header is not a region" "! target_list_regions | grep -qi 'bom'"
 
+echo "=== update script：仓库模式不得自替换 ==="
+# v1.3.1 实测踩过：git clone 部署时 `xhy update` 把 42 行 dev 入口覆盖成
+# 4307 行 install.sh，版本号回退、工作区变脏。守卫必须挡住。
+chk "repo mode refuses self-update" "! update_script >/dev/null 2>&1"
+chk "dev entry still in place" "grep -q '开发入口' \"\$XHY_SCRIPT_DIR/xhy\""
+
 summary

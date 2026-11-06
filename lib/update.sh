@@ -18,6 +18,15 @@ update_script() {
         esac
     done
     need_root
+    # 仓库模式（git clone）下 $XHY_SELF 是 42 行的开发入口，不是单文件发布物。
+    # 在这里做替换会把 dev 入口覆盖成 4307 行的 install.sh：版本号回退到旧
+    # 构建号、git 工作区变脏、下次 git pull 还可能冲突。实测踩过（2026-11-07）。
+    if [[ -f "$XHY_SCRIPT_DIR/build.sh" && -f "$XHY_SCRIPT_DIR/entry/main.sh" ]]; then
+        err "检测到仓库模式（$XHY_SCRIPT_DIR），脚本本体由 git 管理，不走单文件自更新"
+        info "升级请用: cd $XHY_SCRIPT_DIR && git pull --ff-only"
+        info "节点与配置不受影响；如需重建单文件发布物: ./build.sh"
+        return 1
+    fi
     info "当前版本: $XHY_VERSION (build $XHY_BUILD)"
     info "检查更新: $XHY_INSTALL_URL"
     local tmp newbuild newver
