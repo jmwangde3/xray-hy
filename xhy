@@ -8,7 +8,16 @@
 #   bash <(curl -fsSL https://github.com/jmwangde3/xray-hy/releases/latest/download/install.sh)
 set -Eeuo pipefail
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# 仓库根必须从「真实文件」推导：install 会做 /usr/local/bin/xhy -> $REPO/xhy
+# 软链，经过软链调用时 BASH_SOURCE 是链接本身，不解析会把 /usr/local/bin
+# 当成仓库根，然后 source /usr/local/bin/lib/common.sh 直接失败。
+_src="${BASH_SOURCE[0]}"
+while [[ -L "$_src" ]]; do
+    _dir="$(cd -P "$(dirname "$_src")" && pwd)"
+    _src="$(readlink "$_src")"
+    [[ $_src == /* ]] || _src="$_dir/$_src"
+done
+REPO="$(cd -P "$(dirname "$_src")" && pwd)"
 export XHY_DEV=1
 export XHY_APP_DIR="${XHY_APP_DIR:-$REPO}"
 export XHY_SCRIPT_DIR="$REPO"

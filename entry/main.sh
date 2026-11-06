@@ -110,6 +110,13 @@ cmd_install() {
     init_dirs
     local ver
     stage 4 7 "下载并校验 Xray"
+    # 版本二选一：最新版功能全，但 >=26.9.8 的 REALITY 要求 MLKEM ClientHello，
+    # sing-box / mihomo 客户端连不上（SagerNet/sing-box#4520）；钉死版没这问题。
+    if confirm "安装最新版 Xray？(回车/n = 钉死 ${XHY_PINNED_VERSION}，sing-box/mihomo 客户端兼容性最好)" "n"; then
+        xray_set_channel latest
+    else
+        xray_set_channel pinned
+    fi
     ver="$(xray_resolve_version)"
     xray_install "$ver"
     stage 5 7 "安装服务与开机自启"
