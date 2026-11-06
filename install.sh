@@ -105,7 +105,7 @@ fi
 set -Eeuo pipefail
 
 XHY_VERSION="1.0.0"
-XHY_BUILD="00e638285083"
+XHY_BUILD="5b82b0b23ee7"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -3110,6 +3110,7 @@ cmd_menu() {
   ---- 维护 ----
   11) 服务管理              12) Xray 版本通道
   13) 更新                  14) 卸载
+  15) 备份 / 恢复
    0) 退出
 EOF
         case "$(ask '选择' '0')" in
@@ -3148,6 +3149,13 @@ EOF
                    geodata) update_geodata ;; config) update_config ;;
                esac ;;
            14) cmd_uninstall; return 0 ;;
+           15) local ba
+               ba="$(ask 'backup / restore' 'backup')"
+               case "$ba" in
+                   backup) backup_create ;;
+                   restore) backup_restore "$(ask '备份文件路径' '')" ;;
+                   *) warn "只支持 backup 或 restore" ;;
+               esac ;;
             0) return 0 ;;
         esac
     done
