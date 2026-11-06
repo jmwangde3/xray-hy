@@ -115,6 +115,15 @@ else
     printf '  FAIL  没有站点标「不支持」\n'; fail=$((fail + 1))
 fi
 
+echo "=== 非 tty 调用不产生 /dev/tty 报错 ==="
+TFO_SUPPORT="2.2.2.2"
+err="$(scanner_shortlist 0 5 2>&1 >/dev/null)"
+if printf '%s\n' "$err" | grep -q 'No such device'; then
+    printf '  FAIL  stderr 里有 /dev/tty 报错\n'; fail=$((fail + 1))
+else
+    printf '  PASS  stderr 干净（复合命令吞掉重定向失败）\n'; pass=$((pass + 1))
+fi
+
 echo "=== require-tfo 无匹配不再误报缓存失效 / 白重扫 ==="
 TFO_SUPPORT=""
 err="$(scanner_pick --require-tfo 2>&1 >/dev/null)"; rc=$?
@@ -142,7 +151,9 @@ for spec in \
     "scanner_tfo_tag 函数存在|declare -F scanner_tfo_tag >/dev/null" \
     "target_validate 接受 TFO 标记参数|grep -q 'tfo_tag=' lib/target.sh" \
     "scan --list 有 TFO 列|grep -q 'TFO 列为现场探测结果' lib/scanner.sh" \
-    "帮助说明每个候选标注 TFO|grep -q '每个候选后面都标注' entry/main.sh"; do
+    "帮助说明每个候选标注 TFO|grep -q '每个候选后面都标注' entry/main.sh" \
+    "cmd_scan 用 -t 0 判交互|grep -q -- '-t 0' entry/main.sh" \
+    "读 tty 用复合命令抑制重定向报错|grep -q '} 2>/dev/null' lib/scanner.sh"; do
     d="${spec%%|*}"; c="${spec#*|}"
     if eval "$c" >/dev/null 2>&1; then
         printf '  PASS  %s\n' "$d"; pass=$((pass + 1))

@@ -105,7 +105,7 @@ fi
 set -Eeuo pipefail
 
 XHY_VERSION="1.4.4"
-XHY_BUILD="37ac615d34e7"
+XHY_BUILD="42f4aba12ea5"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -2476,7 +2476,10 @@ scanner_shortlist() {
     } >&2
 
     printf '  选哪个 [1-%d]（回车=1，0=自动取最高分）: ' "${#tgts[@]}" >&2
-    if read -r ans </dev/tty 2>/dev/null; then :; else ans=""; fi
+    # 复合命令的 stderr 重定向才能吞掉「< /dev/tty 打不开」的 shell 报错：
+    # `read ... 2>/dev/null` 只重定向 read 自己的 stderr，重定向失败发生在
+    # 那之前，仍会打印 "No such device or address"（ssh 无 tty / CI 场景）。
+    if { read -r ans < /dev/tty; } 2>/dev/null; then :; else ans=""; fi
     printf '\n' >&2
     if [[ "$ans" =~ ^[0-9]+$ ]] && (( ans >= 1 && ans <= ${#tgts[@]} )); then
         pick=$(( ans - 1 ))
@@ -4360,10 +4363,10 @@ cmd_scan() {
             if (( refresh == 1 )); then args+=(--refresh); fi
             if [[ -n "$cidr" ]]; then args+=(--cidr "$cidr"); fi
             # 交互式问一次「是否必须 TFO」；显式给了 flag 或非 tty 时跳过。
-            if (( require == 0 )) && [[ -r /dev/tty ]]; then
+            if (( require == 0 )) && [[ -t 0 ]]; then
                 printf '是否只选支持 TFO 的伪装站？(y/N，回车=不强制): ' >&2
                 local ans=""
-                if read -r ans </dev/tty 2>/dev/null; then :; else ans=""; fi
+                if { read -r ans < /dev/tty; } 2>/dev/null; then :; else ans=""; fi
                 printf '\n' >&2
                 if [[ "$ans" == "y" || "$ans" == "Y" ]]; then require=1; fi
             fi

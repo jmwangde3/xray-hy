@@ -534,7 +534,10 @@ scanner_shortlist() {
     } >&2
 
     printf '  选哪个 [1-%d]（回车=1，0=自动取最高分）: ' "${#tgts[@]}" >&2
-    if read -r ans </dev/tty 2>/dev/null; then :; else ans=""; fi
+    # 复合命令的 stderr 重定向才能吞掉「< /dev/tty 打不开」的 shell 报错：
+    # `read ... 2>/dev/null` 只重定向 read 自己的 stderr，重定向失败发生在
+    # 那之前，仍会打印 "No such device or address"（ssh 无 tty / CI 场景）。
+    if { read -r ans < /dev/tty; } 2>/dev/null; then :; else ans=""; fi
     printf '\n' >&2
     if [[ "$ans" =~ ^[0-9]+$ ]] && (( ans >= 1 && ans <= ${#tgts[@]} )); then
         pick=$(( ans - 1 ))
