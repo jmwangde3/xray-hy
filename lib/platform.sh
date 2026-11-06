@@ -123,6 +123,14 @@ ensure_optional() {
                     rhel)   pkg_install qrencode 2>/dev/null || true ;;
                 esac
             fi ;;
+        logrotate)
+            if ! have_cmd logrotate; then
+                case "$XHY_DISTRO" in
+                    alpine) pkg_install logrotate 2>/dev/null || true ;;
+                    debian) pkg_install logrotate 2>/dev/null || true ;;
+                    rhel)   pkg_install logrotate 2>/dev/null || true ;;
+                esac
+            fi ;;
     esac
 }
 

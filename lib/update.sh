@@ -26,9 +26,24 @@ update_script() {
     git -C "$wd" --no-pager log --oneline HEAD..@{u} | head -20
     git -C "$wd" --no-pager diff --stat HEAD..@{u}
     confirm "应用这些更新（仅快进，不改动 /etc/xray-hy 配置）？" "y" || { info "已取消"; return 0; }
+    local old dirty f bad=0
+    old="$(git -C "$wd" rev-parse HEAD)"
+    dirty="$(git -C "$wd" status --porcelain)"
     git -C "$wd" pull --ff-only --quiet || die "pull 失败（本地有改动？请先 git -C $wd status 查看）"
+    # Never leave a syntactically broken entrypoint behind: syntax-check every
+    # pulled shell file and roll back the whole update if any of them fails.
+    for f in "$wd"/xhy "$wd"/lib/*.sh; do
+        bash -n "$f" >/dev/null 2>&1 || { warn "语法检查失败: $f"; bad=1; }
+    done
+    if (( bad )); then
+        if [[ -z "$dirty" ]]; then
+            git -C "$wd" reset --hard "$old" >/dev/null 2>&1 || true
+            die "更新后的脚本未通过 bash -n，已自动回滚到 $old"
+        fi
+        die "更新后的脚本未通过 bash -n；工作区有本地改动，请手动执行 git -C $wd reset --hard $old"
+    fi
     create_symlink
-    ok "脚本已更新，配置与节点数据保持不变"
+    ok "脚本已更新（全部 shell 文件通过语法检查），配置与节点数据保持不变"
 }
 
 update_core() {

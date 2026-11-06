@@ -30,7 +30,73 @@ svc_restart() { if [[ "$XHY_INIT" == "systemd" ]]; then systemctl restart "$1"; 
 svc_status()  { if [[ "$XHY_INIT" == "systemd" ]]; then systemctl status "$1" --no-pager -l; else rc-service "$1" status; fi; }
 svc_active()  { if [[ "$XHY_INIT" == "systemd" ]]; then systemctl is-active --quiet "$1"; else rc-service "$1" status >/dev/null 2>&1; fi; }
 
+# Bound the Go runtime heap on small VPS / memory-limited containers. singbox-lite
+# does this via GOMEMLIMIT; without it a 128-256MB box can OOM-kill Xray.
+compute_gomemlimit() {
+    local kb cg mb
+    kb="$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+    if [[ -r /sys/fs/cgroup/memory.max ]]; then
+        cg="$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo max)"
+        if [[ "$cg" =~ ^[0-9]+$ ]]; then
+            cg=$((cg / 1024))
+            if (( cg > 0 && cg < kb )); then kb="$cg"; fi
+        fi
+    elif [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then
+        cg="$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo 0)"
+        if [[ "$cg" =~ ^[0-9]+$ ]] && (( cg > 0 && cg / 1024 < kb )); then
+            kb=$((cg / 1024))
+        fi
+    fi
+    mb=$((kb / 1024 / 4))
+    (( mb < 32 )) && mb=32
+    (( mb > 512 )) && mb=512
+    printf '%sMiB' "$mb"
+}
+
+# Unbounded append-logs eventually fill a small VPS disk. Install a rotation
+# policy whenever logrotate is available; never fail installation without it.
+install_logrotate() {
+    local cfg="/etc/logrotate.d/xray-hy" restart_cmd
+    if ! have_cmd logrotate; then
+        ensure_optional logrotate
+        have_cmd logrotate || {
+            warn "未安装 logrotate：$XHY_LOGDIR 下日志不会自动轮转，请手动 apt/apk install logrotate";
+            return 0;
+        }
+    fi
+    if [[ "$XHY_INIT" == "systemd" ]]; then
+        restart_cmd="systemctl restart xray-hy >/dev/null 2>&1 || true"
+    else
+        restart_cmd="rc-service xray-hy restart >/dev/null 2>&1 || true"
+    fi
+    install -d -m 0755 /etc/logrotate.d "$XHY_LOGDIR"
+    backup_file "$cfg"
+    cat >"$cfg" <<EOF
+${XHY_LOGDIR}/*.log {
+    weekly
+    rotate 4
+    maxsize 32M
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0600 root root
+    sharedscripts
+    postrotate
+        $restart_cmd
+    endscript
+}
+EOF
+    if [[ "$XHY_DISTRO" == "alpine" ]]; then
+        rc-update add crond default >/dev/null 2>&1 || true
+        rc-service crond start >/dev/null 2>&1 || true
+    fi
+    ok "日志轮转已配置 ($cfg)"
+}
+
 install_xray_service() {
+    local memlimit
+    memlimit="$(compute_gomemlimit)"
     backup_file "$XHY_ETC/config.json"
     if [[ "$XHY_INIT" == "systemd" ]]; then
         cat >/etc/systemd/system/xray-hy.service <<EOF
@@ -44,6 +110,7 @@ Wants=network-online.target
 Type=simple
 ExecStart=${XRAY_BIN} run -c ${XHY_ETC}/config.json
 Environment=XRAY_LOCATION_ASSET=${XRAY_ASSET}
+Environment=GOMEMLIMIT=${memlimit}
 Restart=on-failure
 RestartSec=3
 LimitNOFILE=1048576
@@ -67,6 +134,7 @@ pidfile="/run/xray-hy.pid"
 output_log="/var/log/xray-hy/xray.log"
 error_log="/var/log/xray-hy/xray.err"
 export XRAY_LOCATION_ASSET="/usr/local/share/xray"
+export GOMEMLIMIT="MEMLIMIT"
 
 depend() {
     need net
@@ -80,9 +148,11 @@ start_pre() {
 }
 EOF
         chmod 0755 /etc/init.d/xray-hy
+        sed -i "s|MEMLIMIT|${memlimit}|" /etc/init.d/xray-hy
     fi
     svc_enable "$SVC_XRAY"
-    ok "Xray 服务已安装并设为开机自启 ($XHY_INIT)"
+    install_logrotate
+    ok "Xray 服务已安装并设为开机自启 ($XHY_INIT, GOMEMLIMIT=${memlimit})"
 }
 
 install_cf_service() {

@@ -94,9 +94,13 @@ xray_install() {
         fi
     done
 
-    XRAY_LOCATION_ASSET="$XRAY_ASSET" "$XRAY_BIN" version >/dev/null 2>&1 \
-        || die "下载的 Xray 无法运行（架构或依赖不匹配）"
-    ok "Xray $ver 安装完成，校验通过"
+    local got
+    got="$(XRAY_LOCATION_ASSET="$XRAY_ASSET" "$XRAY_BIN" version 2>/dev/null | head -1 | awk '{print $2}' | tr -d '\r')"
+    [[ -n "$got" ]] || die "下载的 Xray 无法运行（架构或依赖不匹配）"
+    if [[ "v$got" != "$ver" ]]; then
+        warn "版本校验: 请求 $ver，实际 v$got（预发布版或镜像差异时可能不同，请确认）"
+    fi
+    ok "Xray v$got 安装完成，SHA-256 校验通过"
 }
 
 x25519_keypair() {

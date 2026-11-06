@@ -71,6 +71,35 @@ init_dirs() {
     chmod 0600 "$XHY_STATE" 2>/dev/null || true
 }
 
+# Serialize every config-mutating command. Without this, two concurrent `xhy`
+# invocations can interleave fragment writes and silently lose a node.
+# Idea borrowed from 0xdabiaoge/singbox-lite's cross-script shared lock.
+XHY_LOCK_MODE=""
+acquire_lock() {
+    local i
+    init_dirs
+    if have_cmd flock; then
+        exec 9>"$XHY_ETC/.lock"
+        for ((i = 0; i < 15; i++)); do
+            if flock -n 9 2>/dev/null; then XHY_LOCK_MODE="flock"; return 0; fi
+            sleep 1
+        done
+        die "另一个 xhy 实例正在修改配置（锁: $XHY_ETC/.lock）"
+    fi
+    for ((i = 0; i < 15; i++)); do
+        if mkdir "$XHY_ETC/.lock.d" 2>/dev/null; then XHY_LOCK_MODE="dir"; return 0; fi
+        sleep 1
+    done
+    die "无法取得配置锁，若确认无其它实例请删除 $XHY_ETC/.lock.d"
+}
+
+release_lock() {
+    if [[ "${XHY_LOCK_MODE:-}" == "dir" ]]; then
+        rmdir "$XHY_ETC/.lock.d" 2>/dev/null || true
+    fi
+    XHY_LOCK_MODE=""
+}
+
 # Atomic write from stdin: printf '%s' "$content" | atomic_write <path> <mode>
 atomic_write() {
     local dest="$1" mode="${2:-0644}" tmp

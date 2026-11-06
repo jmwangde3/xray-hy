@@ -322,6 +322,8 @@ main() {
 
     need_root
     detect_platform
+    acquire_lock
+    trap release_lock EXIT
 
     case "$cmd" in
         install)    cmd_install ;;

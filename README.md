@@ -21,10 +21,17 @@
 | 防火墙 | 只维护自己的 iptables 链，不 flush `INPUT`、不覆盖用户已有规则；开机时幂等重建而非 `iptables-restore` 全量覆盖。 |
 | 凭证 | 节点 `.env` 权限 0600，目录 0700，Tunnel Token 单独 0600；分享链接输出时提示等同凭证。 |
 | REALITY | 上游官方警告：认证失败的流量会被转发到 target，CDN 后面的站点会让服务器变成开放转发器。因此内置 TLS 1.3 / H2 / 无跳转 / 非 CDN 校验，并默认加上 `limitFallback*` 限速。 |
+| 并发与磁盘 | 全局 `flock` 串行化所有配置变更，避免两个 `xhy` 实例交错写碎片导致丢节点；自动生成 logrotate 策略（weekly / 保留 4 份 / 32M 触发），日志不会写满小磁盘 |
+| 内存 | 依据物理内存与 cgroup `memory.max` 给 Xray 设 `GOMEMLIMIT`（取 1/4，下限 32MiB），128–256MB 小鸡不易被 OOM Kill |
+| 自更新 | `git pull --ff-only` 后对入口与所有 `lib/*.sh` 跑 `bash -n`，任一失败整组回滚到更新前 commit，不会留下跑不起来的入口 |
 
 参考与致谢：`XTLS/Xray-core`、`XTLS/Xray-install`、`zxcvos/Xray-script`（交互式菜单、target 校验、规则开关）、`audsiui/xray-jb`（多节点注册表与四模式划分）、`0xevn/xray-reality-setup`（加固项与文档结构）、`ICMP-UNREACHABLE/Minimal-Xray-Script`、`miku111/XrayOnAlpine`。
 
-另外从 `driftray/easyxray` 借鉴了**校验后替换 + 配置快照回滚**、**切换 Xray 版本前备份二进制并在不兼容时自动换回**、**最低安全版本基线**和**诊断清单**这几项工程思路（它是 GPL-3.0、仅支持 Debian/Ubuntu + systemd、强依赖域名与 Nginx，架构与本项目不同，未复用其代码）。IPv6 双栈防火墙与慢速爆破双窗口则来自本项目在一台真实 Alpine VPS 上的巡检发现。
+另外从 `driftray/easyxray` 借鉴了**校验后替换 + 配置快照回滚**、**切换 Xray 版本前备份二进制并在不兼容时自动换回**、**最低安全版本基线**和**诊断清单**这几项工程思路（它是 GPL-3.0、仅支持 Debian/Ubuntu + systemd、强依赖域名与 Nginx，架构与本项目不同，未复用其代码）。
+
+从 `0xdabiaoge/singbox-lite` 借鉴了**跨脚本共享状态锁 + 原子写入**、**下载/更新后做语法与版本校验再提交**、**按内存设 `GOMEMLIMIT`** 和**日志自动清理**四项（该仓库无 LICENSE，只借鉴思路、未复用任何代码；它是 4 个 Shell 文件共 744 KB 的巨型单文件方案，且功能覆盖双核心 / 中转 / 端口转发 / 订阅，与本项目轻量定位相反）。
+
+IPv6 双栈防火墙与慢速爆破双窗口、DNS 并发查询取消的根因则来自本项目在一台真实 Alpine VPS 上的巡检发现。
 
 ---
 
@@ -75,7 +82,7 @@ xhy check                                 # 全量环境自检
 | 后续更新 | `xhy update script`（git ff-only） / `core` / `geodata` / `config`（重建全部节点）/ `all` |
 | 四种模式 | `direct`、`tunnel`、`reality`、`xhttp` |
 | 导出链接 | `xhy link --all` / `--uri` / `--qr` |
-| 额外补充 | 多节点并存与独立增删、节点注册表、配置变更原子校验+回滚、**最近 5 份配置快照 + `xhy rollback`**、更新 Xray 时二进制自动回滚、系统级关闭 MPTCP、私网/回国 IP/广告域名阻断开关、DoH 选择、日志级别与关闭、geodata 更新（带大小校验）、REALITY fallback 限速、系统自检报告（含版本安全线 / MPTCP / IPv6 检查）、CLI 与菜单双入口、卸载可选保留配置 |
+| 额外补充 | 多节点并存与独立增删、节点注册表、**`flock` 并发锁**、配置变更原子校验+回滚、**最近 5 份配置快照 + `xhy rollback`**、更新 Xray 时二进制自动回滚、更新脚本后全量 `bash -n`、按内存设 `GOMEMLIMIT`、日志自动轮转、系统级关闭 MPTCP、私网/回国 IP/广告域名阻断开关、DoH 选择、日志级别与关闭、geodata 更新（带大小校验）、REALITY fallback 限速、系统自检报告（含版本安全线 / MPTCP / IPv6 检查）、CLI 与菜单双入口、卸载可选保留配置 |
 
 ### 版本策略与安全基线
 
@@ -166,7 +173,9 @@ xhy update config     # 从节点注册表重建全部 inbound + 重载 + 刷新
 xhy update all        # 以上全部 + 自检
 ```
 
-脚本更新**不会**触碰 `/etc/xray-hy`。若配置渲染或校验失败，新增节点会被回滚，已有配置保持原样。每次重建配置都会先把上一份可用配置存进 `snapshots/`（保留最近 5 份）：
+脚本更新**不会**触碰 `/etc/xray-hy`。`update script` 拉取后会对 `xhy` 和所有 `lib/*.sh` 跑 `bash -n`，任一文件语法错误就整组回滚到更新前的 commit；所有会改配置的命令都持有全局 `flock`，并发执行不会互相踩。
+
+若配置渲染或校验失败，新增节点会被回滚，已有配置保持原样。每次重建配置都会先把上一份可用配置存进 `snapshots/`（保留最近 5 份）：
 
 ```sh
 xhy snapshots          # 列出快照
@@ -188,7 +197,8 @@ xhy rollback /etc/xray-hy/snapshots/config.20261106120000.json   # 指定快照
 4. OpenVZ / LXC 等容器通常无法加载 `tcp_bbr`、无法写 sysctl，脚本会跳过并给出说明；
 5. `xhy core channel latest` 存在上游格式变更风险（历史上 `xray x25519` 输出从 `Password` 改为 `Password (PublicKey)` 曾导致多个脚本 REALITY 安装失败）。本项目解析器已兼容两种格式，且 `update core` 会在新版本不兼容时自动换回旧二进制；但钉死版本也不要长期不升，见上面的「版本策略与安全基线」；
 6. cloudflared raw 二进制没有官方校验和，无法做密码学验证；介意的话请改用 Cloudflare 官方软件源或 `.deb` 包自行替换 `$CF_BIN`；
-7. `xhy firewall strict` 与任何会改动网络的操作，请确保有带外控制台（VNC / 救援模式）。
+7. `xhy firewall strict` 与任何会改动网络的操作，请确保有带外控制台（VNC / 救援模式）；
+8. Xray 26.10.31 起已对 **WebSocket 传输发出弃用提示**。`direct` 与 `tunnel` 两个 WS 模式短期可用，但长期使用请关注上游动向；CF Tunnel 目前仍依赖 WS，暂无等价替代。需要长期稳定的直连优先选 `reality` 或 `xhttp --reality`。
 
 ---
 
