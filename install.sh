@@ -105,7 +105,7 @@ fi
 set -Eeuo pipefail
 
 XHY_VERSION="1.3.0"
-XHY_BUILD="b66b756c62dc"
+XHY_BUILD="ca8eebded5f5"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -1445,11 +1445,17 @@ firewall_off() {
     ok "xray-hy 双栈防火墙链已移除，系统原有规则未改动"
 }
 
+# firewall_status [--brief]
+# --brief 只打前四行摘要：调用方用 `firewall_status | head -4` 时，head 提前
+# 关掉管道会让 printf 收到 SIGPIPE，在 pipefail 下把整个 `xhy check` 变成 141。
 firewall_status() {
+    local brief=""
+    if [[ "${1:-}" == "--brief" ]]; then brief="1"; fi
     printf '工作模式 : %s\n' "$(state_get FIREWALL_MODE safe)"
     printf 'SSH 防爆破: %s (端口 %s，60s/5 次 + 1h/8 次 双窗口)\n' "$(state_get SSH_GUARD_STATUS '?')" "$XHY_SSH_PORT"
     printf '节点端口(TCP): %s\n' "$(firewall_node_ports | tr '\n' ' ')"
     printf '节点端口(UDP): %s\n' "$(firewall_udp_ports | tr '\n' ' ')"
+    if [[ -n "$brief" ]]; then return 0; fi
     if have_cmd iptables; then
         printf '\n%s\n' "IPv4 自定义链："
         iptables -w -L "$FW_CHAIN" -n --line-numbers 2>/dev/null || printf '  (未创建)\n'
@@ -3565,7 +3571,7 @@ self_check() {
     fi
     printf 'TFO 命中  : %s\n' "$tfo_hits"
     printf '%s\n' "--------------------------------------"
-    firewall_status | head -4
+    firewall_status --brief
     if have_cmd ip6tables; then
         v6rules="$(ip6tables -S 2>/dev/null | grep -c "$FW_CHAIN" || true)"
         printf 'IPv6 链规则: %s 条\n' "${v6rules:-0}"

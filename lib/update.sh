@@ -183,7 +183,7 @@ self_check() {
     fi
     printf 'TFO 命中  : %s\n' "$tfo_hits"
     printf '%s\n' "--------------------------------------"
-    firewall_status | head -4
+    firewall_status --brief
     if have_cmd ip6tables; then
         v6rules="$(ip6tables -S 2>/dev/null | grep -c "$FW_CHAIN" || true)"
         printf 'IPv6 链规则: %s 条\n' "${v6rules:-0}"

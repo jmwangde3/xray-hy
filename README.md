@@ -379,7 +379,7 @@ tools/bump-version.sh major --note "破坏性变更"   # 1.3.1 -> 2.0.0
 已在真实 VPS（Alpine 3.23 / OpenRC，`47.88.102.45`）上完成端到端部署：`install` 七步全过、REALITY 节点实测可连、`xhy scan` 实机扫出并应用了同机房伪装站。下面的离线测试仍保留，任何机器上都能复跑（不需要 root、不需要网络、不需要真实 Xray）：
 
 ```sh
-bash test/run-all.sh     # bash -n + 渲染 + hy2 + 生命周期 + 伪装站/扫描，共 154 项断言
+bash test/run-all.sh     # bash -n + 渲染 + hy2 + 生命周期 + 伪装站/扫描，共 157 项断言
 ```
 
 覆盖：全部脚本语法；四种 VLESS 模式与 `hy2` 的 inbound 片段和合并 `config.json` 是否合法 JSON；`hy2` 自签证书生成与 `pinSHA256` 链接；UDP 端口是否进入防火墙；`add → snapshot → del → rollback` 的整套状态恢复；跨模式端口冲突；伪装站地区优先与 BOM 防御；IP+SNI 校验与删除节点选择器；扫描模块的网段换算 / 域名过滤 / 打分 / CSV 解析 / 缓存合并与过期 / 缓存优先选站；`sockopt` 是否按节点类型出现（`TFO=1/0` 对应 `tcpFastOpen` true/false、`hy2` 无 `sockopt`）、`policy.bufferSize` 取自 state、`ACCESS_LOG` 开关对 `log.access` 的影响、`sniffing.destOverride` 按模式裁剪、`hy2` 的 `masquerade.type` 默认 `string` 与 `--masq-proxy` 切 `proxy`。

@@ -132,4 +132,11 @@ chk "direct destOverride 含 http"    "$PY -c 'import json,sys; d=json.load(open
 chk "reality destOverride 不含 http" "$PY -c 'import json,sys; d=json.load(open(sys.argv[1])); assert \"http\" not in d[\"sniffing\"][\"destOverride\"]' '$XHY_CONFDIR/reality_443.json'"
 chk "reality 只嗅探 tls"             "$PY -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d[\"sniffing\"][\"destOverride\"]==[\"tls\"]' '$XHY_CONFDIR/reality_443.json'"
 
+# 自检里的两条 set -e 陷阱：函数以 `[[ 条件 ]] && printf/warn` 收尾时返回 1，
+# 或在 pipefail 下被 head 打断成 SIGPIPE(141)，自检只印一半就退出。
+echo "=== self-check exit codes ==="
+chk "core_status 缺 cloudflared 仍返回 0" "CF_BIN=/nonexistent/cloudflared core_status >/dev/null"
+chk "firewall_status --brief 返回 0"      "firewall_status --brief >/dev/null"
+chk "firewall_status --brief 只有四行"     "[[ \$(firewall_status --brief | wc -l) -eq 4 ]]"
+
 summary
