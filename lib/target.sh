@@ -132,16 +132,29 @@ target_region() { state_get TARGET_REGION "auto"; }
 
 # Echo "<target> <sni> <label>". Resolution order:
 #   1) explicit custom target from state
-#   2) region chosen by the admin
-#   3) auto: match the VPS egress country code
+#   2) best entry of a still-valid scan cache (same datacenter, already verified)
+#   3) region chosen by the admin
+#   4) auto: match the VPS egress country code
 pick_target() {
     local region candidate="" cc="" line r c label tgt sni
-    local custom_t custom_s
+    local custom_t custom_s sbest
     custom_t="$(state_get TARGET_CUSTOM '')"
     custom_s="$(state_get TARGET_SNI '')"
     if [[ -n "$custom_t" ]]; then
         printf '%s %s %s\n' "$custom_t" "${custom_s:-${custom_t%%:*}}" "custom"
         return 0
+    fi
+
+    # 扫描缓存优先：同机房的真实源站比全球静态表更贴合，而且已经验过一次。
+    # XHY_SKIP_SCAN_CACHE=1 可绕过（排查问题时用）。
+    if [[ "${XHY_SKIP_SCAN_CACHE:-0}" != "1" ]] && declare -F scanner_cache_valid >/dev/null; then
+        if scanner_cache_valid; then
+            if sbest="$(scanner_cache_pick_valid)"; then
+                printf '%s\n' "$sbest"
+                return 0
+            fi
+            warn "扫描缓存中的候选当前都不可用，回退到内置地区库" >&2
+        fi
     fi
 
     region="$(target_region)"
@@ -190,7 +203,7 @@ pick_target() {
 }
 
 target_show() {
-    local t s
+    local t s cache
     t="$(state_get TARGET_CUSTOM '')"
     s="$(state_get TARGET_SNI '')"
     printf '地区     : %s (可选: %s)\n' "$(target_region)" "$(target_list_regions)"
@@ -198,6 +211,16 @@ target_show() {
         printf '自定义   : %s  SNI=%s\n' "$t" "${s:-${t%%:*}}"
     else
         printf '自定义   : 未设置（使用地区自动匹配）\n'
+    fi
+    if declare -F scanner_cache_count >/dev/null && [[ -s "$SCANNER_CACHE" ]]; then
+        cache="$(scanner_cache_count) 个候选 / $(scanner_cache_age_h) 小时前"
+        if scanner_cache_valid; then
+            printf '扫描缓存 : %s（有效，建节点时优先采用）\n' "$cache"
+        else
+            printf '扫描缓存 : %s（已过期，选项 8 可查看/清除）\n' "$cache"
+        fi
+    else
+        printf '扫描缓存 : 无（选项 7 自动扫描本机机房网段）\n'
     fi
 }
 
@@ -212,6 +235,8 @@ target_menu() {
   4) 清除自定义设置
   5) 校验指定域名或 IP+SNI
   6) 名词说明（target / dest / SNI / serverNames）
+  7) 自动扫描本机机房网段，挑最优站点（结果缓存，可复用）
+  8) 查看 / 复核 / 清除扫描缓存
   0) 返回
 EOF
         case "$(ask '选择' '0')" in
@@ -257,6 +282,29 @@ EOF
                vs="${vs:-${v%%:*}}"
                target_validate "$v" "$vs" && ok "校验通过" || warn "校验未完全通过（见上面每条原因）" ;;
             6) target_help; ask '按回车继续' '' ;;
+            7) local sp st ss extra=()
+               if [[ -s "$SCANNER_CACHE" ]] && scanner_cache_valid; then
+                   confirm "已有 $(scanner_cache_age_h) 小时前的扫描缓存，重新扫描？" "n" \
+                       && extra+=(--refresh)
+               fi
+               if sp="$(scanner_pick ${extra[@]+"${extra[@]}"})"; then
+                   read -r st ss _ <<<"$sp"
+                   ok "最优站点: target=$st SNI=$ss"
+                   if confirm "把它固定为当前 target（新建节点直接使用）？" "y"; then
+                       state_set TARGET_CUSTOM "$st"; state_set TARGET_SNI "$ss"
+                       ok "已固定 target=$st SNI=$ss"
+                   fi
+               else
+                   warn "自动扫描没有找到可用站点，可改用 1) 内置地区库或 3) 手动指定"
+               fi ;;
+            8) local ca
+               ca="$(ask 'list 查看 / verify 复核 / clear 清除' 'list')"
+               case "$ca" in
+                   list)   scanner_cache_show ;;
+                   verify) scanner_cache_verify ;;
+                   clear)  scanner_cache_clear ;;
+                   *)      scanner_cache_show ;;
+               esac ;;
             0) return 0 ;;
         esac
     done

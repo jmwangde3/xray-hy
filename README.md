@@ -148,7 +148,7 @@ xhy check                                 # 全量环境自检
 | 防 SSH 爆破 | iptables `recent` **双窗口**：60 秒 10 次 + **1 小时 25 次**（阈值按正常运维用量校准——诊断工具/VS Code/scp 一轮就是 5-10 个连接；暴力破解是每小时成百上千次）；IPv4 / IPv6 双栈同时生效；缺 `xt_recent` 时降级并告警 |
 | CF Tunnel | 可选；WS 只监听 `127.0.0.1`，cloudflared 由独立服务托管，Token 存 0600 文件；分享链接按 CF 边缘 TLS 生成 |
 | 防火墙 | `safe`（默认）/ `strict` / `off`；**同时构建 iptables 与 ip6tables 链** —— 只防 IPv4 等于给 `:::22` 留了后门；每次变更前备份两个 family 的规则转储 |
-| 伪装站 | `conf/targets.tsv` 地区库（US/GB/JP/HK/TW/SG/FR/DE/IN/CA/AU/NL/…），按 VPS 出口国家自动匹配，逐个做 TLS 1.3、HTTP/2、无重定向、非 CDN 校验；`xhy target` 可指定地区、手动固定 target/SNI、单独校验，或查看 target/dest、SNI、serverNames 的名词说明。目标站在 CDN 之后时支持「dest=源站 IP、SNI=域名」：`--target 1.2.3.4:443 --sni www.example.com`（交互菜单里写作 `1.2.3.4:443,sni=www.example.com`）|
+| 伪装站 | 三档：**`xhy scan` 自动扫描本机机房网段**（RealiTLScanner + 真实 SNI 验证 + 结果缓存，见上节）、`conf/targets.tsv` 地区库按 VPS 出口国家匹配、`xhy target` 手动固定 target/SNI 或单独校验；三者都做 TLS 1.3 / HTTP/2 / 无重定向 / 非 CDN 校验，并支持「dest=源站 IP、SNI=域名」（`--target 1.2.3.4:443 --sni www.example.com`，交互菜单写作 `1.2.3.4:443,sni=www.example.com`）|
 | 后续更新 | `xhy update script`（单文件：新构建整文件替换；克隆：git ff-only）/ `core` / `geodata` / `config`（重建全部节点）/ `all` |
 | 五种模式 | `direct`、`tunnel`、`reality`、`xhttp`、`hy2`（Xray 原生 Hysteria2 入站，UDP/QUIC + 自签证书 + `pinSHA256` 分享链接） |
 | 导出链接 | `xhy link --all` / `--uri` / `--qr`（服务器是 IPv4 字面量且开了双栈时自动附 **IPv6 变体链接**） |
@@ -173,6 +173,42 @@ xhy add reality --port 443 --target 1.2.3.4:443 --sni www.example.com
 ```
 
 校验会带 `curl --resolve www.example.com:443:1.2.3.4` 去打这台 IP，验的是**真实回落到源站**时证书是否覆盖该域名、是否没有 CDN 头，而不是公共 DNS 解析出的边缘节点。target 是 IP 却没给 SNI 时脚本会直接拒绝（否则会渲染出 `SNI=IP` 的废节点）。
+
+### 伪装站自动扫描（`xhy scan`）
+
+内置地区库是一份全球静态候选表；但**最合适的伪装站通常就在 VPS 自己的机房里** —— 同一个 /24、同一家运营商、TLS 握手 5ms 上下，而且机架不拆它就一直存在。`xhy scan` 用 [XTLS/RealiTLScanner](https://github.com/XTLS/RealiTLScanner) 把这个网段里所有 **TLS 1.3 + HTTP/2** 的站点列出来，再逐个用**真实 SNI** 验证后排序，取最优的那个。
+
+```sh
+xhy scan                     # 扫本机公网 IP 所在 /24（无合格结果自动扩到同机房 /21）
+xhy scan 47.88.96.0/21       # 指定网段
+xhy scan --refresh           # 忽略缓存重扫
+xhy scan --list              # 看候选与打分（分数 = 延迟 + 状态码 + 内容量）
+xhy scan --verify            # 复核缓存，剔除已失效的站点
+xhy scan --clear             # 清缓存
+```
+
+扫描结果以 **`dest=源站 IP` + `SNI=域名`** 的形式给出，正好是 REALITY 需要的组合：
+
+```
+最优伪装站: target=47.88.102.65:443  SNI=www.easeus.com（来源 scan）
+```
+
+建节点时三选一（交互菜单默认第 1 项）：
+
+```sh
+xhy add reality --port 443 --scan     # 自动扫描（有缓存直接复用，不重复扫）
+xhy add reality --port 443            # 内置地区库（按 VPS 出口国家匹配）
+xhy add reality --port 443 --target 1.2.3.4:443 --sni www.example.com   # 手动
+```
+
+**缓存**：结果写在 `/etc/xray-hy/scan-cache.tsv`（0600，默认 7 天有效），下次建 REALITY 节点直接复用，不再扫描；即使是缓存里的候选，采用前也会再过一遍 REALITY 级校验（证书 / 跳转 / CDN），失效的就跳过。`SCANNER_TTL` 环境变量可改有效期。
+
+**实现上比较要紧的几点**：
+
+- RealiTLScanner 看到的是「该 IP 在无 SNI 时给出的默认证书」，CN 可能是 `*.example.com`；脚本会换成 `www.example.com` / 裸域两个具体 SNI 逐个用 `curl --resolve` 验证，证书不覆盖就用下一个，避免回落到源站时证书对不上。
+- **排除本机 IP**：自己 443 上跑的就是 REALITY，扫回来的是「自己回落到 target 的那张证书」，不排掉会把自己选成 target。
+- 证书里带 `cloudflare` / `fastly` / `akamai` 的、CN 落在 `api` / `proxy` / `test` / `chatgpt` 这类标签上的站点会被直接剔除（一眼就是反代或代理工具）。
+- 只发 `linux-amd64` / `linux-arm64` 二进制；其它架构自动回退到内置地区库。Alpine 是 musl，首次使用会自动装 `libc6-compat`（官方二进制是 glibc 链接的）。
 
 ## 版本策略：两个相互冲突的上游边界
 
@@ -316,17 +352,37 @@ xhy rollback /etc/xray-hy/snapshots/state.20261106120000.tar.gz   # 指定快照
 
 `xhy update core` 在安装新 Xray 前会备份当前二进制；若新核心无法加载现有配置，自动换回原版本。更早的二进制副本也留在 `/etc/xray-hy/backups/`。
 
+### 版本号与发布
+
+版本号只在两处定义（`entry/prelude.sh` 的赋值、`lib/common.sh` 的兜底默认值），**改版本号必须走工具**，`build.sh` 会校验两处一致，不一致直接拒绝构建：
+
+```sh
+tools/bump-version.sh minor --note "新增 xxx"    # 1.2.0 -> 1.3.0
+tools/bump-version.sh patch                      # 1.3.0 -> 1.3.1
+tools/bump-version.sh major --note "破坏性变更"   # 1.3.1 -> 2.0.0
+```
+
+规则：
+
+| 位 | 什么时候动 | 例子 |
+|---|---|---|
+| **major** `X.0.0` | 不兼容变更：配置格式 / 目录结构 / CLI 语义变了，旧节点需要重建 | 节点注册表换格式 |
+| **minor** `x.Y.0` | 新增功能、新命令、新交互，向后兼容 | 本版新增 `xhy scan` |
+| **patch** `x.y.Z` | 修 bug、改文案、小重构，不改变既有行为 | 修一个下载重试 |
+
+工具会自动更新两处版本号、在 `CHANGELOG.md` 顶部插入一节、重建 `install.sh` 并跑全量测试。`xhy version` 显示 `xray-hy 1.2.0 (build <12 位源码哈希>)`；`xhy update script` 用主版本号判断是否需要 `--allow-major`。
+
 ---
 
 ## 8. 已知限制与测试状态
 
-**本项目尚未在真实 VPS 上做过端到端部署验证。** 已完成的验证是离线的，任何机器上都能复跑（不需要 root、不需要网络、不需要真实 Xray）：
+已在真实 VPS（Alpine 3.23 / OpenRC，`47.88.102.45`）上完成端到端部署：`install` 七步全过、REALITY 节点实测可连、`xhy scan` 实机扫出并应用了同机房伪装站。下面的离线测试仍保留，任何机器上都能复跑（不需要 root、不需要网络、不需要真实 Xray）：
 
 ```sh
-bash test/run-all.sh     # bash -n + 渲染 + hy2 + 生命周期，共 67 项断言
+bash test/run-all.sh     # bash -n + 渲染 + hy2 + 生命周期 + 伪装站/扫描，共 119 项断言
 ```
 
-覆盖：全部脚本语法；四种 VLESS 模式与 `hy2` 的 inbound 片段和合并 `config.json` 是否合法 JSON；`hy2` 自签证书生成与 `pinSHA256` 链接；UDP 端口是否进入防火墙；`add → snapshot → del → rollback` 的整套状态恢复；跨模式端口冲突；伪装站地区优先与 BOM 防御。
+覆盖：全部脚本语法；四种 VLESS 模式与 `hy2` 的 inbound 片段和合并 `config.json` 是否合法 JSON；`hy2` 自签证书生成与 `pinSHA256` 链接；UDP 端口是否进入防火墙；`add → snapshot → del → rollback` 的整套状态恢复；跨模式端口冲突；伪装站地区优先与 BOM 防御；IP+SNI 校验与删除节点选择器；扫描模块的网段换算 / 域名过滤 / 打分 / CSV 解析 / 缓存合并与过期 / 缓存优先选站。
 
 此外 `hy2` 的配置字段在真实 Xray **26.10.31** 上用 `xray run -test` 验证通过（`protocol: hysteria` / `version: 2` / `alpn: ["h3"]` / `masquerade` / `finalmask.quicParams`），`hysteria2://` 链接格式经人工核对。
 

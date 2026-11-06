@@ -104,8 +104,8 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.1.0"
-XHY_BUILD="0fbf8de3ce43"
+XHY_VERSION="1.2.0"
+XHY_BUILD="5ae86d43a7c5"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -123,7 +123,7 @@ fi
 # ===================== lib/common.sh =====================
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.1.0}"
+XHY_VERSION="${XHY_VERSION:-1.2.0}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -1455,16 +1455,29 @@ target_region() { state_get TARGET_REGION "auto"; }
 
 # Echo "<target> <sni> <label>". Resolution order:
 #   1) explicit custom target from state
-#   2) region chosen by the admin
-#   3) auto: match the VPS egress country code
+#   2) best entry of a still-valid scan cache (same datacenter, already verified)
+#   3) region chosen by the admin
+#   4) auto: match the VPS egress country code
 pick_target() {
     local region candidate="" cc="" line r c label tgt sni
-    local custom_t custom_s
+    local custom_t custom_s sbest
     custom_t="$(state_get TARGET_CUSTOM '')"
     custom_s="$(state_get TARGET_SNI '')"
     if [[ -n "$custom_t" ]]; then
         printf '%s %s %s\n' "$custom_t" "${custom_s:-${custom_t%%:*}}" "custom"
         return 0
+    fi
+
+    # 扫描缓存优先：同机房的真实源站比全球静态表更贴合，而且已经验过一次。
+    # XHY_SKIP_SCAN_CACHE=1 可绕过（排查问题时用）。
+    if [[ "${XHY_SKIP_SCAN_CACHE:-0}" != "1" ]] && declare -F scanner_cache_valid >/dev/null; then
+        if scanner_cache_valid; then
+            if sbest="$(scanner_cache_pick_valid)"; then
+                printf '%s\n' "$sbest"
+                return 0
+            fi
+            warn "扫描缓存中的候选当前都不可用，回退到内置地区库" >&2
+        fi
     fi
 
     region="$(target_region)"
@@ -1513,7 +1526,7 @@ pick_target() {
 }
 
 target_show() {
-    local t s
+    local t s cache
     t="$(state_get TARGET_CUSTOM '')"
     s="$(state_get TARGET_SNI '')"
     printf '地区     : %s (可选: %s)\n' "$(target_region)" "$(target_list_regions)"
@@ -1521,6 +1534,16 @@ target_show() {
         printf '自定义   : %s  SNI=%s\n' "$t" "${s:-${t%%:*}}"
     else
         printf '自定义   : 未设置（使用地区自动匹配）\n'
+    fi
+    if declare -F scanner_cache_count >/dev/null && [[ -s "$SCANNER_CACHE" ]]; then
+        cache="$(scanner_cache_count) 个候选 / $(scanner_cache_age_h) 小时前"
+        if scanner_cache_valid; then
+            printf '扫描缓存 : %s（有效，建节点时优先采用）\n' "$cache"
+        else
+            printf '扫描缓存 : %s（已过期，选项 8 可查看/清除）\n' "$cache"
+        fi
+    else
+        printf '扫描缓存 : 无（选项 7 自动扫描本机机房网段）\n'
     fi
 }
 
@@ -1535,6 +1558,8 @@ target_menu() {
   4) 清除自定义设置
   5) 校验指定域名或 IP+SNI
   6) 名词说明（target / dest / SNI / serverNames）
+  7) 自动扫描本机机房网段，挑最优站点（结果缓存，可复用）
+  8) 查看 / 复核 / 清除扫描缓存
   0) 返回
 EOF
         case "$(ask '选择' '0')" in
@@ -1580,6 +1605,29 @@ EOF
                vs="${vs:-${v%%:*}}"
                target_validate "$v" "$vs" && ok "校验通过" || warn "校验未完全通过（见上面每条原因）" ;;
             6) target_help; ask '按回车继续' '' ;;
+            7) local sp st ss extra=()
+               if [[ -s "$SCANNER_CACHE" ]] && scanner_cache_valid; then
+                   confirm "已有 $(scanner_cache_age_h) 小时前的扫描缓存，重新扫描？" "n" \
+                       && extra+=(--refresh)
+               fi
+               if sp="$(scanner_pick ${extra[@]+"${extra[@]}"})"; then
+                   read -r st ss _ <<<"$sp"
+                   ok "最优站点: target=$st SNI=$ss"
+                   if confirm "把它固定为当前 target（新建节点直接使用）？" "y"; then
+                       state_set TARGET_CUSTOM "$st"; state_set TARGET_SNI "$ss"
+                       ok "已固定 target=$st SNI=$ss"
+                   fi
+               else
+                   warn "自动扫描没有找到可用站点，可改用 1) 内置地区库或 3) 手动指定"
+               fi ;;
+            8) local ca
+               ca="$(ask 'list 查看 / verify 复核 / clear 清除' 'list')"
+               case "$ca" in
+                   list)   scanner_cache_show ;;
+                   verify) scanner_cache_verify ;;
+                   clear)  scanner_cache_clear ;;
+                   *)      scanner_cache_show ;;
+               esac ;;
             0) return 0 ;;
         esac
     done
@@ -1592,6 +1640,532 @@ limit_fallback_json() {
         "limitFallbackUpload":   { "afterBytes": 0, "bytesPerSec": 65536, "burstBytesPerSec": 131072 },
         "limitFallbackDownload": { "afterBytes": 0, "bytesPerSec": 65536, "burstBytesPerSec": 131072 },
 EOF
+}
+
+# ===================== lib/scanner.sh =====================
+# xray-hy / REALITY 伪装站自动发现（XTLS/RealiTLScanner）+ 结果缓存。
+#
+# 为什么需要它：conf/targets.tsv 是一份全球静态候选表，而最合适的伪装站往往
+# 就在 VPS 自己的机房里 —— 同一个 /24、同一家运营商、TLS 握手个位数毫秒，
+# 而且机架不拆它就一直在。RealiTLScanner 能把一个网段里所有 TLS 1.3 + HTTP/2
+# 的站点列出来；这个模块负责排序、用**真实 SNI** 逐个验证，并把结果缓存下来，
+# 下次建 REALITY 节点不必再扫一遍。
+#
+# 两个容易踩的点，实现里都做了处理：
+#   1. 扫描器看到的是「该 IP 在无 SNI 时给出的默认证书」，CN 可能是 *.example.com。
+#      REALITY 回落时会带 serverNames[0] 去握手，所以必须换成具体域名再用
+#      curl --resolve 验证证书确实覆盖它，否则回落到源站时证书对不上号。
+#   2. 本机 443 上跑的就是 REALITY，扫描会看到「自己回落到 target 的那张证书」，
+#      不排除就会把自己选成 target，流量自我循环。
+#
+# 缓存格式（TSV，前两行是元数据，其余按 score 降序）：
+#   # xray-hy scan-cache 1
+#   # epoch=<unix> at=<iso> cidr=<...> tool=<ver>
+#   score  ip  sni  target  appconnect_ms  http_code  size  issuer  tls  at
+
+SCANNER_REPO="XTLS/RealiTLScanner"
+SCANNER_VER="${SCANNER_VER:-v0.2.3}"
+XHY_TOOLS_DIR="${XHY_TOOLS_DIR:-/usr/local/lib/xray-hy-tools}"
+SCANNER_BIN="${SCANNER_BIN:-$XHY_TOOLS_DIR/RealiTLScanner}"
+SCANNER_CACHE="${SCANNER_CACHE:-$XHY_ETC/scan-cache.tsv}"
+SCANNER_WORK="${SCANNER_WORK:-$XHY_ETC/scan}"
+SCANNER_TTL="${SCANNER_TTL:-604800}"        # 缓存有效期，秒（默认 7 天）
+SCANNER_MAX_VERIFY="${SCANNER_MAX_VERIFY:-48}"
+SCANNER_BUDGET="${SCANNER_BUDGET:-180}"     # 验证阶段总时长上限，秒
+SCANNER_THREADS="${SCANNER_THREADS:-128}"
+SCANNER_TIMEOUT="${SCANNER_TIMEOUT:-4}"
+
+# 下面这些函数的 stdout 会被 `best="$(scanner_pick)"` 捕获，只允许输出最终
+# 三元组 "<target> <sni> <label>"。所有进度/诊断一律走 stderr。
+sc_info() { info "$@" >&2; }
+sc_ok()   { ok   "$@" >&2; }
+
+# ---------------------------------------------------------------------------
+# 二进制获取
+# ---------------------------------------------------------------------------
+
+# 官方只发 linux-amd64 / linux-arm64 两个 Linux 资产。
+scanner_asset() {
+    case "$XHY_ARCH" in
+        64)        printf 'linux-amd64' ;;
+        arm64-v8a) printf 'linux-arm64' ;;
+        *)         return 1 ;;
+    esac
+}
+
+# 能不能跑起来。musl 系统缺 glibc loader 时是 127/not found，不是崩溃。
+scanner_smoke() {
+    local out="" rc=0
+    [[ -x "$SCANNER_BIN" ]] || return 1
+    out="$("$SCANNER_BIN" 2>&1)" || rc=$?
+    (( rc == 127 )) && return 1
+    grep -q -- '-addr' <<<"$out"
+}
+
+scanner_ensure() {
+    local asset tmp rc=0
+    if scanner_smoke; then return 0; fi
+    if ! asset="$(scanner_asset)"; then
+        err "RealiTLScanner 只提供 linux-amd64 / linux-arm64，当前架构 $XHY_ARCH 用不了"
+        err "改用内置地区库: xhy target → 1) 按地区自动匹配，或手动指定 target/SNI"
+        return 1
+    fi
+    need_root
+    install -d -m 0755 "$XHY_TOOLS_DIR" || return 1
+    tmp="$(mktemp "$XHY_TOOLS_DIR/.rts.XXXXXX")" || return 1
+    sc_info "下载 RealiTLScanner $SCANNER_VER ($asset，约 4 MB)"
+    if ! fetch "https://github.com/${SCANNER_REPO}/releases/download/${SCANNER_VER}/RealiTLScanner-${asset}" "$tmp"; then
+        rm -f "$tmp"
+        err "RealiTLScanner 下载失败。GitHub 不通时只能用内置地区库。"
+        return 1
+    fi
+    if [[ "$(head -c 4 "$tmp" 2>/dev/null)" != $'\x7fELF' ]]; then
+        rm -f "$tmp"
+        err "下载内容不是 ELF 二进制（可能被劫持/重定向），已中止"
+        return 1
+    fi
+    chmod 0755 "$tmp"
+    install -m 0755 "$tmp" "$SCANNER_BIN" || { rm -f "$tmp"; return 1; }
+    rm -f "$tmp"
+
+    if ! scanner_smoke; then
+        # 官方二进制是 glibc 动态链接的；Alpine 是 musl，直接跑会 "not found"。
+        if [[ "$XHY_DISTRO" == "alpine" ]]; then
+            sc_info "RealiTLScanner 需要 glibc 兼容层（Alpine/musl），安装 libc6-compat ..."
+            pkg_install libc6-compat >/dev/null 2>&1 || true
+            if ! scanner_smoke; then
+                pkg_install gcompat >/dev/null 2>&1 || true
+            fi
+        fi
+        if ! scanner_smoke; then
+            err "RealiTLScanner 无法运行（架构或运行库不匹配）：$SCANNER_BIN"
+            err "Alpine 可手工修复: apk add libc6-compat gcompat"
+            return 1
+        fi
+        sc_ok "glibc 兼容层已装好，扫描器可用"
+    fi
+    sc_ok "扫描器就绪: $SCANNER_BIN ($SCANNER_VER)"
+}
+
+# ---------------------------------------------------------------------------
+# 网段推导
+# ---------------------------------------------------------------------------
+
+# cidr_truncate <ipv4> <prefix> —— 把 IP 归到指定前缀的网络地址
+cidr_truncate() {
+    local ip="$1" p="$2"
+    is_ip_literal "$ip" || return 1
+    [[ "$p" =~ ^[0-9]+$ ]] && (( p >= 8 && p <= 32 )) || return 1
+    awk -v ip="$ip" -v p="$p" 'BEGIN {
+        n = split(ip, a, ".")
+        if (n != 4) exit 1
+        v = a[1] * 16777216 + a[2] * 65536 + a[3] * 256 + a[4]
+        block = 2 ^ (32 - p)
+        net = int(v / block) * block
+        printf "%d.%d.%d.%d/%d", int(net / 16777216) % 256, int(net / 65536) % 256, int(net / 256) % 256, net % 256, p
+    }'
+}
+
+# 默认扫本机公网 IP 所在的 /24：同机架、最低延迟、最容易长期存在。
+scanner_default_cidr() {
+    local ip
+    ip="$(public_ip || true)"
+    is_ip_literal "$ip" || return 1
+    cidr_truncate "$ip" 24
+}
+
+# ---------------------------------------------------------------------------
+# 候选过滤与打分（纯函数，离线可测）
+# ---------------------------------------------------------------------------
+
+# CN -> 可用于 SNI 的具体域名（通配符证书给两个猜测，按顺序试）
+scanner_sni_candidates() {
+    local cn="${1,,}" base
+    base="${cn#\*.}"
+    case "$cn" in
+        \*.*) printf '%s %s\n' "www.${base}" "${base}" ;;
+        *)    printf '%s\n' "$base" ;;
+    esac
+}
+
+# 这个 CN 适合当伪装站吗？排除的不是「证书无效」，而是「一眼就是代理/测试环境」。
+scanner_domain_ok() {
+    local d="${1,,}" lab
+    local -a labels=()
+    # 通配符证书的 "*." 是证书属性，不是域名的一部分；去掉后再按标签判断。
+    d="${d#\*.}"
+    [[ -n "$d" ]] || return 1
+    case "$d" in
+        *" "*|*/*|*:*) return 1 ;;
+        *kubernetes*|*ingress*|*localhost*|*example.com|*example.net|*example.org|*invalid) return 1 ;;
+        *.local|*.internal|*.lan|*.test|*.home|*.arpa|*.onion) return 1 ;;
+        # 这类 CN 说明这台机器只是别人的反代/CDN 边缘，拿到的是厂商证书而不是
+        # 站点自己的证书，回落时会露馅。
+        *cloudflare.com|*cloudflare.net|*fastly.net|*akamaiedge.net) return 1 ;;
+    esac
+    [[ "$d" == *.* ]] || return 1
+    IFS='.' read -r -a labels <<<"$d"
+    (( ${#labels[@]} >= 2 )) || return 1
+    for lab in "${labels[@]}"; do
+        [[ "$lab" =~ ^[a-z0-9-]+$ ]] || return 1
+        case "$lab" in
+            api|vpn|proxy|proxies|sub|subs|subscribe|subscription|node|nodes|airport|\
+            test|testing|dev|develop|staging|stage|demo|alpha|beta|sandbox|\
+            chatgpt|openai|claude|gemini|copilot|grok|\
+            ss|ssr|v2ray|xray|clash|trojan|hysteria|hy2|reality|tunnel|relay|forward)
+                return 1 ;;
+        esac
+    done
+    if [[ "${labels[0]}" =~ ^[0-9]+$ ]]; then return 1; fi
+    return 0
+}
+
+# scanner_score <appconnect_ms> <http_code> <size> <wildcard 0|1>
+# 分数只用于排序，不做合格判定（合格与否由 scanner_probe 决定）。
+scanner_score() {
+    local ms="${1:-9999}" code="${2:-0}" size="${3:-0}" wild="${4:-0}" s=100
+    [[ "$ms" =~ ^[0-9]+$ ]] || ms=9999
+    (( ms <= 0 )) && ms=9999
+    # 同机房通常 <10ms。每 10ms 扣 3 分，最低 70：延迟差一点不该盖过站点质量。
+    s=$(( s - (ms / 10) * 3 ))
+    (( s < 70 )) && s=70
+    case "$code" in
+        200)      s=$(( s + 15 )) ;;
+        204|206)  s=$(( s + 8 )) ;;
+        401|403)  s=$(( s - 15 )) ;;
+        404|410)  s=$(( s - 20 )) ;;
+        5??)      s=$(( s - 30 )) ;;
+    esac
+    (( size > 2000 )) && s=$(( s + 6 ))
+    (( wild == 1 )) && s=$(( s - 4 ))
+    printf '%d' "$s"
+}
+
+# CSV -> 候选 TSV（ip \t cn \t issuer \t tls \t alpn）
+# RealiTLScanner 只写「TLS 1.3 + h2 + 有 CN + 有 issuer」的行，这里再做一次
+# 防御性过滤，并按列尾定位（issuer 里可能带逗号，不能简单按第 9/10 列取）。
+scanner_candidates() {
+    local csv="$1" tab=$'\t'
+    [[ -s "$csv" ]] || return 1
+    awk -F',' -v OFS="$tab" '
+        NR > 1 && NF >= 11 {
+            ip = $1; tls = $(NF - 8); alpn = $(NF - 7); cn = $(NF - 2); iss = $(NF - 1)
+            gsub(/^[[:space:]"]+|[[:space:]"]+$/, "", cn)
+            gsub(/^[[:space:]"]+|[[:space:]"]+$/, "", iss)
+            if (tls !~ /1\.3/ || alpn !~ /h2/ || cn == "") next
+            print ip, cn, iss, tls, alpn
+        }' "$csv" | sort -u
+}
+
+# 用真实 SNI 打这台 IP。成功时输出：
+#   <http_version>|<appconnect_ms>|<http_code>|<size>|<redirect 0/1>|<cdn 0/1>
+# 故意不带 -k：证书必须真的覆盖这个域名，否则 RELITY 回落时看到的就是错证书。
+scanner_probe() {
+    local ip="$1" sni="$2" d rc=0 met hv ac code size ms redir=0 cdn=0
+    d="$(mktemp -d "${TMPDIR:-/tmp}/xhy-probe.XXXXXX")" || return 1
+    # shellcheck disable=SC2064
+    trap "rm -rf '$d'" RETURN
+    curl -sS --tlsv1.3 --http2 --max-time 8 \
+        --resolve "${sni}:443:${ip}" \
+        -D "$d/h" -o /dev/null \
+        -w '%{http_version}|%{time_appconnect}|%{http_code}|%{size_download}' \
+        "https://${sni}/" >"$d/m" 2>/dev/null || rc=$?
+    (( rc == 0 )) || return 1
+    [[ -s "$d/m" ]] || return 1
+    met="$(cat "$d/m")"
+    IFS='|' read -r hv ac code size <<<"$met"
+    [[ "$hv" == "2" ]] || return 1
+    [[ -n "$code" && "$code" != "000" ]] || return 1
+    ms="$(awk -v v="${ac:-0}" 'BEGIN { printf "%d", v * 1000 }')"
+    if grep -qiE '^location:' "$d/h"; then redir=1; fi
+    case "$code" in 30[12378]) redir=1 ;; esac
+    if grep -qiE '^(cf-ray|cf-cache-status|x-cache|via):|^server:[[:space:]]*cloudflare' "$d/h"; then
+        cdn=1
+    fi
+    printf '%s|%s|%s|%s|%s|%s\n' "$hv" "$ms" "$code" "$size" "$redir" "$cdn"
+}
+
+# CSV -> 已排序的合格候选 TSV（就是缓存的数据行格式）
+scanner_rank() {
+    local csv="$1" out="$2" tab=$'\t'
+    local ip cn iss tls alpn sni res hv ms code size redir cdn sc
+    local self4 self6 total=0 keep=0 t0 now
+    : >"$out"
+    self4="$(public_ip || true)"
+    self6="$(public_ip6 || true)"
+    total="$(scanner_candidates "$csv" | wc -l | tr -d ' ')"
+    t0="$(date +%s)"
+    while IFS="$tab" read -r ip cn iss tls alpn; do
+        [[ -n "$ip" ]] || continue
+        # 本机 443 就是 REALITY：不排掉会把自己选成 target。
+        if [[ -n "$self4" && "$ip" == "$self4" ]]; then continue; fi
+        if [[ -n "$self6" && "$ip" == "$self6" ]]; then continue; fi
+        scanner_domain_ok "$cn" || continue
+        if (( keep >= SCANNER_MAX_VERIFY )); then break; fi
+        now="$(date +%s)"
+        if (( now - t0 > SCANNER_BUDGET )); then
+            warn "验证阶段超过 ${SCANNER_BUDGET}s，用已完成的 $keep 个候选继续"
+            break
+        fi
+        for sni in $(scanner_sni_candidates "$cn"); do
+            if ! res="$(scanner_probe "$ip" "$sni")"; then continue; fi
+            IFS='|' read -r hv ms code size redir cdn <<<"$res"
+            if (( redir == 1 || cdn == 1 )); then continue; fi
+            if [[ "$cn" == \*.* ]]; then
+                sc="$(scanner_score "$ms" "$code" "$size" 1)"
+            else
+                sc="$(scanner_score "$ms" "$code" "$size" 0)"
+            fi
+            printf '%s\t%s\t%s\t%s:443\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "$sc" "$ip" "$sni" "$ip" "$ms" "$code" "$size" "$iss" "$tls" "$(date -Is)" >>"$out"
+            keep=$(( keep + 1 ))
+            sc_info "  + ${sni} @ ${ip}  ${ms}ms  HTTP ${code}  ${size}B  score ${sc}"
+            break
+        done
+    done < <(scanner_candidates "$csv")
+    (( keep > 0 )) || return 1
+    sort -t "$tab" -k1,1nr "$out" >"$out.sorted" && mv -f "$out.sorted" "$out"
+    sc_ok "验证完成：$keep 个可用候选（共 $total 个 TLS 1.3 + h2 命中）"
+}
+
+# ---------------------------------------------------------------------------
+# 缓存
+# ---------------------------------------------------------------------------
+
+scanner_cache_epoch() {
+    sed -n 's/^# epoch=\([0-9][0-9]*\).*/\1/p' "$SCANNER_CACHE" 2>/dev/null | head -1
+}
+
+scanner_cache_age_h() {
+    local epoch now
+    epoch="$(scanner_cache_epoch)"
+    if [[ -z "$epoch" ]]; then printf '?'; return 0; fi
+    now="$(date +%s)"
+    printf '%s' "$(( (now - epoch) / 3600 ))"
+}
+
+scanner_cache_valid() {
+    local epoch now
+    [[ -s "$SCANNER_CACHE" ]] || return 1
+    epoch="$(scanner_cache_epoch)"
+    [[ -n "$epoch" ]] || return 1
+    now="$(date +%s)"
+    (( now - epoch <= SCANNER_TTL ))
+}
+
+scanner_cache_count() {
+    local n="0"
+    [[ -s "$SCANNER_CACHE" ]] || { printf '0'; return 0; }
+    n="$(grep -vc '^#' "$SCANNER_CACHE" 2>/dev/null || true)"
+    printf '%s' "${n:-0}"
+}
+
+scanner_cache_best() {
+    local tab=$'\t'
+    [[ -s "$SCANNER_CACHE" ]] || return 1
+    { grep -v '^#' "$SCANNER_CACHE" 2>/dev/null || true; } | sort -t "$tab" -k1,1nr
+}
+
+# 同 ip|sni 只留分数最高的那条。
+scanner_cache_merge() {
+    local old="$1" new="$2" tab=$'\t'
+    { grep -v '^#' "$old" 2>/dev/null || true; cat "$new"; } \
+        | awk -F"$tab" '
+            {
+                k = $2 "|" $3
+                s = $1 + 0
+                if (!(k in score) || s > score[k]) { score[k] = s; line[k] = $0 }
+            }
+            END { for (k in line) print line[k] }' \
+        | sort -t "$tab" -k1,1nr
+}
+
+# scanner_cache_save <cidr> <ranked.tsv> [replace 0|1]
+scanner_cache_save() {
+    local cidr="$1" rows="$2" replace="${3:-0}" tmp tab=$'\t'
+    [[ -s "$rows" ]] || return 1
+    # 不用 `install -d -m`：目录已存在时它会去 chmod，MSYS / 只读挂载上会返回
+    # 非零，缓存就写不进去了。权限失败不影响功能，忽略即可（与 init_dirs 一致）。
+    mkdir -p "$(dirname "$SCANNER_CACHE")" || return 1
+    chmod 0700 "$(dirname "$SCANNER_CACHE")" 2>/dev/null || true
+    tmp="$(mktemp "${SCANNER_CACHE}.XXXXXX")" || return 1
+    {
+        printf '# xray-hy scan-cache 1\n'
+        printf '# epoch=%s at=%s cidr=%s tool=%s\n' \
+            "$(date +%s)" "$(date -Is)" "$cidr" "$SCANNER_VER"
+        if [[ "$replace" == "0" ]] && scanner_cache_valid; then
+            scanner_cache_merge "$SCANNER_CACHE" "$rows"
+        else
+            sort -t "$tab" -k1,1nr "$rows"
+        fi
+    } >"$tmp" || { rm -f "$tmp"; return 1; }
+    install -m 0600 "$tmp" "$SCANNER_CACHE" || { rm -f "$tmp"; return 1; }
+    rm -f "$tmp" || true
+}
+
+scanner_cache_clear() {
+    rm -f "$SCANNER_CACHE" && sc_ok "已清除扫描缓存"
+}
+
+scanner_cache_show() {
+    local sc ip sni tgt ms code size iss tls at epoch at_iso
+    if [[ ! -s "$SCANNER_CACHE" ]]; then
+        warn "暂无扫描缓存（xhy scan 扫一次就会存下来）"
+        return 0
+    fi
+    epoch="$(scanner_cache_epoch)"
+    at_iso="$(sed -n 's/^# .*at=\([^ ]*\).*/\1/p' "$SCANNER_CACHE" 2>/dev/null | head -1)"
+    printf '缓存文件 : %s\n' "$SCANNER_CACHE"
+    printf '扫描时间 : %s（%s 小时前，有效期 %s 小时）\n' \
+        "${at_iso:-?}" "$(scanner_cache_age_h)" "$(( SCANNER_TTL / 3600 ))"
+    if scanner_cache_valid; then printf '状态     : 有效（建节点时会被直接采用）\n'
+    else printf '状态     : 已过期（下次自动扫描会重扫）\n'; fi
+    printf '\n  %-4s %-16s %-34s %7s %5s %9s  %s\n' "分数" "IP" "SNI" "握手" "HTTP" "大小" "签发者"
+    printf '  %s\n' "-------------------------------------------------------------------------------------------"
+    while IFS=$'\t' read -r sc ip sni tgt ms code size iss tls at; do
+        [[ -n "$ip" ]] || continue
+        printf '  %-4s %-16s %-34s %5sms %5s %8sB  %s\n' \
+            "$sc" "$ip" "$sni" "$ms" "$code" "$size" "$iss"
+    done < <(scanner_cache_best)
+    printf '\n'
+}
+
+scanner_cache_verify() {
+    local sc ip sni tgt ms code size iss tls at tmp keep=0 drop=0 hdr
+    [[ -s "$SCANNER_CACHE" ]] || { warn "暂无扫描缓存"; return 1; }
+    tmp="$(mktemp "${SCANNER_CACHE}.XXXXXX")" || return 1
+    hdr="$(head -2 "$SCANNER_CACHE" | grep '^#' || true)"
+    {
+        printf '%s\n' "$hdr"
+        while IFS=$'\t' read -r sc ip sni tgt ms code size iss tls at; do
+            [[ -n "$ip" ]] || continue
+            if target_validate "$tgt" "$sni" >&2; then
+                printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                    "$sc" "$ip" "$sni" "$tgt" "$ms" "$code" "$size" "$iss" "$tls" "$at"
+                keep=$(( keep + 1 ))
+            else
+                drop=$(( drop + 1 ))
+            fi
+        done < <(scanner_cache_best)
+    } >"$tmp"
+    install -m 0600 "$tmp" "$SCANNER_CACHE"
+    rm -f "$tmp" || true
+    if (( keep == 0 )); then
+        rm -f "$SCANNER_CACHE"
+        warn "所有缓存候选都已失效，缓存已清空（下次会重新扫描）"
+        return 1
+    fi
+    sc_ok "复核完成：保留 $keep 个，剔除 $drop 个"
+}
+
+# 逐个拿缓存候选做 REALITY 级校验，返回第一个可用的 "<target> <sni> scan"。
+# target_validate 的 stdout 必须转到 stderr，否则会污染调用方捕获的三元组。
+scanner_cache_pick_valid() {
+    local sc ip sni tgt ms code size iss tls at
+    while IFS=$'\t' read -r sc ip sni tgt ms code size iss tls at; do
+        [[ -n "$tgt" ]] || continue
+        if target_validate "$tgt" "$sni" >&2; then
+            printf '%s %s scan\n' "$tgt" "$sni"
+            return 0
+        fi
+    done < <(scanner_cache_best)
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# 扫描与选择
+# ---------------------------------------------------------------------------
+
+scanner_scan() {
+    local cidr="$1" ts csv log ranked n
+    scanner_ensure || return 1
+    install -d -m 0700 "$SCANNER_WORK" || return 1
+    ts="$(date +%s)"
+    csv="$SCANNER_WORK/scan-${ts}.csv"
+    log="$csv.log"
+    sc_info "扫描 $cidr（端口 443，thread ${SCANNER_THREADS}，超时 ${SCANNER_TIMEOUT}s/主机）..."
+    if ! "$SCANNER_BIN" -addr "$cidr" -port 443 -thread "$SCANNER_THREADS" \
+            -timeout "$SCANNER_TIMEOUT" -out "$csv" >"$log" 2>&1; then
+        err "扫描失败，日志: $log" >&2
+        return 1
+    fi
+    n=$(( $(wc -l <"$csv" | tr -d ' ') - 1 ))
+    if (( n <= 0 )); then
+        warn "$cidr 内没有 TLS 1.3 + HTTP/2 站点（日志: $log）"
+        return 1
+    fi
+    sc_info "命中 $n 个 TLS 1.3 + h2 站点，逐个用真实 SNI 验证（最多 ${SCANNER_MAX_VERIFY} 个）..."
+    ranked="$SCANNER_WORK/ranked-${ts}.tsv"
+    if ! scanner_rank "$csv" "$ranked"; then
+        warn "没有既非 CDN、又不跳转、证书可校验的站点（日志: $log）"
+        return 1
+    fi
+    scanner_cache_save "$cidr" "$ranked" 0 || return 1
+    scanner_prune_work
+    sc_ok "结果已缓存: $SCANNER_CACHE"
+}
+
+# 只保留最近 5 次扫描产物，别把 /etc 撑大（每次 CSV 只有几十 KB，但会累积）。
+scanner_prune_work() {
+    local f n=0
+    [[ -d "$SCANNER_WORK" ]] || return 0
+    while IFS= read -r f; do
+        [[ -n "$f" ]] || continue
+        n=$(( n + 1 ))
+        if (( n > 10 )); then rm -f "$f"; fi
+    done < <(ls -1t "$SCANNER_WORK"/scan-*.csv "$SCANNER_WORK"/ranked-*.tsv 2>/dev/null || true)
+    return 0
+}
+
+# 输出 "<target> <sni> <label>"：优先用有效缓存，否则扫本机 /24（不够再扩 /21）。
+#   scanner_pick [--refresh] [--cidr 1.2.3.0/24]
+scanner_pick() {
+    local refresh=0 cidr="" best wide
+    while (( $# > 0 )); do
+        case "$1" in
+            --refresh) refresh=1; shift ;;
+            --cidr)    cidr="${2:?--cidr 需要网段}"; shift 2 ;;
+            -*)        die "未知参数: $1（可用 --refresh / --cidr）" ;;
+            *)         cidr="$1"; shift ;;
+        esac
+    done
+
+    if (( refresh == 0 )) && scanner_cache_valid; then
+        sc_info "使用扫描缓存（$(scanner_cache_age_h) 小时前，$(scanner_cache_count) 个候选；--refresh 可强制重扫）"
+        if best="$(scanner_cache_pick_valid)"; then
+            printf '%s\n' "$best"
+            return 0
+        fi
+        warn "缓存里的候选都已失效，重新扫描"
+    fi
+
+    if [[ -z "$cidr" ]]; then
+        if ! cidr="$(scanner_default_cidr)"; then
+            err "无法确定本机公网网段，请显式指定: xhy scan 1.2.3.0/24" >&2
+            return 1
+        fi
+    fi
+
+    if ! scanner_scan "$cidr"; then
+        case "$cidr" in
+            */24)
+                wide="$(cidr_truncate "${cidr%%/*}" 21)" || wide=""
+                if [[ -n "$wide" ]]; then
+                    warn "$cidr 无合格候选，扩大到同机房 $wide 再试一次"
+                    scanner_scan "$wide" || return 1
+                else
+                    return 1
+                fi ;;
+            *) return 1 ;;
+        esac
+    fi
+
+    if best="$(scanner_cache_pick_valid)"; then
+        printf '%s\n' "$best"
+        return 0
+    fi
+    err "扫描完成但没有可用站点（xhy scan --list 查看候选与失败原因）" >&2
+    return 1
 }
 
 # ===================== lib/nodes.sh =====================
@@ -1897,10 +2471,12 @@ write_fragment() {
 
 # node_add MODE PORT [--host H] [--path P] [--sni S] [--target T]
 #                    [--token TOKEN] [--domain D] [--reality] [--uuid U]
+#                    [--scan] [--scan-cidr CIDR] [--scan-refresh]
 node_add() {
     local mode="$1" port="$2"; shift 2
     local host="" path="" sni="" target="" token="" domain="" uuid="" with_reality="0"
     local masq="" up="" down=""
+    local use_scan="0" scan_cidr="" scan_refresh="0"
     while (( $# > 0 )); do
         case "$1" in
             --host)   host="$2"; shift 2 ;;
@@ -1914,6 +2490,9 @@ node_add() {
             --up)     up="$2"; shift 2 ;;
             --down)   down="$2"; shift 2 ;;
             --reality) with_reality="1"; shift ;;
+            --scan)        use_scan="1"; shift ;;
+            --scan-cidr)   scan_cidr="$2"; shift 2 ;;
+            --scan-refresh) scan_refresh="1"; shift ;;
             *) die "未知参数: $1" ;;
         esac
     done
@@ -1939,6 +2518,27 @@ node_add() {
     path="${path:-$(rand_path)}"
     host="${host:-$(public_ip)}"
     [[ "$path" == /* ]] || path="/$path"
+
+    # 自动扫描伪装站（--scan）。放在这里而不是各分支里：reality 与
+    # xhttp --reality 都走同一段解析，扫出来的结果就是普通的 --target/--sni，
+    # 后面的校验、渲染、回滚逻辑完全不用改。
+    if [[ "$use_scan" == "1" && -z "$target" ]]; then
+        if [[ "$mode" != "reality" && "$with_reality" != "1" ]]; then
+            warn "--scan 只对 REALITY 类节点有意义（reality / xhttp --reality），已忽略"
+        else
+            local -a scargs=()
+            local sp sl
+            if [[ "$scan_refresh" == "1" ]]; then scargs+=(--refresh); fi
+            if [[ -n "$scan_cidr" ]]; then scargs+=(--cidr "$scan_cidr"); fi
+            if sp="$(scanner_pick ${scargs[@]+"${scargs[@]}"})"; then
+                read -r target sni sl <<<"$sp"
+                info "自动扫描选中: target=$target SNI=$sni（来源 scan${sl:+ $sl}）"
+            else
+                warn "自动扫描没有找到可用站点，回退到内置伪装站库"
+                target=""
+            fi
+        fi
+    fi
 
     local public=1 priv="" pub="" sid="" tgt="" t_sni="" label="" security="none"
     local pairs=() picked="" kp=""
@@ -2770,6 +3370,11 @@ self_check() {
         warn "未安装 ip6tables，IPv6 未受保护"
     fi
     printf '%s\n' "--------------------------------------"
+    if [[ -x "$SCANNER_BIN" ]]; then
+        printf '扫描器   : %s\n' "$SCANNER_BIN"
+    else
+        printf '扫描器   : 未安装（首次 xhy scan / add --scan 自动下载）\n'
+    fi
     target_show
     printf '节点数量 : %s\n' "$(node_count)"
     printf '配置快照 : %s 份 (xhy snapshots / xhy rollback)\n' \
@@ -2959,8 +3564,20 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
     mode: direct | tunnel | reality | xhttp | hy2
     add 选项: --host --path --uuid --sni --target --domain --token --reality
               --masq --up --down   (hy2 专用)
+              --scan [--scan-cidr CIDR] [--scan-refresh]   (reality 专用)
     默认端口: direct 8080 / tunnel 10086 / reality 443 / xhttp 8081 / hy2 8443(UDP)
     hy2 用 Xray 内置 Hysteria2 入站(v26.3.27+)，自签证书 + pinSHA256 链接
+
+  伪装站自动扫描
+    scan [网段]                 扫本机机房网段，挑最优伪装站（结果缓存复用）
+    scan --list                 查看缓存里的候选与打分
+    scan --verify               复核缓存候选，剔除已失效的
+    scan --refresh              忽略缓存重新扫描
+    scan --clear                清除缓存
+    原理: 用 RealiTLScanner 在 /24 里枚举 TLS 1.3 + h2 站点，再逐个用真实 SNI
+    做证书/跳转/CDN 校验，取分数最高的那个作为「dest=源站 IP + SNI=域名」。
+    结果记在 /etc/xray-hy/scan-cache.tsv（默认 7 天），此后再建 REALITY 节点
+    直接复用，不会重复扫描。仅 amd64 / arm64 支持，其它架构回退内置地区库。
 
   伪装站 / REALITY 名词（xhy target 里输入 6 可随时查看）
     target(dest)  服务端主动去连的目的地址（IP:端口 或 域名:端口），未认证流量
@@ -2971,6 +3588,7 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
         xhy add reality --port 443 --target 1.2.3.4:443 --sni www.example.com
     交互菜单 8) 伪装站 → 3) 手动指定 支持同一写法（1.2.3.4:443,sni=www.example.com），
     校验会用 --resolve 打该 IP，测证书是否真的覆盖这个域名。
+    不想手挑就用 xhy scan：自动扫本机机房网段并选最优站点（结果缓存复用）。
 
   配置
     config                      路由/DNS/日志开关菜单（也可直接 set）
@@ -3089,31 +3707,51 @@ EOF
     [[ -n "$path" ]] && opts+=(--path "$path")
     case "$mode" in
         reality)
-            if confirm "手动指定 REALITY target / SNI？" "n"; then
-                # 一条输入：host[:port][,sni=xxx]；不写 sni= 时 SNI 与 target 同名。
-                # 目标站在 CDN 后面时用「源站 IP + 域名 SNI」：1.2.3.4:443,sni=www.example.com
-                local t_in ts
-                cat <<'EOF'
+            cat <<'EOF'
+  伪装站（target / dest）来源：
+    1) 自动扫描本机机房网段，选最优站点（推荐；有缓存直接复用，不重复扫）
+    2) 内置地区库（按 VPS 出口国家匹配）
+    3) 手动指定 target / SNI
+EOF
+            case "$(ask '选择' '1')" in
+                1)
+                    opts+=(--scan)
+                    if [[ -s "$SCANNER_CACHE" ]] && scanner_cache_valid; then
+                        info "已有 $(scanner_cache_age_h) 小时前的扫描缓存（$(scanner_cache_count) 个候选）"
+                        if confirm "忽略缓存重新扫描？" "n"; then opts+=(--scan-refresh); fi
+                    else
+                        info "扫描范围默认是本机公网 IP 所在 /24，无结果会自动扩到 /21"
+                    fi ;;
+                3)
+                    # 一条输入：host[:port][,sni=xxx]；不写 sni= 时 SNI 与 target 同名。
+                    # 目标站在 CDN 后面时用「源站 IP + 域名 SNI」：1.2.3.4:443,sni=www.example.com
+                    local t_in ts
+                    cat <<'EOF'
   输入示例：
     www.example.com                    域名，dest 与 SNI 相同
     1.2.3.4:443,sni=www.example.com   源站 IP + 域名 SNI（站点在 CDN 后时用这个）
     www.example.com:8443              非 443 端口
 EOF
-                t_in="$(ask 'target')"
-                [[ -n "$t_in" ]] || return 0
-                ts="${t_in#*,sni=}"; [[ "$ts" == "$t_in" ]] && ts=""
-                t_in="${t_in%%,*}"
-                [[ "$t_in" == *:* ]] || t_in="${t_in}:443"
-                if is_ip_literal "${t_in%%:*}" && [[ -z "$ts" ]]; then
-                    err "target 是 IP 时必须加 ,sni=域名（dest 用 IP、SNI 用域名）"
-                    return 1
-                fi
-                opts+=(--target "$t_in" --sni "${ts:-${t_in%%:*}}")
-            else
-                info "按地区自动选择伪装站并做 TLS 1.3 / H2 校验..."
-            fi ;;
+                    t_in="$(ask 'target')"
+                    [[ -n "$t_in" ]] || return 0
+                    ts="${t_in#*,sni=}"; [[ "$ts" == "$t_in" ]] && ts=""
+                    t_in="${t_in%%,*}"
+                    [[ "$t_in" == *:* ]] || t_in="${t_in}:443"
+                    if is_ip_literal "${t_in%%:*}" && [[ -z "$ts" ]]; then
+                        err "target 是 IP 时必须加 ,sni=域名（dest 用 IP、SNI 用域名）"
+                        return 1
+                    fi
+                    opts+=(--target "$t_in" --sni "${ts:-${t_in%%:*}}") ;;
+                *)
+                    info "使用内置地区库（conf/targets.tsv）..." ;;
+            esac ;;
         xhttp)
-            if confirm "叠加 REALITY（无需证书）？" "n"; then extra+=(--reality); fi ;;
+            if confirm "叠加 REALITY（无需证书）？" "n"; then
+                extra+=(--reality)
+                if confirm "自动扫描本机机房网段挑伪装站？（n = 用内置地区库）" "y"; then
+                    extra+=(--scan)
+                fi
+            fi ;;
         tunnel)
             domain="$(ask 'Cloudflare 公开主机名' '')"
             token="$(ask 'Tunnel Token (回车复用已保存的)' '')"
@@ -3139,13 +3777,50 @@ cmd_add() {
     while (( $# > 0 )); do
         case "$1" in
             --port)   port="$2"; shift 2 ;;
-            --host|--path|--uuid|--sni|--target|--domain|--token|--masq|--up|--down) opts+=("$1" "$2"); shift 2 ;;
-            --reality) opts+=("$1"); shift ;;
+            --host|--path|--uuid|--sni|--target|--domain|--token|--masq|--up|--down|--scan-cidr)
+                opts+=("$1" "$2"); shift 2 ;;
+            --reality|--scan|--scan-refresh) opts+=("$1"); shift ;;
             *) die "未知参数: $1（见 xhy --help）" ;;
         esac
     done
     valid_port "$port" || die "端口不合法: $port"
     node_add "$mode" "$port" "${opts[@]}"
+}
+
+# xhy scan [网段] [--refresh|--list|--verify|--clear]
+cmd_scan() {
+    local cidr="" refresh=0 mode="run" best st ss sl
+    while (( $# > 0 )); do
+        case "$1" in
+            --refresh) refresh=1; shift ;;
+            --list)    mode="list"; shift ;;
+            --clear)   mode="clear"; shift ;;
+            --verify)  mode="verify"; shift ;;
+            --cidr)    cidr="${2:?--cidr 需要网段}"; shift 2 ;;
+            -*)        die "未知参数: $1（用法: xhy scan [网段] [--refresh|--list|--verify|--clear]）" ;;
+            *)         cidr="$1"; shift ;;
+        esac
+    done
+    case "$mode" in
+        list)   scanner_cache_show ;;
+        clear)  scanner_cache_clear ;;
+        verify) scanner_cache_verify ;;
+        run)
+            local -a args=()
+            if (( refresh == 1 )); then args+=(--refresh); fi
+            if [[ -n "$cidr" ]]; then args+=(--cidr "$cidr"); fi
+            if best="$(scanner_pick ${args[@]+"${args[@]}"})"; then
+                read -r st ss sl <<<"$best"
+                printf '\n最优伪装站: target=%s  SNI=%s（来源 %s）\n\n' "$st" "$ss" "$sl"
+                printf '  直接建节点（用缓存，不再扫描）:\n'
+                printf '    xhy add reality --port 443 --target %s --sni %s\n\n' "$st" "$ss"
+                printf '  或让它自己挑（缓存有效期内同样不重扫）:\n'
+                printf '    xhy add reality --port 443 --scan\n'
+            else
+                err "自动扫描失败；可改用 xhy target → 1) 内置地区库，或 3) 手动指定"
+                return 1
+            fi ;;
+    esac
 }
 
 cmd_config_set() {
@@ -3229,6 +3904,8 @@ cmd_uninstall() {
           /etc/init.d/xray-hy /etc/init.d/xray-hy-firewall \
           /usr/local/lib/xray-hy/tunnel-run /usr/local/bin/xhy \
           "$XHY_SELF" /etc/sysctl.d/90-xray-hy.conf /etc/modules-load.d/xray-hy.conf
+    # 扫描器是下载来的独立工具，不在 git 工作树里，卸载时单独清。
+    rm -rf "$XHY_TOOLS_DIR"
     # 仓库内运行时 XHY_APP_DIR 就是工作树：只删入口，不碰 conf/ 和目录本身。
     if [[ "${XHY_DEV:-0}" != "1" ]]; then
         rm -rf "$XHY_APP_DIR/conf"
@@ -3260,7 +3937,7 @@ cmd_menu() {
   ---- 维护 ----
   11) 服务管理              12) Xray 版本通道
   13) 更新                  14) 卸载
-  15) 备份 / 恢复
+  15) 备份 / 恢复           16) 扫描伪装站
    0) 退出
 EOF
         case "$(ask '选择' '0')" in
@@ -3308,6 +3985,7 @@ EOF
                    restore) backup_restore "$(ask '备份文件路径' '')" ;;
                    *) warn "只支持 backup 或 restore" ;;
                esac ;;
+           16) cmd_scan ;;
             0) return 0 ;;
         esac
     done
@@ -3318,7 +3996,7 @@ main() {
     [[ $# -gt 0 ]] && shift
     case "$cmd" in
         --help|-h|help) usage; return 0 ;;
-        --version|version) printf 'xray-hy %s\n' "$XHY_VERSION"; return 0 ;;
+        --version|version) printf 'xray-hy %s (build %s)\n' "$XHY_VERSION" "$XHY_BUILD"; return 0 ;;
     esac
 
     need_root
@@ -3352,6 +4030,7 @@ main() {
         snapshots)  list_snapshots ;;
         rollback)   rollback_config "${1:-}" ;;
         target)     target_menu ;;
+        scan)       cmd_scan "$@" ;;
         firewall)   case "${1:-status}" in
                         # --quiet is passed by the boot unit; forward it so boot
                         # logs stay clean.

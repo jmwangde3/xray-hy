@@ -301,10 +301,12 @@ write_fragment() {
 
 # node_add MODE PORT [--host H] [--path P] [--sni S] [--target T]
 #                    [--token TOKEN] [--domain D] [--reality] [--uuid U]
+#                    [--scan] [--scan-cidr CIDR] [--scan-refresh]
 node_add() {
     local mode="$1" port="$2"; shift 2
     local host="" path="" sni="" target="" token="" domain="" uuid="" with_reality="0"
     local masq="" up="" down=""
+    local use_scan="0" scan_cidr="" scan_refresh="0"
     while (( $# > 0 )); do
         case "$1" in
             --host)   host="$2"; shift 2 ;;
@@ -318,6 +320,9 @@ node_add() {
             --up)     up="$2"; shift 2 ;;
             --down)   down="$2"; shift 2 ;;
             --reality) with_reality="1"; shift ;;
+            --scan)        use_scan="1"; shift ;;
+            --scan-cidr)   scan_cidr="$2"; shift 2 ;;
+            --scan-refresh) scan_refresh="1"; shift ;;
             *) die "未知参数: $1" ;;
         esac
     done
@@ -343,6 +348,27 @@ node_add() {
     path="${path:-$(rand_path)}"
     host="${host:-$(public_ip)}"
     [[ "$path" == /* ]] || path="/$path"
+
+    # 自动扫描伪装站（--scan）。放在这里而不是各分支里：reality 与
+    # xhttp --reality 都走同一段解析，扫出来的结果就是普通的 --target/--sni，
+    # 后面的校验、渲染、回滚逻辑完全不用改。
+    if [[ "$use_scan" == "1" && -z "$target" ]]; then
+        if [[ "$mode" != "reality" && "$with_reality" != "1" ]]; then
+            warn "--scan 只对 REALITY 类节点有意义（reality / xhttp --reality），已忽略"
+        else
+            local -a scargs=()
+            local sp sl
+            if [[ "$scan_refresh" == "1" ]]; then scargs+=(--refresh); fi
+            if [[ -n "$scan_cidr" ]]; then scargs+=(--cidr "$scan_cidr"); fi
+            if sp="$(scanner_pick ${scargs[@]+"${scargs[@]}"})"; then
+                read -r target sni sl <<<"$sp"
+                info "自动扫描选中: target=$target SNI=$sni（来源 scan${sl:+ $sl}）"
+            else
+                warn "自动扫描没有找到可用站点，回退到内置伪装站库"
+                target=""
+            fi
+        fi
+    fi
 
     local public=1 priv="" pub="" sid="" tgt="" t_sni="" label="" security="none"
     local pairs=() picked="" kp=""

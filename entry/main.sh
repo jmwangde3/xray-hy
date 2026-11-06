@@ -61,8 +61,20 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
     mode: direct | tunnel | reality | xhttp | hy2
     add 选项: --host --path --uuid --sni --target --domain --token --reality
               --masq --up --down   (hy2 专用)
+              --scan [--scan-cidr CIDR] [--scan-refresh]   (reality 专用)
     默认端口: direct 8080 / tunnel 10086 / reality 443 / xhttp 8081 / hy2 8443(UDP)
     hy2 用 Xray 内置 Hysteria2 入站(v26.3.27+)，自签证书 + pinSHA256 链接
+
+  伪装站自动扫描
+    scan [网段]                 扫本机机房网段，挑最优伪装站（结果缓存复用）
+    scan --list                 查看缓存里的候选与打分
+    scan --verify               复核缓存候选，剔除已失效的
+    scan --refresh              忽略缓存重新扫描
+    scan --clear                清除缓存
+    原理: 用 RealiTLScanner 在 /24 里枚举 TLS 1.3 + h2 站点，再逐个用真实 SNI
+    做证书/跳转/CDN 校验，取分数最高的那个作为「dest=源站 IP + SNI=域名」。
+    结果记在 /etc/xray-hy/scan-cache.tsv（默认 7 天），此后再建 REALITY 节点
+    直接复用，不会重复扫描。仅 amd64 / arm64 支持，其它架构回退内置地区库。
 
   伪装站 / REALITY 名词（xhy target 里输入 6 可随时查看）
     target(dest)  服务端主动去连的目的地址（IP:端口 或 域名:端口），未认证流量
@@ -73,6 +85,7 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
         xhy add reality --port 443 --target 1.2.3.4:443 --sni www.example.com
     交互菜单 8) 伪装站 → 3) 手动指定 支持同一写法（1.2.3.4:443,sni=www.example.com），
     校验会用 --resolve 打该 IP，测证书是否真的覆盖这个域名。
+    不想手挑就用 xhy scan：自动扫本机机房网段并选最优站点（结果缓存复用）。
 
   配置
     config                      路由/DNS/日志开关菜单（也可直接 set）
@@ -191,31 +204,51 @@ EOF
     [[ -n "$path" ]] && opts+=(--path "$path")
     case "$mode" in
         reality)
-            if confirm "手动指定 REALITY target / SNI？" "n"; then
-                # 一条输入：host[:port][,sni=xxx]；不写 sni= 时 SNI 与 target 同名。
-                # 目标站在 CDN 后面时用「源站 IP + 域名 SNI」：1.2.3.4:443,sni=www.example.com
-                local t_in ts
-                cat <<'EOF'
+            cat <<'EOF'
+  伪装站（target / dest）来源：
+    1) 自动扫描本机机房网段，选最优站点（推荐；有缓存直接复用，不重复扫）
+    2) 内置地区库（按 VPS 出口国家匹配）
+    3) 手动指定 target / SNI
+EOF
+            case "$(ask '选择' '1')" in
+                1)
+                    opts+=(--scan)
+                    if [[ -s "$SCANNER_CACHE" ]] && scanner_cache_valid; then
+                        info "已有 $(scanner_cache_age_h) 小时前的扫描缓存（$(scanner_cache_count) 个候选）"
+                        if confirm "忽略缓存重新扫描？" "n"; then opts+=(--scan-refresh); fi
+                    else
+                        info "扫描范围默认是本机公网 IP 所在 /24，无结果会自动扩到 /21"
+                    fi ;;
+                3)
+                    # 一条输入：host[:port][,sni=xxx]；不写 sni= 时 SNI 与 target 同名。
+                    # 目标站在 CDN 后面时用「源站 IP + 域名 SNI」：1.2.3.4:443,sni=www.example.com
+                    local t_in ts
+                    cat <<'EOF'
   输入示例：
     www.example.com                    域名，dest 与 SNI 相同
     1.2.3.4:443,sni=www.example.com   源站 IP + 域名 SNI（站点在 CDN 后时用这个）
     www.example.com:8443              非 443 端口
 EOF
-                t_in="$(ask 'target')"
-                [[ -n "$t_in" ]] || return 0
-                ts="${t_in#*,sni=}"; [[ "$ts" == "$t_in" ]] && ts=""
-                t_in="${t_in%%,*}"
-                [[ "$t_in" == *:* ]] || t_in="${t_in}:443"
-                if is_ip_literal "${t_in%%:*}" && [[ -z "$ts" ]]; then
-                    err "target 是 IP 时必须加 ,sni=域名（dest 用 IP、SNI 用域名）"
-                    return 1
-                fi
-                opts+=(--target "$t_in" --sni "${ts:-${t_in%%:*}}")
-            else
-                info "按地区自动选择伪装站并做 TLS 1.3 / H2 校验..."
-            fi ;;
+                    t_in="$(ask 'target')"
+                    [[ -n "$t_in" ]] || return 0
+                    ts="${t_in#*,sni=}"; [[ "$ts" == "$t_in" ]] && ts=""
+                    t_in="${t_in%%,*}"
+                    [[ "$t_in" == *:* ]] || t_in="${t_in}:443"
+                    if is_ip_literal "${t_in%%:*}" && [[ -z "$ts" ]]; then
+                        err "target 是 IP 时必须加 ,sni=域名（dest 用 IP、SNI 用域名）"
+                        return 1
+                    fi
+                    opts+=(--target "$t_in" --sni "${ts:-${t_in%%:*}}") ;;
+                *)
+                    info "使用内置地区库（conf/targets.tsv）..." ;;
+            esac ;;
         xhttp)
-            if confirm "叠加 REALITY（无需证书）？" "n"; then extra+=(--reality); fi ;;
+            if confirm "叠加 REALITY（无需证书）？" "n"; then
+                extra+=(--reality)
+                if confirm "自动扫描本机机房网段挑伪装站？（n = 用内置地区库）" "y"; then
+                    extra+=(--scan)
+                fi
+            fi ;;
         tunnel)
             domain="$(ask 'Cloudflare 公开主机名' '')"
             token="$(ask 'Tunnel Token (回车复用已保存的)' '')"
@@ -241,13 +274,50 @@ cmd_add() {
     while (( $# > 0 )); do
         case "$1" in
             --port)   port="$2"; shift 2 ;;
-            --host|--path|--uuid|--sni|--target|--domain|--token|--masq|--up|--down) opts+=("$1" "$2"); shift 2 ;;
-            --reality) opts+=("$1"); shift ;;
+            --host|--path|--uuid|--sni|--target|--domain|--token|--masq|--up|--down|--scan-cidr)
+                opts+=("$1" "$2"); shift 2 ;;
+            --reality|--scan|--scan-refresh) opts+=("$1"); shift ;;
             *) die "未知参数: $1（见 xhy --help）" ;;
         esac
     done
     valid_port "$port" || die "端口不合法: $port"
     node_add "$mode" "$port" "${opts[@]}"
+}
+
+# xhy scan [网段] [--refresh|--list|--verify|--clear]
+cmd_scan() {
+    local cidr="" refresh=0 mode="run" best st ss sl
+    while (( $# > 0 )); do
+        case "$1" in
+            --refresh) refresh=1; shift ;;
+            --list)    mode="list"; shift ;;
+            --clear)   mode="clear"; shift ;;
+            --verify)  mode="verify"; shift ;;
+            --cidr)    cidr="${2:?--cidr 需要网段}"; shift 2 ;;
+            -*)        die "未知参数: $1（用法: xhy scan [网段] [--refresh|--list|--verify|--clear]）" ;;
+            *)         cidr="$1"; shift ;;
+        esac
+    done
+    case "$mode" in
+        list)   scanner_cache_show ;;
+        clear)  scanner_cache_clear ;;
+        verify) scanner_cache_verify ;;
+        run)
+            local -a args=()
+            if (( refresh == 1 )); then args+=(--refresh); fi
+            if [[ -n "$cidr" ]]; then args+=(--cidr "$cidr"); fi
+            if best="$(scanner_pick ${args[@]+"${args[@]}"})"; then
+                read -r st ss sl <<<"$best"
+                printf '\n最优伪装站: target=%s  SNI=%s（来源 %s）\n\n' "$st" "$ss" "$sl"
+                printf '  直接建节点（用缓存，不再扫描）:\n'
+                printf '    xhy add reality --port 443 --target %s --sni %s\n\n' "$st" "$ss"
+                printf '  或让它自己挑（缓存有效期内同样不重扫）:\n'
+                printf '    xhy add reality --port 443 --scan\n'
+            else
+                err "自动扫描失败；可改用 xhy target → 1) 内置地区库，或 3) 手动指定"
+                return 1
+            fi ;;
+    esac
 }
 
 cmd_config_set() {
@@ -331,6 +401,8 @@ cmd_uninstall() {
           /etc/init.d/xray-hy /etc/init.d/xray-hy-firewall \
           /usr/local/lib/xray-hy/tunnel-run /usr/local/bin/xhy \
           "$XHY_SELF" /etc/sysctl.d/90-xray-hy.conf /etc/modules-load.d/xray-hy.conf
+    # 扫描器是下载来的独立工具，不在 git 工作树里，卸载时单独清。
+    rm -rf "$XHY_TOOLS_DIR"
     # 仓库内运行时 XHY_APP_DIR 就是工作树：只删入口，不碰 conf/ 和目录本身。
     if [[ "${XHY_DEV:-0}" != "1" ]]; then
         rm -rf "$XHY_APP_DIR/conf"
@@ -362,7 +434,7 @@ cmd_menu() {
   ---- 维护 ----
   11) 服务管理              12) Xray 版本通道
   13) 更新                  14) 卸载
-  15) 备份 / 恢复
+  15) 备份 / 恢复           16) 扫描伪装站
    0) 退出
 EOF
         case "$(ask '选择' '0')" in
@@ -410,6 +482,7 @@ EOF
                    restore) backup_restore "$(ask '备份文件路径' '')" ;;
                    *) warn "只支持 backup 或 restore" ;;
                esac ;;
+           16) cmd_scan ;;
             0) return 0 ;;
         esac
     done
@@ -420,7 +493,7 @@ main() {
     [[ $# -gt 0 ]] && shift
     case "$cmd" in
         --help|-h|help) usage; return 0 ;;
-        --version|version) printf 'xray-hy %s\n' "$XHY_VERSION"; return 0 ;;
+        --version|version) printf 'xray-hy %s (build %s)\n' "$XHY_VERSION" "$XHY_BUILD"; return 0 ;;
     esac
 
     need_root
@@ -454,6 +527,7 @@ main() {
         snapshots)  list_snapshots ;;
         rollback)   rollback_config "${1:-}" ;;
         target)     target_menu ;;
+        scan)       cmd_scan "$@" ;;
         firewall)   case "${1:-status}" in
                         # --quiet is passed by the boot unit; forward it so boot
                         # logs stay clean.

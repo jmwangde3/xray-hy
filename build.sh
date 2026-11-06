@@ -12,7 +12,7 @@ set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="$ROOT/install.sh"
-LIBS=(common platform core service hardening target nodes links export backup update)
+LIBS=(common platform core service hardening target scanner nodes links export backup update)
 PRELUDE="$ROOT/entry/prelude.sh"
 MAIN="$ROOT/entry/main.sh"
 TARGETS="$ROOT/conf/targets.tsv"
@@ -31,6 +31,23 @@ done
 for l in "${LIBS[@]}"; do
     [[ -f "$ROOT/lib/$l.sh" ]] || { printf '[x] 缺少 lib/%s.sh\n' "$l" >&2; exit 1; }
 done
+
+# ---- 版本号一致性 ----
+# 版本号只在两处出现：entry/prelude.sh 的赋值，与 lib/common.sh 的兜底默认值
+# （仓库内运行时用得到）。两处不一致时，install.sh 里后者会被前者覆盖，
+# `xhy version` 与实际发布的版本就会各说各话，所以在这里直接拦住。
+# 改版本号请走 tools/bump-version.sh，不要手改其中一处。
+V_PRELUDE="$(sed -n 's/^XHY_VERSION="\(.*\)"$/\1/p' "$PRELUDE" | head -1)"
+V_COMMON="$(sed -n 's/^XHY_VERSION="\${XHY_VERSION:-\(.*\)}"$/\1/p' "$ROOT/lib/common.sh" | head -1)"
+if [[ -z "$V_PRELUDE" || "$V_PRELUDE" != "$V_COMMON" ]]; then
+    printf '[x] 版本号不一致：prelude=%s common=%s\n' "${V_PRELUDE:-?}" "${V_COMMON:-?}" >&2
+    printf '    请用 tools/bump-version.sh 修改（它会同时更新两处与 CHANGELOG）\n' >&2
+    exit 1
+fi
+if [[ ! "$V_PRELUDE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    printf '[x] 版本号格式不合法: %s（应为 X.Y.Z）\n' "$V_PRELUDE" >&2
+    exit 1
+fi
 
 # ---- 构建号 ----
 # sha256sum 与 openssl 的输出格式不同（后者是 "SHA2-256(stdin)= <hex>"），
@@ -94,6 +111,6 @@ case "$MODE" in
     build)
         mv -f "$tmp" "$OUT"
         trap - EXIT
-        printf '[ok] %s\n     build %s, %s 字节\n' "$OUT" "$BUILD" "$(wc -c <"$OUT" | tr -d ' ')"
+        printf '[ok] %s v%s\n     build %s, %s 字节\n' "$OUT" "$V_PRELUDE" "$BUILD" "$(wc -c <"$OUT" | tr -d ' ')"
         ;;
 esac

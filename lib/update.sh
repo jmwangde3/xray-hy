@@ -179,6 +179,11 @@ self_check() {
         warn "未安装 ip6tables，IPv6 未受保护"
     fi
     printf '%s\n' "--------------------------------------"
+    if [[ -x "$SCANNER_BIN" ]]; then
+        printf '扫描器   : %s\n' "$SCANNER_BIN"
+    else
+        printf '扫描器   : 未安装（首次 xhy scan / add --scan 自动下载）\n'
+    fi
     target_show
     printf '节点数量 : %s\n' "$(node_count)"
     printf '配置快照 : %s 份 (xhy snapshots / xhy rollback)\n' \
