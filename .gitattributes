@@ -1,0 +1,9 @@
+# Shell scripts MUST stay LF. Windows core.autocrlf=true would otherwise
+# turn them into CRLF and bash would fail with `\r: command not found`.
+xhy        text eol=lf
+*.sh       text eol=lf
+*.md       text eol=lf
+*.tsv      text eol=lf
+LICENSE    text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
