@@ -136,14 +136,17 @@ _apply_family() {
     fi
 
     if [[ "$guard" == "on" ]]; then
+        # 阈值按「正常人的使用量」定，不是按攻击者：VS Code Remote / scp 批量 /
+        # 运维工具一轮就是 5-10 个新连接。攻击者的特征是每小时成百上千次。
+        # 爆发窗口 10 次/60s，慢速窗口 25 次/小时 —— 误伤远小于拦截损失。
         if "$ipt" -w -A "$FW_CHAIN" -p tcp --dport "$XHY_SSH_PORT" -m conntrack --ctstate NEW \
                 -m recent --set --name "$tag" >/dev/null 2>&1; then
             "$ipt" -w -A "$FW_CHAIN" -p tcp --dport "$XHY_SSH_PORT" -m conntrack --ctstate NEW \
-                -m recent --update --seconds 60 --hitcount 5 --name "$tag" -j DROP 2>/dev/null || ok_recent=0
+                -m recent --update --seconds 60 --hitcount 10 --name "$tag" -j DROP 2>/dev/null || ok_recent=0
             "$ipt" -w -A "$FW_CHAIN" -p tcp --dport "$XHY_SSH_PORT" -m conntrack --ctstate NEW \
                 -m recent --set --name "${tag}_SLOW" >/dev/null 2>&1 || ok_recent=0
             "$ipt" -w -A "$FW_CHAIN" -p tcp --dport "$XHY_SSH_PORT" -m conntrack --ctstate NEW \
-                -m recent --update --seconds 3600 --hitcount 8 --name "${tag}_SLOW" -j DROP 2>/dev/null || ok_recent=0
+                -m recent --update --seconds 3600 --hitcount 25 --name "${tag}_SLOW" -j DROP 2>/dev/null || ok_recent=0
         else
             ok_recent=0
         fi
