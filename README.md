@@ -168,10 +168,11 @@ xhy config set TARGET_REGION jp     # 或 auto
 │   ├── service.sh            systemd / OpenRC 服务与配置校验
 │   ├── hardening.sh          BBR、iptables 链、SSH 防爆破
 │   ├── target.sh             伪装站地区库与在线校验
-│   ├── nodes.sh              五种模式 inbound 渲染、节点注册表、整体重建
+│   ├── nodes.sh              五种模式 inbound 渲染、节点注册表、整体重建、快照
 │   ├── links.sh              vless:// 链接与二维码
 │   └── update.sh             脚本/核心/geodata/配置更新、自检
-└── conf/targets.tsv          可自行编辑的地区伪装站候选
+├── conf/targets.tsv          可自行编辑的地区伪装站候选
+└── test/                     离线测试（无需 root / 网络 / 真实 Xray）
 
 /etc/xray-hy/                 运行时数据（0700）
 ├── config.json               渲染后的完整配置（0600）
@@ -202,7 +203,11 @@ xhy update all        # 以上全部 + 自检
 
 脚本更新**不会**触碰 `/etc/xray-hy`。`update script` 拉取后会对 `xhy` 和所有 `lib/*.sh` 跑 `bash -n`，任一文件语法错误就整组回滚到更新前的 commit；所有会改配置的命令都持有全局 `flock`，并发执行不会互相踩。
 
-若配置渲染或校验失败，新增节点会被回滚，已有配置保持原样。每次重建配置都会把**整套可变状态**（`config.json` + `confs/` + `nodes/` + `state.env`）打包进 `snapshots/`（保留最近 5 份），回滚时整套恢复，不会出现「配置回去了但节点凭证还留着」的不一致：
+若配置渲染或校验失败，新增节点会被回滚，已有配置保持原样。
+
+快照保存的是**状态源**而不是渲染结果：`confs/` + `nodes/` + `certs/` + `state.env`，**不含 `config.json`**。原因很实际 —— `node_del` 会先删 `.env` 再重建配置，如果快照同时收录旧的 `config.json`，就会得到一个「配置里还有该节点、凭证却已不存在」的包。排除渲染结果后，回滚时先清空再解包，然后**从节点注册表重新渲染全部片段**并校验，任何快照都是自洽的（旧格式带 `config.json` 的快照同样能恢复，会被重新渲染覆盖）。
+
+快照在**每次变更之前**拍（`add` / `del` / `config set` 都是先拍再改），所以「刚删错一个节点」可以直接回滚回来。保留最近 5 份：
 
 ```sh
 xhy snapshots          # 列出快照
@@ -210,7 +215,7 @@ xhy rollback           # 回滚到最近一份
 xhy rollback /etc/xray-hy/snapshots/state.20261106120000.tar.gz   # 指定快照
 ```
 
-回滚前会自动把当前状态另存为 `state.pre-rollback.*.tar.gz`，所以回滚本身也可撤销。
+回滚前会自动把当前状态另存为 `state.pre-rollback.*.tar.gz`，所以回滚本身也可撤销。注意 `state.env` 之外的东西（如 `tunnel.token`）不在快照内，删除 tunnel 节点会一并清掉 token，需要重新填。
 
 `xhy update core` 在安装新 Xray 前会备份当前二进制；若新核心无法加载现有配置，自动换回原版本。更早的二进制副本也留在 `/etc/xray-hy/backups/`。
 
@@ -218,7 +223,17 @@ xhy rollback /etc/xray-hy/snapshots/state.20261106120000.tar.gz   # 指定快照
 
 ## 8. 已知限制与测试状态
 
-**本项目尚未在真实 VPS 上做过端到端部署验证。** 代码经过 `bash -n` 语法检查与 JSON 片段审查，但不同发行版、内核、容器环境差异较大，请务必：
+**本项目尚未在真实 VPS 上做过端到端部署验证。** 已完成的验证是离线的，任何机器上都能复跑（不需要 root、不需要网络、不需要真实 Xray）：
+
+```sh
+bash test/run-all.sh     # bash -n + 渲染 + hy2 + 生命周期，共 67 项断言
+```
+
+覆盖：全部脚本语法；四种 VLESS 模式与 `hy2` 的 inbound 片段和合并 `config.json` 是否合法 JSON；`hy2` 自签证书生成与 `pinSHA256` 链接；UDP 端口是否进入防火墙；`add → snapshot → del → rollback` 的整套状态恢复；跨模式端口冲突；伪装站地区优先与 BOM 防御。
+
+此外 `hy2` 的配置字段在真实 Xray **26.10.31** 上用 `xray run -test` 验证通过（`protocol: hysteria` / `version: 2` / `alpn: ["h3"]` / `masquerade` / `finalmask.quicParams`），`hysteria2://` 链接格式经人工核对。
+
+不同发行版、内核、容器环境差异较大，请务必：
 
 1. 先在一台**可随时重置的一次性 VPS** 上跑 `xhy install`，再看 `xhy check` 输出；
 2. REALITY 部署前执行 `xhy target` → `5) 校验指定域名`，确认目标站点当前仍满足 TLS 1.3 / H2 / 非 CDN；`conf/targets.tsv` 只是初始候选，站点会变；

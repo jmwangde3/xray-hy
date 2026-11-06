@@ -5,7 +5,10 @@ TARGETS_FILE="${XHY_SCRIPT_DIR:-$XHY_HOME}/conf/targets.tsv"
 
 target_rows() {
     [[ -r "$TARGETS_FILE" ]] || die "找不到伪装站数据文件: $TARGETS_FILE"
-    grep -vE '^[[:space:]]*(#|$)' "$TARGETS_FILE"
+    # Strip any UTF-8 BOM *before* filtering: a BOM keeps the leading "#" from
+    # matching the comment filter, and the header line would then be listed as a
+    # region by `xhy target` and parsed as a data row.
+    tr -d '\357\273\277' <"$TARGETS_FILE" | grep -vE '^[[:space:]]*(#|$)'
 }
 
 target_list_regions() {
@@ -75,16 +78,32 @@ pick_target() {
         [[ -z "$region" ]] && region="other"
     fi
 
-    while IFS='|' read -r r c label tgt sni; do
-        [[ "$r" == "$region" || "$r" == "auto" || "$r" == "other" ]] || continue
-        [[ -z "$tgt" ]] && continue
-        if target_validate "$tgt" >&2; then
-            printf '%s %s %s\n' "$tgt" "${sni:-${tgt%%:*}}" "$label"
-            return 0
-        fi
-        [[ -z "$candidate" ]] && candidate="$tgt|${sni:-${tgt%%:*}}|$label"
-    done < <(target_rows)
+    # Two passes: the region's own candidates first, then the generic
+    # auto/other fallbacks. A single pass let the `auto` row (line 1 of the
+    # table) win over every region-specific entry, because it is validated
+    # first and the loop returns on the first success.
+    local pass found=""
+    for pass in 1 2; do
+        while IFS='|' read -r r c label tgt sni; do
+            [[ -z "$tgt" ]] && continue
+            if (( pass == 1 )); then
+                [[ "$r" == "$region" ]] || continue
+            else
+                [[ "$r" == "auto" || "$r" == "other" ]] || continue
+            fi
+            if target_validate "$tgt" >&2; then
+                found="$tgt|${sni:-${tgt%%:*}}|$label"
+                break
+            fi
+            [[ -z "$candidate" ]] && candidate="$tgt|${sni:-${tgt%%:*}}|$label"
+        done < <(target_rows)
+        [[ -n "$found" ]] && break
+    done
 
+    if [[ -n "$found" ]]; then
+        printf '%s\n' "${found//|/ }"
+        return 0
+    fi
     if [[ -n "$candidate" ]]; then
         warn "该地区候选均未通过完整校验，回退使用第一个（请自行确认可用性）" >&2
         printf '%s\n' "${candidate//|/ }"

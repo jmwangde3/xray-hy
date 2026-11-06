@@ -111,9 +111,12 @@ release_lock() {
 atomic_write() {
     local dest="$1" mode="${2:-0644}" tmp
     tmp="$(mktemp "${dest}.tmp.XXXXXX")" || return 1
-    if ! cat >"$tmp"; then rm -f "$tmp"; return 1; fi
-    if ! install -m "$mode" "$tmp" "$dest"; then rm -f "$tmp"; return 1; fi
-    rm -f "$tmp"
+    if ! cat >"$tmp"; then rm -f "$tmp" || true; return 1; fi
+    if ! install -m "$mode" "$tmp" "$dest"; then rm -f "$tmp" || true; return 1; fi
+    # The write already succeeded; a failing cleanup must not be reported as a
+    # failed write (that produced misleading "配置生成失败" aborts).
+    rm -f "$tmp" || true
+    return 0
 }
 
 backup_file() {
@@ -140,7 +143,8 @@ state_set() {
     fi
     printf '%s=%s\n' "$key" "$value" >>"$tmp"
     install -m 0600 "$tmp" "$XHY_STATE"
-    rm -f "$tmp"
+    rm -f "$tmp" || true
+    return 0
 }
 
 state_del() {
@@ -149,7 +153,8 @@ state_del() {
     tmp="$(mktemp)"
     grep -v "^${key}=" "$XHY_STATE" >"$tmp" || true
     install -m 0600 "$tmp" "$XHY_STATE"
-    rm -f "$tmp"
+    rm -f "$tmp" || true
+    return 0
 }
 
 rand_hex() {

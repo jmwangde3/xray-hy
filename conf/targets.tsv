@@ -1,4 +1,4 @@
-﻿# xray-hy REALITY target candidates
+# xray-hy REALITY target candidates
 # Format: region|country-code|label|target|SNI
 # These are starting points, NOT guarantees. Sites change, move behind CDNs or
 # drop TLS 1.3. Always run `xhy target check` from the VPS before deploying.

@@ -192,9 +192,12 @@ cmd_config_set() {
         TARGET_REGION) ;;
         *) die "未知设置项: $key" ;;
     esac
+    # Snapshot before the setting changes: a snapshot should always represent
+    # the state you had *before* this command, otherwise it cannot undo it.
+    snapshot_state
     state_set "$key" "$val"
     ok "$key=$val"
-    node_rebuild_all
+    XHY_SKIP_SNAPSHOT=1 node_rebuild_all
     [[ "$key" == "SSH_GUARD" ]] && firewall_apply "$(state_get FIREWALL_MODE safe)"
 }
 
@@ -355,7 +358,9 @@ main() {
         rollback)   rollback_config "${1:-}" ;;
         target)     target_menu ;;
         firewall)   case "${1:-status}" in
-                        apply)  firewall_apply safe ;;
+                        # --quiet is passed by the boot unit; forward it so boot
+                        # logs stay clean.
+                        apply)  firewall_apply safe "${2:-}" ;;
                         strict) firewall_apply strict ;;
                         off)    firewall_off ;;
                         *)      firewall_status ;;

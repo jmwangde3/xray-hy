@@ -187,7 +187,9 @@ firewall_apply() {
     fi
     state_set FIREWALL_MODE "$mode"
     state_set SSH_GUARD_STATUS "$([[ "$guard" == on ]] && echo on || echo off)"
-    install_firewall_service
+    # At boot this runs *from* the unit below; rewriting the unit and calling
+    # rc-update from inside its own start() is pointless and can race.
+    [[ "${XHY_FW_NO_INSTALL:-0}" == "1" ]] || install_firewall_service
     [[ "$quiet" == "--quiet" ]] || ok "防火墙已应用 (模式: $mode, 双栈, SSH: $XHY_SSH_PORT, 节点端口: $(firewall_node_ports | tr '\n' ' '))"
 }
 
@@ -205,6 +207,7 @@ After=network.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+Environment=XHY_FW_NO_INSTALL=1
 ExecStart=${runner} firewall apply --quiet
 
 [Install]
@@ -217,8 +220,8 @@ EOF
 #!/sbin/openrc-run
 name="xray-hy-firewall"
 description="xray-hy dual-stack firewall rules"
-depend() { need net; before xray-hy; }
-start() { RUNNER firewall apply --quiet; }
+depend() { need net; after iptables; before xray-hy; }
+start() { XHY_FW_NO_INSTALL=1 RUNNER firewall apply --quiet; }
 stop()  { for t in iptables ip6tables; do
             $t -w -D INPUT -j XHY-IN >/dev/null 2>&1 || true
             $t -w -F XHY-IN >/dev/null 2>&1 || true

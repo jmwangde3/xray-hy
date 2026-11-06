@@ -16,11 +16,16 @@ svc_enable() {
 }
 
 svc_disable() {
-    local n="$1"
+    local n="$1" rl
     if [[ "$XHY_INIT" == "systemd" ]]; then
         systemctl disable "$n" >/dev/null 2>&1 || true
     else
-        rc-update del "$n" default >/dev/null 2>&1 || true
+        # The firewall unit is registered in the *boot* runlevel while ordinary
+        # services live in *default*. Removing only "default" left the firewall
+        # chain being rebuilt at every boot after `xhy firewall off`.
+        for rl in default boot; do
+            rc-update del "$n" "$rl" >/dev/null 2>&1 || true
+        done
     fi
 }
 

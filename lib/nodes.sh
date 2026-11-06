@@ -93,24 +93,35 @@ outbounds_json() {
     printf '[{"protocol":"freedom","tag":"direct","settings":{}},{"protocol":"blackhole","tag":"block"}]'
 }
 
-rebuild_config() {
-    local joined="" sep="" f snap n=0
-    init_dirs
-    # Snapshot the WHOLE mutable state, not just config.json: restoring only
-    # the config while leaving a newly added node's .env / fragment behind
-    # produces a silently inconsistent deployment. Keep the 5 most recent.
-    if [[ -s "$XHY_ETC/config.json" ]]; then
-        snap="$XHY_SNAPSHOTS/state.$(date +%Y%m%d%H%M%S).tar.gz"
-        if tar czf "$snap" -C "$XHY_ETC" config.json confs nodes state.env 2>/dev/null; then
-            chmod 600 "$snap" 2>/dev/null || true
-        else
-            rm -f "$snap"
-        fi
-        while IFS= read -r f; do
-            n=$((n + 1))
-            if (( n > 5 )); then rm -f "$f"; fi
-        done < <(ls -1t "$XHY_SNAPSHOTS"/state.*.tar.gz 2>/dev/null)
+# Snapshot the *source of truth* only: node registry, config fragments, hy2
+# certificates and settings. config.json is deliberately excluded because it is
+# derived from those files -- archiving it alongside a post-delete registry
+# (node_del removes the .env first, then rebuilds) would capture a config that
+# references a node whose credentials no longer exist. A restore always
+# re-renders fragments from the registry, so any snapshot is self-healing.
+snapshot_state() {
+    local snap f n=0
+    [[ -d "$XHY_NODES" ]] || return 0
+    snap="$XHY_SNAPSHOTS/state.$(date +%Y%m%d%H%M%S).tar.gz"
+    # `cd` instead of `tar -C`: a path containing ":" is read as host:path by
+    # GNU tar, which silently produced empty snapshots in mixed environments.
+    if ( cd "$XHY_ETC" && tar czf "$snap" confs nodes certs state.env ) 2>/dev/null; then
+        chmod 600 "$snap" 2>/dev/null || true
+    else
+        rm -f "$snap"
+        warn "状态快照创建失败（$XHY_ETC）；xhy rollback 将没有可用快照"
+        return 0
     fi
+    while IFS= read -r f; do
+        n=$((n + 1))
+        if (( n > 5 )); then rm -f "$f"; fi
+    done < <(ls -1t "$XHY_SNAPSHOTS"/state.*.tar.gz 2>/dev/null)
+}
+
+rebuild_config() {
+    local joined="" sep="" f
+    init_dirs
+    [[ "${XHY_SKIP_SNAPSHOT:-0}" == "1" ]] || snapshot_state
     for f in "$XHY_CONFDIR"/*.json; do
         [[ -s "$f" ]] || continue
         joined+="$sep$(cat "$f")"
@@ -313,7 +324,7 @@ node_add() {
 
     case "$mode" in
         direct|tunnel|reality|xhttp|hy2) ;;
-        *) die "模式只能是 direct / tunnel / reality / xhttp" ;;
+        *) die "模式只能是 direct / tunnel / reality / xhttp / hy2" ;;
     esac
     valid_port "$port" || die "端口不合法: $port"
     local clash
@@ -421,6 +432,9 @@ node_add() {
 
     local envf
     envf="$(node_file "$mode" "$port")"
+    # Snapshot BEFORE the registry changes, so a snapshot always represents a
+    # state you can go back to (an "after add" snapshot would be useless).
+    snapshot_state
     node_save "$envf" "${pairs[@]}"
 
     # Roll back cleanly if the generated JSON is invalid.
@@ -428,9 +442,9 @@ node_add() {
         rm -f "$envf" "$(node_frag "$mode" "$port")"
         die "inbound 配置生成失败，已回滚"
     fi
-    if ! rebuild_config || ! xray_config_test; then
+    if ! XHY_SKIP_SNAPSHOT=1 rebuild_config || ! xray_config_test; then
         rm -f "$envf" "$(node_frag "$mode" "$port")"
-        rebuild_config >/dev/null
+        XHY_SKIP_SNAPSHOT=1 rebuild_config >/dev/null
         err "配置校验失败，新节点已回滚，原有节点不受影响。"
         return 1
     fi
@@ -452,6 +466,7 @@ node_del() {
     [[ -f "$envf" ]] || die "节点不存在: ${mode}_${port}"
     need_root
     backup_file "$envf"
+    snapshot_state          # before the registry changes: undoable delete
     rm -f "$envf" "$(node_frag "$mode" "$port")"
     if [[ "$mode" == "hy2" ]]; then
         rm -f "$XHY_CERTS/hy2_${port}.crt" "$XHY_CERTS/hy2_${port}.key"
@@ -462,10 +477,10 @@ node_del() {
         rm -f "$XHY_ETC/tunnel.token"
         info "已无 tunnel 节点，cloudflared 服务与 token 已清理"
     fi
-    rebuild_config
+    XHY_SKIP_SNAPSHOT=1 rebuild_config
     xray_config_test && config_reload
     [[ "$(state_get FIREWALL_MODE off)" != "off" ]] && firewall_apply "$(state_get FIREWALL_MODE safe)" --quiet
-    ok "节点 ${mode}_${port} 已删除（备份在 $XHY_BACKUP）"
+    ok "节点 ${mode}_${port} 已删除（凭据备份在 $XHY_BACKUP，可用 xhy snapshots 回滚整套状态）"
 }
 
 node_list() {
@@ -511,16 +526,19 @@ rollback_config() {
     if [[ -z "$target" ]]; then
         target="$(ls -1t "$XHY_SNAPSHOTS"/state.*.tar.gz 2>/dev/null | head -1)"
     fi
-    [[ -s "$target" ]] || die "没有可用的状态快照（快照格式在最近一次更新后改为 state.*.tar.gz）"
+    [[ -s "$target" ]] || die "没有可用的状态快照（快照格式：state.*.tar.gz）"
     # Save the state we are about to replace, so the rollback itself is undoable.
     pre="$XHY_SNAPSHOTS/state.pre-rollback.$(date +%s).tar.gz"
-    tar czf "$pre" -C "$XHY_ETC" config.json confs nodes state.env 2>/dev/null || true
+    ( cd "$XHY_ETC" && tar czf "$pre" confs nodes certs state.env ) 2>/dev/null || true
     chmod 600 "$pre" 2>/dev/null || true
+    # Clear first: files that exist now but not in the snapshot must disappear,
+    # otherwise the restore produces a union of two states.
     rm -f "$XHY_NODES"/*.env "$XHY_CONFDIR"/*.json
-    tar xzf "$target" -C "$XHY_ETC" || die "快照解包失败，当前状态已另存为 $pre"
-    chmod 600 "$XHY_ETC/config.json" "$XHY_ETC/state.env" 2>/dev/null || true
-    chmod 700 "$XHY_NODES" 2>/dev/null || true
-    xray_config_test || die "快照配置校验失败，未重载服务（当前状态备份: $pre）"
-    config_reload
-    ok "已回滚整套状态到 $target（含节点注册表与配置分片）"
+    ( cd "$XHY_ETC" && tar xzf "$target" ) || die "快照解包失败，当前状态已另存为 $pre"
+    chmod 700 "$XHY_NODES" "$XHY_CERTS" 2>/dev/null || true
+    # Re-render every fragment from the restored registry, then validate and
+    # reload. Older snapshots that still carry config.json are handled the same
+    # way: the file is simply overwritten by the rebuild.
+    XHY_SKIP_SNAPSHOT=1 node_rebuild_all || die "回滚后的配置校验失败（当前状态备份: $pre）"
+    ok "已回滚整套状态到 $target（节点注册表、配置分片、证书均已恢复并重新渲染）"
 }

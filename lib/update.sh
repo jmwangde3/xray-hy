@@ -151,7 +151,7 @@ self_check() {
     target_show
     printf '节点数量 : %s\n' "$(node_count)"
     printf '配置快照 : %s 份 (xhy snapshots / xhy rollback)\n' \
-        "$(ls -1 "$XHY_SNAPSHOTS"/state.*.tar.gz 2>/dev/null | wc -l)"
+        "$(ls -1 "$XHY_SNAPSHOTS"/state.*.tar.gz 2>/dev/null | wc -l | tr -d ' ')"
     printf '%s\n' "--------------------------------------"
     if [[ -s "$XHY_ETC/config.json" ]] && [[ -x "$XRAY_BIN" ]]; then
         if xray_config_test >/dev/null 2>&1; then ok "配置语法: 通过"; else err "配置语法: 失败"; fi
