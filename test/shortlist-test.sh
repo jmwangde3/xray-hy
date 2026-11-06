@@ -8,6 +8,16 @@ source test/_lib.sh
 load_libs
 stub_system
 
+# 覆盖 stub_system 的静默版：真实 target_validate 会把 [ok] 校验行打到 stderr，
+# 这里复刻它，并验证第三个参数（TFO 标记）确实被拼到每个站点说明后面。
+target_validate() {
+    local suffix=""
+    if [[ -n "${3:-}" ]]; then suffix=" / TFO $3"; fi
+    printf '[ok]   %s @ %s : TLS 1.3 / H2 / 无跳转 / 非 CDN（源站直连）%s\n' \
+        "$2" "${1%%:*}" "$suffix" >&2
+    return 0
+}
+
 export SCANNER_CACHE="$TEST_TMP/scan-cache.tsv"
 TFO_SUPPORT=""
 
@@ -88,6 +98,33 @@ else
     printf '  FAIL  表头缺 TFO 列\n'; fail=$((fail + 1))
 fi
 
+echo "=== 每个候选说明行都带 TFO 标记 ==="
+chk "tag 1 -> 支持"     "支持"   "$(scanner_tfo_tag 1)"
+chk "tag 0 -> 不支持"   "不支持" "$(scanner_tfo_tag 0)"
+TFO_SUPPORT="2.2.2.2 4.4.4.4"
+err="$(scanner_shortlist 0 5 2>&1 >/dev/null)"
+chk "5 个候选行都标了 TFO" "5" "$(printf '%s\n' "$err" | grep -c '^\[ok\].*TFO ')"
+if printf '%s\n' "$err" | grep -q '^\[ok\].*TFO 支持'; then
+    printf '  PASS  有站点标「支持」\n'; pass=$((pass + 1))
+else
+    printf '  FAIL  没有站点标「支持」\n'; fail=$((fail + 1))
+fi
+if printf '%s\n' "$err" | grep -q '^\[ok\].*TFO 不支持'; then
+    printf '  PASS  有站点标「不支持」\n'; pass=$((pass + 1))
+else
+    printf '  FAIL  没有站点标「不支持」\n'; fail=$((fail + 1))
+fi
+
+echo "=== require-tfo 无匹配不再误报缓存失效 / 白重扫 ==="
+TFO_SUPPORT=""
+err="$(scanner_pick --require-tfo 2>&1 >/dev/null)"; rc=$?
+chk "pick --require-tfo 无匹配返回 1" "1" "$rc"
+if printf '%s\n' "$err" | grep -q '缓存里的候选都已失效'; then
+    printf '  FAIL  仍误报「缓存失效，重新扫描」\n'; fail=$((fail + 1))
+else
+    printf '  PASS  不再误报缓存失效\n'; pass=$((pass + 1))
+fi
+
 echo "=== scanner_pick 接受 --require-tfo ==="
 TFO_SUPPORT="2.2.2.2"
 out="$(scanner_pick --require-tfo 2>/dev/null)"
@@ -101,7 +138,11 @@ for spec in \
     "cmd_scan 会交互询问|grep -q '是否只选支持 TFO' entry/main.sh" \
     "target 菜单有 TFO 提问|grep -q '是否只选支持 TFO' lib/target.sh" \
     "帮助说明 3-5 个候选|grep -q '列出 3-5 个候选' entry/main.sh" \
-    "打分不因 TFO 加权|grep -q '不把 TFO 能力纳入打分' lib/scanner.sh"; do
+    "打分不因 TFO 加权|grep -q '不把 TFO 能力纳入打分' lib/scanner.sh" \
+    "scanner_tfo_tag 函数存在|declare -F scanner_tfo_tag >/dev/null" \
+    "target_validate 接受 TFO 标记参数|grep -q 'tfo_tag=' lib/target.sh" \
+    "scan --list 有 TFO 列|grep -q 'TFO 列为现场探测结果' lib/scanner.sh" \
+    "帮助说明每个候选标注 TFO|grep -q '每个候选后面都标注' entry/main.sh"; do
     d="${spec%%|*}"; c="${spec#*|}"
     if eval "$c" >/dev/null 2>&1; then
         printf '  PASS  %s\n' "$d"; pass=$((pass + 1))

@@ -63,6 +63,8 @@ target_help() {
   tfo cookie、真实站点没回，一眼可区分。--tfo on / off 可强制覆盖。
   伪装站不承载正常代理流量，它的带宽和延迟不影响代理上网速度，所以 scan
   不把 TFO 纳入打分 —— 先按质量选最优站，再读它的能力。
+  scan 的每个候选后面都会标注「TFO 支持 / 不支持」；--require-tfo 只留支持的，
+  探测不了或明确不支持都按「不支持」显示（决策上一律关，不做模糊态）。
 EOF
 }
 
@@ -73,8 +75,11 @@ EOF
 # $1 = target（IP 或域名，可带 :port），$2 = SNI（可省，省则等于 target 的域名部分）。
 # target 是 IP 时必须给 SNI：校验会用 --resolve 把 SNI 域名钉到该 IP 上，
 # 测的就是「真实回落到这台源站」的效果，而不是公共 DNS 解析出的 CDN 边缘。
+# $3 = 可选的 TFO 标记（如「支持」/「不支持」），由扫描模块现场探测后传入，
+#      追加在 [ok] 校验行末尾，让每个候选后面都能看到它是否支持被动 TFO。
+#      其它调用方（xhy target 手动校验 / pick_target）不传，输出保持原样。
 target_validate() {
-    local host="$1" sni="${2:-}" tls_out="" hdr="" rc=0 probe="" use_openssl=0
+    local host="$1" sni="${2:-}" tfo_tag="${3:-}" tls_out="" hdr="" rc=0 probe="" use_openssl=0
     [[ -n "$host" ]] || return 1
     host="${host%%:*}"
 
@@ -127,10 +132,12 @@ target_validate() {
         warn "  ${probe} : 位于 CDN 之后，不推荐作为 REALITY target"; rc=1
     fi
     if (( rc == 0 )); then
+        local suffix=""
+        if [[ -n "$tfo_tag" ]]; then suffix=" / TFO ${tfo_tag}"; fi
         if is_ip_literal "$host"; then
-            ok "  ${probe} @ ${host} : TLS 1.3 / H2 / 无跳转 / 非 CDN（源站直连）"
+            ok "  ${probe} @ ${host} : TLS 1.3 / H2 / 无跳转 / 非 CDN（源站直连）${suffix}"
         else
-            ok "  ${probe} : TLS 1.3 / H2 / 无跳转 / 非 CDN"
+            ok "  ${probe} : TLS 1.3 / H2 / 无跳转 / 非 CDN${suffix}"
         fi
     fi
     return "$rc"

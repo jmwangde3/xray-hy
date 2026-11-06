@@ -376,7 +376,7 @@ scanner_cache_clear() {
 }
 
 scanner_cache_show() {
-    local sc ip sni tgt ms code size iss tls at epoch at_iso
+    local sc ip sni tgt ms code size iss tls at epoch at_iso tfo
     if [[ ! -s "$SCANNER_CACHE" ]]; then
         warn "暂无扫描缓存（xhy scan 扫一次就会存下来）"
         return 0
@@ -388,18 +388,20 @@ scanner_cache_show() {
         "${at_iso:-?}" "$(scanner_cache_age_h)" "$(( SCANNER_TTL / 3600 ))"
     if scanner_cache_valid; then printf '状态     : 有效（建节点时会被直接采用）\n'
     else printf '状态     : 已过期（下次自动扫描会重扫）\n'; fi
-    printf '\n  %-4s %-16s %-34s %7s %5s %9s  %s\n' "分数" "IP" "SNI" "握手" "HTTP" "大小" "签发者"
-    printf '  %s\n' "-------------------------------------------------------------------------------------------"
+    printf '\n  %-4s %-16s %-34s %7s %5s %9s  %-6s %s\n' "分数" "IP" "SNI" "握手" "HTTP" "大小" "TFO" "签发者"
+    printf '  %s\n' "--------------------------------------------------------------------------------------------------"
+    printf '  TFO 列为现场探测结果（不写入缓存；探测不了按不支持处理）\n'
     while IFS=$'\t' read -r sc ip sni tgt ms code size iss tls at; do
         [[ -n "$ip" ]] || continue
-        printf '  %-4s %-16s %-34s %5sms %5s %8sB  %s\n' \
-            "$sc" "$ip" "$sni" "$ms" "$code" "$size" "$iss"
+        tfo="$(scanner_tfo_tag "$(scanner_tfo_of "$ip" "$sni")")"
+        printf '  %-4s %-16s %-34s %5sms %5s %8sB  %-6s %s\n' \
+            "$sc" "$ip" "$sni" "$ms" "$code" "$size" "$tfo" "$iss"
     done < <(scanner_cache_best)
     printf '\n'
 }
 
 scanner_cache_verify() {
-    local sc ip sni tgt ms code size iss tls at tmp keep=0 drop=0 hdr
+    local sc ip sni tgt ms code size iss tls at tmp keep=0 drop=0 hdr tfo
     [[ -s "$SCANNER_CACHE" ]] || { warn "暂无扫描缓存"; return 1; }
     tmp="$(mktemp "${SCANNER_CACHE}.XXXXXX")" || return 1
     hdr="$(head -2 "$SCANNER_CACHE" | grep '^#' || true)"
@@ -407,7 +409,8 @@ scanner_cache_verify() {
         printf '%s\n' "$hdr"
         while IFS=$'\t' read -r sc ip sni tgt ms code size iss tls at; do
             [[ -n "$ip" ]] || continue
-            if target_validate "$tgt" "$sni" >&2; then
+            tfo="$(scanner_tfo_tag "$(scanner_tfo_of "$ip" "$sni")")"
+            if target_validate "$tgt" "$sni" "$tfo" >&2; then
                 printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
                     "$sc" "$ip" "$sni" "$tgt" "$ms" "$code" "$size" "$iss" "$tls" "$at"
                 keep=$(( keep + 1 ))
@@ -467,6 +470,13 @@ scanner_tfo_of() {
     printf '%s' "$r"
 }
 
+# scanner_tfo_tag <1|0> -> 「支持」/「不支持」。
+# 探测失败（工具缺失、远端无响应）与明确不支持一并显示「不支持」：
+# 决策上两者都按关闭处理，不给用户一个看起来「可能能用」的模糊态。
+scanner_tfo_tag() {
+    if [[ "${1:-0}" == "1" ]]; then printf '支持'; else printf '不支持'; fi
+}
+
 # 从缓存挑 3–5 个候选展示给用户选。
 # stdout 只输出最终 "<target> <sni> scan"；列表与提示一律走 stderr，
 # 因为调用方是 `best="$(scanner_pick)"`。
@@ -485,8 +495,11 @@ scanner_shortlist() {
         [[ -n "$tgt" ]] || continue
         (( n >= pool )) && break
         n=$(( n + 1 ))
-        target_validate "$tgt" "$sni" >&2 || continue
+        # 先现场探测 TFO，把标记随 target_validate 一起打印：即使该候选被
+        # --require-tfo 过滤掉，用户也能看到「这个站到底支不支持」，而不是
+        # 只看到最后一句「没有支持 TFO 的站点」。探测结果在同次调用内缓存。
         tfo="$(scanner_tfo_of "$ip" "$sni")"
+        target_validate "$tgt" "$sni" "$(scanner_tfo_tag "$tfo")" >&2 || continue
         if (( require == 1 )) && [[ "$tfo" != "1" ]]; then continue; fi
         tgts+=("$tgt"); snis+=("$sni"); scs+=("$sc")
         mss+=("$ms"); codes+=("$code"); tfos+=("$tfo")
@@ -495,7 +508,7 @@ scanner_shortlist() {
 
     if (( ${#tgts[@]} == 0 )); then
         if (( require == 1 )); then
-            warn "前 $pool 个候选里没有支持被动 TFO 的站点。可去掉 --require-tfo、换网段，或 xhy scan --refresh 重扫。"
+            warn "前 $pool 个候选都不支持被动 TFO（上面每个站点后已标注 TFO 结果）。可去掉 --require-tfo 按质量选、换 --cidr 网段，或 xhy scan --refresh 重扫。"
         else
             warn "缓存里没有通过校验的候选，请 xhy scan --refresh 重扫。"
         fi
@@ -598,6 +611,14 @@ scanner_pick() {
             printf '%s\n' "$best"
             return 0
         fi
+        # require-tfo 过滤为空 ≠ 缓存失效。同一个 /24 的站点集合是稳定的，
+        # 重扫一遍大概率还是这几个、还是都不支持，只会把同样的 [ok] 行再打
+        # 一次（早期版本就是这么误导人的）。直接失败并给出可选路径。
+        if (( require_tfo == 1 )); then
+            err "缓存候选都不支持被动 TFO（逐个结果见上面每行的 TFO 标记）" >&2
+            err "可去掉 --require-tfo 按质量选，或 xhy scan --cidr <其它网段> --require-tfo 换网段；确要重扫加 --refresh" >&2
+            return 1
+        fi
         warn "缓存里的候选都已失效，重新扫描"
     fi
 
@@ -626,6 +647,11 @@ scanner_pick() {
         printf '%s\n' "$best"
         return 0
     fi
-    err "扫描完成但没有可用站点（xhy scan --list 查看候选与失败原因）" >&2
+    if (( require_tfo == 1 )); then
+        err "扫描完成，但新扫出的候选都不支持被动 TFO（xhy scan --list 可看每个站点的 TFO 标记）" >&2
+        err "可去掉 --require-tfo 按质量选，或换 --cidr 网段再试" >&2
+    else
+        err "扫描完成但没有可用站点（xhy scan --list 查看候选与失败原因）" >&2
+    fi
     return 1
 }

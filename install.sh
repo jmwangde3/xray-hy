@@ -105,7 +105,7 @@ fi
 set -Eeuo pipefail
 
 XHY_VERSION="1.4.4"
-XHY_BUILD="f2c938f889c9"
+XHY_BUILD="37ac615d34e7"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -1666,6 +1666,8 @@ target_help() {
   tfo cookie、真实站点没回，一眼可区分。--tfo on / off 可强制覆盖。
   伪装站不承载正常代理流量，它的带宽和延迟不影响代理上网速度，所以 scan
   不把 TFO 纳入打分 —— 先按质量选最优站，再读它的能力。
+  scan 的每个候选后面都会标注「TFO 支持 / 不支持」；--require-tfo 只留支持的，
+  探测不了或明确不支持都按「不支持」显示（决策上一律关，不做模糊态）。
 EOF
 }
 
@@ -1676,8 +1678,11 @@ EOF
 # $1 = target（IP 或域名，可带 :port），$2 = SNI（可省，省则等于 target 的域名部分）。
 # target 是 IP 时必须给 SNI：校验会用 --resolve 把 SNI 域名钉到该 IP 上，
 # 测的就是「真实回落到这台源站」的效果，而不是公共 DNS 解析出的 CDN 边缘。
+# $3 = 可选的 TFO 标记（如「支持」/「不支持」），由扫描模块现场探测后传入，
+#      追加在 [ok] 校验行末尾，让每个候选后面都能看到它是否支持被动 TFO。
+#      其它调用方（xhy target 手动校验 / pick_target）不传，输出保持原样。
 target_validate() {
-    local host="$1" sni="${2:-}" tls_out="" hdr="" rc=0 probe="" use_openssl=0
+    local host="$1" sni="${2:-}" tfo_tag="${3:-}" tls_out="" hdr="" rc=0 probe="" use_openssl=0
     [[ -n "$host" ]] || return 1
     host="${host%%:*}"
 
@@ -1730,10 +1735,12 @@ target_validate() {
         warn "  ${probe} : 位于 CDN 之后，不推荐作为 REALITY target"; rc=1
     fi
     if (( rc == 0 )); then
+        local suffix=""
+        if [[ -n "$tfo_tag" ]]; then suffix=" / TFO ${tfo_tag}"; fi
         if is_ip_literal "$host"; then
-            ok "  ${probe} @ ${host} : TLS 1.3 / H2 / 无跳转 / 非 CDN（源站直连）"
+            ok "  ${probe} @ ${host} : TLS 1.3 / H2 / 无跳转 / 非 CDN（源站直连）${suffix}"
         else
-            ok "  ${probe} : TLS 1.3 / H2 / 无跳转 / 非 CDN"
+            ok "  ${probe} : TLS 1.3 / H2 / 无跳转 / 非 CDN${suffix}"
         fi
     fi
     return "$rc"
@@ -2311,7 +2318,7 @@ scanner_cache_clear() {
 }
 
 scanner_cache_show() {
-    local sc ip sni tgt ms code size iss tls at epoch at_iso
+    local sc ip sni tgt ms code size iss tls at epoch at_iso tfo
     if [[ ! -s "$SCANNER_CACHE" ]]; then
         warn "暂无扫描缓存（xhy scan 扫一次就会存下来）"
         return 0
@@ -2323,18 +2330,20 @@ scanner_cache_show() {
         "${at_iso:-?}" "$(scanner_cache_age_h)" "$(( SCANNER_TTL / 3600 ))"
     if scanner_cache_valid; then printf '状态     : 有效（建节点时会被直接采用）\n'
     else printf '状态     : 已过期（下次自动扫描会重扫）\n'; fi
-    printf '\n  %-4s %-16s %-34s %7s %5s %9s  %s\n' "分数" "IP" "SNI" "握手" "HTTP" "大小" "签发者"
-    printf '  %s\n' "-------------------------------------------------------------------------------------------"
+    printf '\n  %-4s %-16s %-34s %7s %5s %9s  %-6s %s\n' "分数" "IP" "SNI" "握手" "HTTP" "大小" "TFO" "签发者"
+    printf '  %s\n' "--------------------------------------------------------------------------------------------------"
+    printf '  TFO 列为现场探测结果（不写入缓存；探测不了按不支持处理）\n'
     while IFS=$'\t' read -r sc ip sni tgt ms code size iss tls at; do
         [[ -n "$ip" ]] || continue
-        printf '  %-4s %-16s %-34s %5sms %5s %8sB  %s\n' \
-            "$sc" "$ip" "$sni" "$ms" "$code" "$size" "$iss"
+        tfo="$(scanner_tfo_tag "$(scanner_tfo_of "$ip" "$sni")")"
+        printf '  %-4s %-16s %-34s %5sms %5s %8sB  %-6s %s\n' \
+            "$sc" "$ip" "$sni" "$ms" "$code" "$size" "$tfo" "$iss"
     done < <(scanner_cache_best)
     printf '\n'
 }
 
 scanner_cache_verify() {
-    local sc ip sni tgt ms code size iss tls at tmp keep=0 drop=0 hdr
+    local sc ip sni tgt ms code size iss tls at tmp keep=0 drop=0 hdr tfo
     [[ -s "$SCANNER_CACHE" ]] || { warn "暂无扫描缓存"; return 1; }
     tmp="$(mktemp "${SCANNER_CACHE}.XXXXXX")" || return 1
     hdr="$(head -2 "$SCANNER_CACHE" | grep '^#' || true)"
@@ -2342,7 +2351,8 @@ scanner_cache_verify() {
         printf '%s\n' "$hdr"
         while IFS=$'\t' read -r sc ip sni tgt ms code size iss tls at; do
             [[ -n "$ip" ]] || continue
-            if target_validate "$tgt" "$sni" >&2; then
+            tfo="$(scanner_tfo_tag "$(scanner_tfo_of "$ip" "$sni")")"
+            if target_validate "$tgt" "$sni" "$tfo" >&2; then
                 printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
                     "$sc" "$ip" "$sni" "$tgt" "$ms" "$code" "$size" "$iss" "$tls" "$at"
                 keep=$(( keep + 1 ))
@@ -2402,6 +2412,13 @@ scanner_tfo_of() {
     printf '%s' "$r"
 }
 
+# scanner_tfo_tag <1|0> -> 「支持」/「不支持」。
+# 探测失败（工具缺失、远端无响应）与明确不支持一并显示「不支持」：
+# 决策上两者都按关闭处理，不给用户一个看起来「可能能用」的模糊态。
+scanner_tfo_tag() {
+    if [[ "${1:-0}" == "1" ]]; then printf '支持'; else printf '不支持'; fi
+}
+
 # 从缓存挑 3–5 个候选展示给用户选。
 # stdout 只输出最终 "<target> <sni> scan"；列表与提示一律走 stderr，
 # 因为调用方是 `best="$(scanner_pick)"`。
@@ -2420,8 +2437,11 @@ scanner_shortlist() {
         [[ -n "$tgt" ]] || continue
         (( n >= pool )) && break
         n=$(( n + 1 ))
-        target_validate "$tgt" "$sni" >&2 || continue
+        # 先现场探测 TFO，把标记随 target_validate 一起打印：即使该候选被
+        # --require-tfo 过滤掉，用户也能看到「这个站到底支不支持」，而不是
+        # 只看到最后一句「没有支持 TFO 的站点」。探测结果在同次调用内缓存。
         tfo="$(scanner_tfo_of "$ip" "$sni")"
+        target_validate "$tgt" "$sni" "$(scanner_tfo_tag "$tfo")" >&2 || continue
         if (( require == 1 )) && [[ "$tfo" != "1" ]]; then continue; fi
         tgts+=("$tgt"); snis+=("$sni"); scs+=("$sc")
         mss+=("$ms"); codes+=("$code"); tfos+=("$tfo")
@@ -2430,7 +2450,7 @@ scanner_shortlist() {
 
     if (( ${#tgts[@]} == 0 )); then
         if (( require == 1 )); then
-            warn "前 $pool 个候选里没有支持被动 TFO 的站点。可去掉 --require-tfo、换网段，或 xhy scan --refresh 重扫。"
+            warn "前 $pool 个候选都不支持被动 TFO（上面每个站点后已标注 TFO 结果）。可去掉 --require-tfo 按质量选、换 --cidr 网段，或 xhy scan --refresh 重扫。"
         else
             warn "缓存里没有通过校验的候选，请 xhy scan --refresh 重扫。"
         fi
@@ -2533,6 +2553,14 @@ scanner_pick() {
             printf '%s\n' "$best"
             return 0
         fi
+        # require-tfo 过滤为空 ≠ 缓存失效。同一个 /24 的站点集合是稳定的，
+        # 重扫一遍大概率还是这几个、还是都不支持，只会把同样的 [ok] 行再打
+        # 一次（早期版本就是这么误导人的）。直接失败并给出可选路径。
+        if (( require_tfo == 1 )); then
+            err "缓存候选都不支持被动 TFO（逐个结果见上面每行的 TFO 标记）" >&2
+            err "可去掉 --require-tfo 按质量选，或 xhy scan --cidr <其它网段> --require-tfo 换网段；确要重扫加 --refresh" >&2
+            return 1
+        fi
         warn "缓存里的候选都已失效，重新扫描"
     fi
 
@@ -2561,7 +2589,12 @@ scanner_pick() {
         printf '%s\n' "$best"
         return 0
     fi
-    err "扫描完成但没有可用站点（xhy scan --list 查看候选与失败原因）" >&2
+    if (( require_tfo == 1 )); then
+        err "扫描完成，但新扫出的候选都不支持被动 TFO（xhy scan --list 可看每个站点的 TFO 标记）" >&2
+        err "可去掉 --require-tfo 按质量选，或换 --cidr 网段再试" >&2
+    else
+        err "扫描完成但没有可用站点（xhy scan --list 查看候选与失败原因）" >&2
+    fi
     return 1
 }
 
@@ -4070,6 +4103,8 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
     做证书/跳转/CDN 校验并打分，最后列出前 3-5 个候选由你选（脚本化调用
     自动取最高分）。TFO 只是展示/过滤项，不参与打分：不强制时按质量选，
     结果里也可能带支持 TFO 的站点；强制时只留支持 TFO 的。
+    每个候选后面都标注「TFO 支持 / 不支持」（现场探测，不写进缓存），
+    包括 [ok] 校验行、3-5 短名单、scan --list 与 scan --verify。
     结果记在 /etc/xray-hy/scan-cache.tsv（默认 7 天），此后再建 REALITY 节点
     直接复用，不会重复扫描。仅 amd64 / arm64 支持，其它架构回退内置地区库。
 
@@ -4341,7 +4376,12 @@ cmd_scan() {
                 printf '  或让它自己挑（缓存有效期内同样不重扫）:\n'
                 printf '    xhy add reality --port 443 --scan\n'
             else
-                err "自动扫描失败；可改用 xhy target → 1) 内置地区库，或 3) 手动指定"
+                if (( require == 1 )); then
+                    err "自动扫描失败（没有支持被动 TFO 的候选）；可去掉 --require-tfo 按质量选，或换 --cidr 网段"
+                    err "也可改用 xhy target → 1) 内置地区库，或 3) 手动指定"
+                else
+                    err "自动扫描失败；可改用 xhy target → 1) 内置地区库，或 3) 手动指定"
+                fi
                 return 1
             fi ;;
     esac

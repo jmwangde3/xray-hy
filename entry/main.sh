@@ -79,6 +79,8 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
     做证书/跳转/CDN 校验并打分，最后列出前 3-5 个候选由你选（脚本化调用
     自动取最高分）。TFO 只是展示/过滤项，不参与打分：不强制时按质量选，
     结果里也可能带支持 TFO 的站点；强制时只留支持 TFO 的。
+    每个候选后面都标注「TFO 支持 / 不支持」（现场探测，不写进缓存），
+    包括 [ok] 校验行、3-5 短名单、scan --list 与 scan --verify。
     结果记在 /etc/xray-hy/scan-cache.tsv（默认 7 天），此后再建 REALITY 节点
     直接复用，不会重复扫描。仅 amd64 / arm64 支持，其它架构回退内置地区库。
 
@@ -350,7 +352,12 @@ cmd_scan() {
                 printf '  或让它自己挑（缓存有效期内同样不重扫）:\n'
                 printf '    xhy add reality --port 443 --scan\n'
             else
-                err "自动扫描失败；可改用 xhy target → 1) 内置地区库，或 3) 手动指定"
+                if (( require == 1 )); then
+                    err "自动扫描失败（没有支持被动 TFO 的候选）；可去掉 --require-tfo 按质量选，或换 --cidr 网段"
+                    err "也可改用 xhy target → 1) 内置地区库，或 3) 手动指定"
+                else
+                    err "自动扫描失败；可改用 xhy target → 1) 内置地区库，或 3) 手动指定"
+                fi
                 return 1
             fi ;;
     esac
