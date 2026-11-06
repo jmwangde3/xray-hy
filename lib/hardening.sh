@@ -84,11 +84,28 @@ bbr_status() {
 # Collect public TCP ports from the node registry. Tunnel nodes bind to
 # 127.0.0.1 (PUBLIC=0) and are intentionally not exposed.
 firewall_node_ports() {
-    local f p public
+    local f p public proto
     for f in "$XHY_NODES"/*.env; do
         [[ -f "$f" ]] || continue
         public="$(grep -m1 '^PUBLIC=' "$f" 2>/dev/null | cut -d= -f2-)"
         [[ "$public" == "0" ]] && continue
+        proto="$(grep -m1 '^PROTO=' "$f" 2>/dev/null | cut -d= -f2-)"
+        [[ "$proto" == "udp" ]] && continue
+        p="$(grep -m1 '^PORT=' "$f" 2>/dev/null | cut -d= -f2-)"
+        [[ -n "$p" ]] && printf '%s\n' "$p"
+    done | sort -un
+}
+
+# Hysteria2 / QUIC nodes are UDP-only; forgetting this is the #1 reason a
+# freshly created hy2 node looks "up" but never connects.
+firewall_udp_ports() {
+    local f p public proto
+    for f in "$XHY_NODES"/*.env; do
+        [[ -f "$f" ]] || continue
+        public="$(grep -m1 '^PUBLIC=' "$f" 2>/dev/null | cut -d= -f2-)"
+        [[ "$public" == "0" ]] && continue
+        proto="$(grep -m1 '^PROTO=' "$f" 2>/dev/null | cut -d= -f2-)"
+        [[ "$proto" == "udp" ]] || continue
         p="$(grep -m1 '^PORT=' "$f" 2>/dev/null | cut -d= -f2-)"
         [[ -n "$p" ]] && printf '%s\n' "$p"
     done | sort -un
@@ -137,6 +154,9 @@ _apply_family() {
     while read -r p; do
         [[ -n "$p" ]] && "$ipt" -w -A "$FW_CHAIN" -p tcp --dport "$p" -j ACCEPT
     done < <(firewall_node_ports)
+    while read -r p; do
+        [[ -n "$p" ]] && "$ipt" -w -A "$FW_CHAIN" -p udp --dport "$p" -j ACCEPT
+    done < <(firewall_udp_ports)
 
     if [[ "$mode" == "strict" ]]; then
         "$ipt" -w -A "$FW_CHAIN" -p tcp -j DROP
@@ -232,7 +252,8 @@ firewall_off() {
 firewall_status() {
     printf '工作模式 : %s\n' "$(state_get FIREWALL_MODE safe)"
     printf 'SSH 防爆破: %s (端口 %s，60s/5 次 + 1h/8 次 双窗口)\n' "$(state_get SSH_GUARD_STATUS '?')" "$XHY_SSH_PORT"
-    printf '节点端口 : %s\n' "$(firewall_node_ports | tr '\n' ' ')"
+    printf '节点端口(TCP): %s\n' "$(firewall_node_ports | tr '\n' ' ')"
+    printf '节点端口(UDP): %s\n' "$(firewall_udp_ports | tr '\n' ' ')"
     if have_cmd iptables; then
         printf '\n%s\n' "IPv4 自定义链："
         iptables -w -L "$FW_CHAIN" -n --line-numbers 2>/dev/null || printf '  (未创建)\n'

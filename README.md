@@ -1,6 +1,6 @@
 # xray-hy
 
-模块化 Xray 部署管理脚本。一个仓库同时覆盖 **Debian/Ubuntu (systemd)** 与 **Alpine (OpenRC)**，支持四种节点模式并存、多节点管理、系统加固、版本钉死与后续更新。
+模块化 Xray 部署管理脚本。一个仓库同时覆盖 **Debian/Ubuntu (systemd)** 与 **Alpine (OpenRC)**，支持五种节点模式并存（含 Xray 原生 Hysteria2）、多节点管理、系统加固、版本钉死与后续更新。
 
 > 仓库：`https://github.com/jmwangde3/xray-hy`（当前为私有仓库，推送与自更新依赖已配置的 git 凭据）
 >
@@ -31,6 +31,8 @@
 
 从 `0xdabiaoge/singbox-lite`（**已获作者授权阅读源码**）借鉴了跨脚本共享状态锁 + 原子写入、下载/更新后语法与版本校验再提交、按内存设 `GOMEMLIMIT`、日志自动清理。读源码后又发现几处我们自己的实现缺陷并修正：**服务操作必须显式关闭锁 fd（`9>&-`），否则 OpenRC 守护进程继承锁会让后续所有 `xhy` 命令死锁**；**事务快照要覆盖 config + 节点注册表 + 分片 + state 整套状态**，只存 config.json 回滚后会产生静默不一致；**用 `flock -n` 而非 `-w`**（BusyBox 不支持后者）；`memory.high` 与 `memory.max` 取较小值；`sha256sum` 缺失时用 `openssl dgst` 兜底。只借鉴实现思路、未复制其代码（该仓库无 LICENSE，且是 4 个 Shell 共 744 KB 的巨型单文件方案，功能覆盖双核心 / 中转 / 端口转发 / 订阅，与本项目轻量定位相反）。
 
+同类脚本调研时还参考了 `fscarmen/ArgoX`（2046★，Xray 只听 localhost、由 Argo 隧道对外，不暴露代理端口 —— 我们的 `tunnel` 模式同思路）、`Suysker/xray-agent`（安装前把证书库存 / DNS 解析 / 端口占用 / 网络栈状态列清楚再动手 → `xhy preflight`）、`whherui/xray-reality-hy2-ss`（Hysteria2 必须放行 **UDP**，我们因此在 iptables 与 ip6tables 都加了 UDP 端口放行）、`sincalaway/ArgoSB` 与 `miihhaa/v2ray-1agent`（多核心组合、命令生成器、订阅）。这些都只取了思路，未复用代码。
+
 IPv6 双栈防火墙与慢速爆破双窗口、DNS 并发查询取消的根因则来自本项目在一台真实 Alpine VPS 上的巡检发现。
 
 ---
@@ -54,7 +56,9 @@ xhy add reality --port 8443 --target www.example.com:443 --sni www.example.com
 xhy add direct  --port 8080 --host node.example.com
 xhy add xhttp   --port 8081 --reality     # XHTTP + REALITY
 xhy add tunnel  --port 10086 --domain node.example.com --token <CF_TUNNEL_TOKEN>
+xhy add hy2     --port 8443 --sni www.bing.com --up 100mbps --down 300mbps
 
+xhy preflight                # 安装/加节点前先跑一遍只读预检
 xhy list
 xhy link --all                            # 导出 vless:// 链接
 xhy link --qr                            # 二维码（需 qrencode）
@@ -80,9 +84,9 @@ xhy check                                 # 全量环境自检
 | 防火墙 | `safe`（默认）/ `strict` / `off`；**同时构建 iptables 与 ip6tables 链** —— 只防 IPv4 等于给 `:::22` 留了后门；每次变更前备份两个 family 的规则转储 |
 | 伪装站 | `conf/targets.tsv` 地区库（US/GB/JP/HK/TW/SG/FR/DE/IN/CA/AU/NL/…），按 VPS 出口国家自动匹配，逐个做 TLS 1.3、HTTP/2、无重定向、非 CDN 校验；支持 `xhy target` 指定地区或手动固定 target/SNI |
 | 后续更新 | `xhy update script`（git ff-only） / `core` / `geodata` / `config`（重建全部节点）/ `all` |
-| 四种模式 | `direct`、`tunnel`、`reality`、`xhttp` |
+| 五种模式 | `direct`、`tunnel`、`reality`、`xhttp`、`hy2`（Xray 原生 Hysteria2 入站，UDP/QUIC + 自签证书 + `pinSHA256` 分享链接） |
 | 导出链接 | `xhy link --all` / `--uri` / `--qr` |
-| 额外补充 | 多节点并存与独立增删、**端口跨模式全局唯一检查**、**`DUAL_STACK=on` 让新节点监听 `::` 双栈**、节点注册表、**`flock` 并发锁（服务命令关闭锁 fd）**、配置变更原子校验+回滚、**最近 5 份整套状态快照 + `xhy rollback`**、更新 Xray 时二进制自动回滚、更新脚本后全量 `bash -n`、按内存/cgroup 设 `GOMEMLIMIT`、日志自动轮转、系统级关闭 MPTCP（钉死旧版的关键缓解）、私网/回国 IP/广告域名阻断开关、DoH 选择、日志级别与关闭、geodata 更新（带大小校验）、REALITY fallback 限速、系统自检报告（含两条版本边界 / MPTCP / IPv6 检查）、CLI 与菜单双入口、卸载可选保留配置 |
+| 额外补充 | 多节点并存与独立增删、**端口跨模式全局唯一检查**、**`DUAL_STACK=on` 双栈监听**、**`xhy preflight` 安装前只读预检**（内核修复线 / 端口 / 磁盘 / 内存 / MPTCP / GitHub 可达 / 依赖）、**Hysteria2 的 UDP 双栈放行与自签证书 pin**、节点注册表、**`flock` 并发锁（服务命令关闭锁 fd）**、配置变更原子校验+回滚、**最近 5 份整套状态快照 + `xhy rollback`**、更新 Xray 时二进制自动回滚、更新脚本后全量 `bash -n`、按内存/cgroup 设 `GOMEMLIMIT`、日志自动轮转、系统级关闭 MPTCP（钉死旧版的关键缓解）、私网/回国 IP/广告域名阻断开关、DoH 选择、日志级别与关闭、geodata 更新（带大小校验）、REALITY fallback 限速、系统自检报告、CLI 与菜单双入口、卸载可选保留配置 |
 
 ### 版本策略：两个相互冲突的上游边界
 
@@ -105,7 +109,7 @@ xhy check                                 # 全量环境自检
 
 ---
 
-## 4. 四种节点模式
+## 4. 五种节点模式
 
 | 模式 | 协议栈 | 默认端口 | 监听 | 说明 |
 |---|---|---|---|---|
@@ -113,10 +117,23 @@ xhy check                                 # 全量环境自检
 | `tunnel` | VLESS + WS + Cloudflare Tunnel | 10086 | 127.0.0.1 | 无需公网入站端口；在 CF 控制台把 Public Hostname 的 Service 指向 `http://127.0.0.1:<port>`，路径与 WS path 一致 |
 | `reality` | VLESS + REALITY + XTLS Vision | 443 | 0.0.0.0 | 无需域名与证书；`target` 必须是 TLS 1.3 + H2 的非 CDN 站点 |
 | `xhttp` | VLESS + XHTTP | 8081 | 0.0.0.0 | 默认明文（便于套 CDN）；加 `--reality` 则叠加 REALITY，无需证书 |
+| `hy2` | Hysteria2（Xray 内置入站） | 8443 **UDP** | 0.0.0.0 | 自签证书 + `pinSHA256` 链接、站点伪装、可选 Brutal 带宽上限；防火墙自动放行 UDP |
 
-同一模式可添加多个不同端口的节点，四种模式也可以共存。每个节点一份 `.env` 凭证 + 一份 inbound JSON 片段，`xhy update config` 会把所有片段重新渲染成单一 `config.json` 并整体校验。
+同一模式可添加多个不同端口的节点，五种模式也可以共存。每个节点一份 `.env` 凭证 + 一份 inbound JSON 片段，`xhy update config` 会把所有片段重新渲染成单一 `config.json` 并整体校验。
 
 CF Tunnel 模式下多个 tunnel 节点共用同一个 cloudflared 服务与 Token；请在 CF 控制台为每个主机名配置对应的本地端口。Token 在 `ps` 中可见是 cloudflared token 模式的固有行为，非本脚本引入。
+
+### Hysteria 支持情况（为什么不引入第二个核心）
+
+| 核心 | Hysteria2 | 说明 |
+|---|---|---|
+| **Xray-core** | ✅ 服务端入站从 **v26.3.27** 起支持 | 配置里协议名是 `hysteria`，`version` 必须为 `2`（只实现 Hysteria2，不支持 v1）。正好是我们默认钉死的版本，因此**不需要额外二进制**；配置字段已在真实 Xray 上用 `xray run -test` 验证。 |
+| **sing-box** | ✅ 一直原生支持 | `type: hysteria2`，单块配置、带宽用纯整数 Mbps，端口跳跃用 `server_ports`。功能更成熟（Salamander / Gecko 混淆、端口跳跃），但要引入第二个核心与另一套配置格式。 |
+| Hysteria 官方服务端 | ✅ | `apernet/hysteria` 独立二进制 + YAML 配置，是很多一键脚本的做法（如 `whherui/xray-reality-hy2-ss`）。 |
+
+本脚本选 Xray 内置方案，保持「一套核心、一套配置、一次 `run -test`」。`hy2` 节点会：用 openssl 生成 10 年自签证书（0600，证书 CN/SAN = SNI）、把证书 SHA-256 以 `pinSHA256` 写进 `hysteria2://` 链接（比 `insecure=1` 安全，同时输出简易链接备选）、配置 `masquerade` 反代伪装站、可选 `--up/--down` Brutal 带宽、并让防火墙对 **IPv4 和 IPv6 都放行对应 UDP 端口**。
+
+> 注意：`pinSHA256` 依赖客户端支持该标准参数；若导入失败，改用输出里给的 `insecure=1` 简易链接，或把 `PIN_HEX` 填到客户端的证书指纹字段。Hysteria2 是 UDP/QUIC，别忘了云安全组也要放行 UDP 端口。
 
 ---
 
@@ -151,7 +168,7 @@ xhy config set TARGET_REGION jp     # 或 auto
 │   ├── service.sh            systemd / OpenRC 服务与配置校验
 │   ├── hardening.sh          BBR、iptables 链、SSH 防爆破
 │   ├── target.sh             伪装站地区库与在线校验
-│   ├── nodes.sh              四种模式 inbound 渲染、节点注册表、整体重建
+│   ├── nodes.sh              五种模式 inbound 渲染、节点注册表、整体重建
 │   ├── links.sh              vless:// 链接与二维码
 │   └── update.sh             脚本/核心/geodata/配置更新、自检
 └── conf/targets.tsv          可自行编辑的地区伪装站候选
@@ -162,7 +179,8 @@ xhy config set TARGET_REGION jp     # 或 auto
 ├── tunnel.token              CF Tunnel Token（0600）
 ├── confs/<mode>_<port>.json  inbound 片段
 ├── nodes/<mode>_<port>.env   节点凭证（0600）
-├── snapshots/                最近 5 份已知可用配置（xhy rollback 用）
+├── certs/hy2_<port>.crt/key  Hysteria2 自签证书与私钥（0600，目录 0700）
+├── snapshots/                最近 5 份整套状态（xhy rollback 用）
 └── backups/                  配置、iptables/ip6tables 与旧 Xray 二进制备份
 /usr/local/bin/xray           Xray 二进制
 /usr/local/share/xray/        geoip.dat / geosite.dat
@@ -209,7 +227,8 @@ xhy rollback /etc/xray-hy/snapshots/state.20261106120000.tar.gz   # 指定快照
 5. `xhy core channel latest` 除上游格式变更风险外（历史上 `xray x25519` 输出从 `Password` 改为 `Password (PublicKey)` 曾让多个脚本的 REALITY 安装必定失败），**≥ v26.9.8 还会让 sing-box / mihomo 客户端连不上 REALITY**（#4520）。本项目解析器已兼容两种密钥输出格式，`update core` 也会在配置不兼容时自动换回旧二进制；升级前请先读上面的「版本策略：两个相互冲突的上游边界」；
 6. cloudflared raw 二进制没有官方校验和，无法做密码学验证；介意的话请改用 Cloudflare 官方软件源或 `.deb` 包自行替换 `$CF_BIN`；
 7. `xhy firewall strict` 与任何会改动网络的操作，请确保有带外控制台（VNC / 救援模式）；
-8. Xray 26.10.31 起已对 **WebSocket 传输发出弃用提示**。`direct` 与 `tunnel` 两个 WS 模式短期可用，但长期使用请关注上游动向；CF Tunnel 目前仍依赖 WS，暂无等价替代。需要长期稳定的直连优先选 `reality` 或 `xhttp --reality`。
+8. Xray 26.10.31 起已对 **WebSocket 传输发出弃用提示**。`direct` 与 `tunnel` 两个 WS 模式短期可用，但长期使用请关注上游动向；CF Tunnel 目前仍依赖 WS，暂无等价替代。需要长期稳定的直连优先选 `reality` 或 `xhttp --reality`；
+9. `hy2` 依赖 Xray **≥ v26.3.27** 的内置 Hysteria2 入站，把通道切到更旧版本会让该节点配置校验失败。自签证书需客户端支持 `pinSHA256`（不支持就用输出里的 `insecure=1` 简易链接）；UDP 端口除本机防火墙外，**云安全组也必须放行 UDP**。
 
 ---
 

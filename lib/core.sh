@@ -171,3 +171,32 @@ core_status() {
     [[ -s "$XRAY_ASSET/geosite.dat" ]] && printf '  geosite.dat %s bytes\n' "$(stat -c%s "$XRAY_ASSET/geosite.dat" 2>/dev/null || echo '?')"
     [[ -x "$CF_BIN" ]] && printf 'cloudflared: %s\n' "$("$CF_BIN" --version 2>&1 | head -1)"
 }
+
+# Xray-core gained a native Hysteria2 inbound in v26.3.27 (protocol name is
+# "hysteria", version must be 2). It requires a TLS certificate. Generate a
+# self-signed one and pin its SHA-256 in the share link so clients verify it
+# instead of blindly using insecure=1.
+# Echo: <crt path> <key path> <pin base64> <pin hex>
+hy2_gen_cert() {
+    local port="$1" sni="$2" crt key pin_b64 pin_hex
+    crt="$XHY_CERTS/hy2_${port}.crt"
+    key="$XHY_CERTS/hy2_${port}.key"
+    install -d -m 0700 "$XHY_CERTS"
+    have_cmd openssl || die "生成 Hysteria2 证书需要 openssl"
+    if ! openssl req -x509 -nodes -newkey ec \
+            -pkeyopt ec_paramgen_curve:prime256v1 \
+            -keyout "$key" -out "$crt" -subj "/CN=${sni}" \
+            -addext "subjectAltName=DNS:${sni}" -days 3650 >/dev/null 2>&1; then
+        rm -f "$crt" "$key"
+        openssl req -x509 -nodes -newkey rsa:2048 \
+            -keyout "$key" -out "$crt" -subj "/CN=${sni}" \
+            -days 3650 >/dev/null 2>&1 || die "自签证书生成失败"
+    fi
+    chmod 0600 "$key" "$crt"
+    pin_b64="$(openssl x509 -in "$crt" -outform DER 2>/dev/null \
+        | openssl dgst -sha256 -binary 2>/dev/null | base64 | tr -d '\n')"
+    pin_hex="$(openssl x509 -in "$crt" -noout -fingerprint -sha256 2>/dev/null \
+        | sed 's/.*=//;s/://g' | tr 'A-F' 'a-f')"
+    [[ -n "$pin_b64" ]] || die "无法计算证书 SHA-256 指纹"
+    printf '%s %s %s %s\n' "$crt" "$key" "$pin_b64" "$pin_hex"
+}

@@ -31,12 +31,16 @@ node_load() {
     MODE=""; PORT=""; PUBLIC=""; UUID=""; NODE_PATH=""; NODE_HOST=""
     SNI=""; TARGET=""; PRIVATE_KEY=""; PUBLIC_KEY=""; SHORT_ID=""
     FP=""; CF_DOMAIN=""; CF_TOKEN_SET=""; SECURITY="none"; CREATED=""
+    PROTO="tcp"; AUTH=""; CERT_FILE=""; KEY_FILE=""; PIN_B64=""; PIN_HEX=""
+    MASQ_URL=""; BRUTAL_UP=""; BRUTAL_DOWN=""
     while IFS= read -r line; do
-        [[ "$line" =~ ^[A-Z_]+= ]] || continue
+        # Keys may contain digits (PIN_B64, BRUTAL_UP); [A-Z_]+ would silently
+        # skip them and produce an empty pinSHA256 in the share link.
+        [[ "$line" =~ ^[A-Z_][A-Z0-9_]*= ]] || continue
         key="${line%%=*}"; val="${line#*=}"
         val="${val%\"}"; val="${val#\"}"
         case "$key" in
-            MODE|PORT|PUBLIC|UUID|NODE_PATH|NODE_HOST|SNI|TARGET|PRIVATE_KEY|PUBLIC_KEY|SHORT_ID|FP|CF_DOMAIN|CF_TOKEN_SET|SECURITY|CREATED)
+            MODE|PORT|PUBLIC|UUID|NODE_PATH|NODE_HOST|SNI|TARGET|PRIVATE_KEY|PUBLIC_KEY|SHORT_ID|FP|CF_DOMAIN|CF_TOKEN_SET|SECURITY|CREATED|PROTO|AUTH|CERT_FILE|KEY_FILE|PIN_B64|PIN_HEX|MASQ_URL|BRUTAL_UP|BRUTAL_DOWN)
                 printf -v "$key" '%s' "$val" ;;
         esac
     done <"$f"
@@ -139,6 +143,7 @@ render_inbound() {
         tunnel)  render_tunnel ;;
         reality) render_reality ;;
         xhttp)   render_xhttp ;;
+        hy2)     render_hy2 ;;
         *) err "未知节点类型: $mode"; return 1 ;;
     esac
 }
@@ -233,6 +238,41 @@ ${reality_block}
 EOF
 }
 
+# Xray's native Hysteria2 inbound (v26.3.27+). Verified with `xray run -test`:
+# protocol "hysteria", version 2, network "hysteria", security "tls", alpn h3.
+render_hy2() {
+    local qp="" masq
+    [[ -n "$BRUTAL_UP" ]] && qp="\"brutalUp\": \"${BRUTAL_UP}\""
+    if [[ -n "$BRUTAL_DOWN" ]]; then
+        [[ -n "$qp" ]] && qp+=", "
+        qp+="\"brutalDown\": \"${BRUTAL_DOWN}\""
+    fi
+    masq="$(json_escape "$MASQ_URL")"
+    cat <<EOF
+{
+  "listen": "$(listen_addr)", "port": ${PORT}, "protocol": "hysteria",
+  "tag": "in-hy2-${PORT}",
+  "settings": {
+    "version": 2,
+    "clients": [ { "auth": "${AUTH}", "email": "hy2-${PORT}" } ]
+  },
+  "streamSettings": {
+    "network": "hysteria", "security": "tls",
+    "hysteriaSettings": {
+      "version": 2,
+      "masquerade": { "type": "proxy", "url": "${masq}", "rewriteHost": true }
+    },
+    "tlsSettings": {
+      "alpn": [ "h3" ],
+      "certificates": [ { "certificateFile": "${CERT_FILE}", "keyFile": "${KEY_FILE}" } ]
+    },
+    "finalmask": { "quicParams": { ${qp} } }
+  },
+  $(sniffing_json)
+}
+EOF
+}
+
 write_fragment() {
     local env="$1" m p frag content
     # Resolve the destination BEFORE rendering: in a pipeline both sides are
@@ -253,6 +293,7 @@ write_fragment() {
 node_add() {
     local mode="$1" port="$2"; shift 2
     local host="" path="" sni="" target="" token="" domain="" uuid="" with_reality="0"
+    local masq="" up="" down=""
     while (( $# > 0 )); do
         case "$1" in
             --host)   host="$2"; shift 2 ;;
@@ -262,13 +303,16 @@ node_add() {
             --token)  token="$2"; shift 2 ;;
             --domain) domain="$2"; shift 2 ;;
             --uuid)   uuid="$2"; shift 2 ;;
+            --masq)   masq="$2"; shift 2 ;;
+            --up)     up="$2"; shift 2 ;;
+            --down)   down="$2"; shift 2 ;;
             --reality) with_reality="1"; shift ;;
             *) die "未知参数: $1" ;;
         esac
     done
 
     case "$mode" in
-        direct|tunnel|reality|xhttp) ;;
+        direct|tunnel|reality|xhttp|hy2) ;;
         *) die "模式只能是 direct / tunnel / reality / xhttp" ;;
     esac
     valid_port "$port" || die "端口不合法: $port"
@@ -358,6 +402,21 @@ node_add() {
                 "NODE_HOST=$domain" "CF_DOMAIN=$domain" "CF_TOKEN_SET=1"
                 "SECURITY=none" "CREATED=$(date -Is)"
             ) ;;
+        hy2)
+            local hy2sni masq_url crt key pin64 pinhex
+            hy2sni="${sni:-www.bing.com}"
+            masq_url="${masq:-https://www.bing.com/}"
+            read -r crt key pin64 pinhex <<<"$(hy2_gen_cert "$port" "$hy2sni")"
+            [[ -s "$crt" && -s "$key" ]] || die "Hysteria2 自签证书生成失败"
+            pairs=(
+                "MODE=hy2" "PORT=$port" "PUBLIC=1" "PROTO=udp"
+                "UUID=$uuid" "AUTH=$uuid" "NODE_HOST=$host"
+                "SNI=$hy2sni" "CERT_FILE=$crt" "KEY_FILE=$key"
+                "PIN_B64=$pin64" "PIN_HEX=$pinhex" "MASQ_URL=$masq_url"
+                "BRUTAL_UP=$up" "BRUTAL_DOWN=$down"
+                "SECURITY=tls" "CREATED=$(date -Is)"
+            )
+            info "Hysteria2 走 UDP $port，防火墙会自动放行 UDP；客户端需支持 hy2（sing-box / mihomo / v2rayN）" ;;
     esac
 
     local envf
@@ -394,6 +453,10 @@ node_del() {
     need_root
     backup_file "$envf"
     rm -f "$envf" "$(node_frag "$mode" "$port")"
+    if [[ "$mode" == "hy2" ]]; then
+        rm -f "$XHY_CERTS/hy2_${port}.crt" "$XHY_CERTS/hy2_${port}.key"
+        info "已清理该 Hysteria2 节点的自签证书"
+    fi
     if [[ "$mode" == "tunnel" ]] && ! find "$XHY_NODES" -name 'tunnel_*.env' | grep -q .; then
         remove_cf_service
         rm -f "$XHY_ETC/tunnel.token"

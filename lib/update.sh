@@ -162,3 +162,76 @@ self_check() {
     if [[ -x "$CF_BIN" ]] && svc_active "$SVC_CF" 2>/dev/null; then ok "CF Tunnel: 运行中"; fi
     printf '======================================\n\n'
 }
+
+# Pre-install checklist, modelled on the environment gates used by ArgoX /
+# xray-agent. Read-only; safe to run on a live server.
+preflight_check() {
+    printf '\n========== xray-hy 安装前预检（只读） ==========\n'
+    local kver major minor patch min_patch="" mem_kb disk_kb m r c p
+    if (( $(id -u) == 0 )); then printf '  [正常] root 权限\n'; else printf '  [问题] 需要 root 权限\n'; fi
+    printf '  [信息] 发行版 %s %s / init %s / 架构 %s\n' \
+        "$XHY_DISTRO" "$XHY_DISTRO_VER" "$XHY_INIT" "$XHY_ARCH"
+
+    mem_kb="$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+    disk_kb="$(df -Pk / 2>/dev/null | awk 'NR==2{print $4}')"
+    if (( mem_kb < 131072 )); then
+        printf '  [注意] 内存 %s MB 偏小，安装时会设置 GOMEMLIMIT\n' "$((mem_kb / 1024))"
+    else
+        printf '  [正常] 内存 %s MB\n' "$((mem_kb / 1024))"
+    fi
+    if (( ${disk_kb:-0} < 307200 )); then
+        printf '  [问题] 可用磁盘不足 300 MB\n'
+    else
+        printf '  [正常] 可用磁盘 %s MB\n' "$((disk_kb / 1024))"
+    fi
+
+    kver="$(uname -r)"; kver="${kver%%-*}"
+    IFS=. read -r major minor patch <<<"$kver"
+    patch="${patch%%[^0-9]*}"
+    case "${major}.${minor}" in
+        5.10) min_patch=272 ;; 5.15) min_patch=223 ;; 6.1)  min_patch=190 ;;
+        6.6)  min_patch=159 ;; 6.12) min_patch=113 ;; 6.18) min_patch=56 ;;
+        7.2)  min_patch=10  ;;
+    esac
+    if [[ -n "$min_patch" ]]; then
+        if (( ${patch:-0} >= min_patch )); then
+            printf '  [正常] 内核 %s 已包含 CVE-2026-98432 修复 (>= %s.%s.%s)\n' \
+                "$kver" "$major" "$minor" "$min_patch"
+        else
+            printf '  [问题] 内核 %s 低于修复线 %s.%s.%s，请更新内核并重启\n' \
+                "$kver" "$major" "$minor" "$min_patch"
+        fi
+    else
+        printf '  [注意] 内核 %s 不在已知分支映射内，请自行核对 CVE-2026-98432\n' "$kver"
+    fi
+    m="$(sysctl -n net.mptcp.enabled 2>/dev/null || echo NA)"
+    r="$(sysctl -n net.ipv4.tcp_migrate_req 2>/dev/null || echo NA)"
+    if [[ "$m" == "0" && "$r" == "0" ]]; then
+        printf '  [正常] MPTCP / tcp_migrate_req 均已关闭\n'
+    else
+        printf '  [注意] MPTCP=%s migrate_req=%s，建议执行 xhy bbr on\n' "$m" "$r"
+    fi
+
+    for c in bash curl openssl iptables unzip; do
+        if have_cmd "$c"; then printf '  [正常] 依赖 %s\n' "$c"; else printf '  [注意] 缺少 %s（install 会尝试安装）\n' "$c"; fi
+    done
+    if curl -fsS -m 8 -o /dev/null https://github.com 2>/dev/null; then
+        printf '  [正常] GitHub 可达\n'
+    else
+        printf '  [问题] GitHub 不可达，Xray / cloudflared 下载会失败\n'
+    fi
+    for p in 443 8443 8080 10086; do
+        if port_busy "$p"; then printf '  [注意] 端口 %s 已被占用\n' "$p"; fi
+    done
+    if [[ -r /proc/net/if_inet6 ]]; then
+        printf '  [信息] IPv6 协议栈可用（可选 DUAL_STACK=on）\n'
+    else
+        printf '  [信息] IPv6 未启用，DUAL_STACK 请保持 off\n'
+    fi
+    if [[ -x "$XRAY_BIN" ]]; then
+        printf '  [信息] 已装 Xray %s\n' "$(xray_installed_version)"
+    else
+        printf '  [信息] Xray 未安装，install 将下载 %s\n' "$(xray_resolve_version)"
+    fi
+    printf '==============================================\n\n'
+}

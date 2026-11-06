@@ -36,6 +36,7 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
 
   安装与检查
     install                     完整初始化（依赖、Xray、服务、BBR、防火墙）
+    preflight                   安装前预检（端口/磁盘/内核/网络/依赖）
     check                       环境自检报告
     version                     显示脚本版本
 
@@ -46,9 +47,11 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
     del <mode> <port>           删除节点
     menu                        交互式菜单
 
-    mode: direct | tunnel | reality | xhttp
+    mode: direct | tunnel | reality | xhttp | hy2
     add 选项: --host --path --uuid --sni --target --domain --token --reality
-    默认端口: direct 8080 / tunnel 10086 / reality 443 / xhttp 8081
+              --masq --up --down   (hy2 专用)
+    默认端口: direct 8080 / tunnel 10086 / reality 443 / xhttp 8081 / hy2 8443(UDP)
+    hy2 用 Xray 内置 Hysteria2 入站(v26.3.27+)，自签证书 + pinSHA256 链接
 
   配置
     config                      路由/DNS/日志开关菜单（也可直接 set）
@@ -76,7 +79,7 @@ EOF
 
 default_port() {
     case "$1" in
-        direct) echo 8080 ;; tunnel) echo 10086 ;; reality) echo 443 ;; xhttp) echo 8081 ;;
+        direct) echo 8080 ;; tunnel) echo 10086 ;; reality) echo 443 ;; xhttp) echo 8081 ;; hy2) echo 8443 ;;
         *) echo 0 ;;
     esac
 }
@@ -120,9 +123,10 @@ cmd_add_interactive() {
     2) tunnel   VLESS + WS + Cloudflare Tunnel（不需要公网入站端口）
     3) reality  VLESS + REALITY + XTLS Vision
     4) xhttp    VLESS + XHTTP（可选叠加 REALITY）
+    5) hy2      Hysteria2（UDP/QUIC，Xray 内置入站 + 自签证书）
 EOF
     case "$(ask '选择类型' '3')" in
-        1) mode=direct ;; 2) mode=tunnel ;; 3) mode=reality ;; 4) mode=xhttp ;; *) return 0 ;;
+        1) mode=direct ;; 2) mode=tunnel ;; 3) mode=reality ;; 4) mode=xhttp ;; 5) mode=hy2 ;; *) return 0 ;;
     esac
     port="$(ask '监听端口' "$(default_port "$mode")")"
     valid_port "$port" || { err "端口不合法"; return 1; }
@@ -147,6 +151,14 @@ EOF
             token="$(ask 'Tunnel Token (回车复用已保存的)' '')"
             opts+=(--domain "$domain")
             [[ -n "$token" ]] && opts+=(--token "$token") ;;
+        hy2)
+            opts+=(--sni "$(ask 'SNI / 证书 CN' 'www.bing.com')")
+            if confirm "自定义伪装站 URL？" "n"; then
+                opts+=(--masq "$(ask '伪装站 URL' 'https://www.bing.com/')")
+            fi
+            if confirm "设置 Brutal 带宽上限？" "n"; then
+                opts+=(--up "$(ask '上行 (如 100mbps)' '100mbps')" --down "$(ask '下行' '300mbps')")
+            fi ;;
     esac
     node_add "$mode" "$port" "${opts[@]}" "${extra[@]}"
 }
@@ -159,7 +171,7 @@ cmd_add() {
     while (( $# > 0 )); do
         case "$1" in
             --port)   port="$2"; shift 2 ;;
-            --host|--path|--uuid|--sni|--target|--domain|--token) opts+=("$1" "$2"); shift 2 ;;
+            --host|--path|--uuid|--sni|--target|--domain|--token|--masq|--up|--down) opts+=("$1" "$2"); shift 2 ;;
             --reality) opts+=("$1"); shift ;;
             *) die "未知参数: $1（见 xhy --help）" ;;
         esac
@@ -330,6 +342,7 @@ main() {
 
     case "$cmd" in
         install)    cmd_install ;;
+        preflight)  preflight_check ;;
         check)      self_check ;;
         menu)       cmd_menu ;;
         add)        cmd_add "$@" ;;

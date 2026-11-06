@@ -9,6 +9,7 @@ XHY_NODES="$XHY_ETC/nodes"
 XHY_STATE="$XHY_ETC/state.env"
 XHY_BACKUP="$XHY_ETC/backups"
 XHY_SNAPSHOTS="$XHY_ETC/snapshots"
+XHY_CERTS="$XHY_ETC/certs"
 XHY_LOGDIR="${XHY_LOGDIR:-/var/log/xray-hy}"
 
 XRAY_BIN="${XRAY_BIN:-/usr/local/bin/xray}"
@@ -70,9 +71,9 @@ confirm() {
 }
 
 init_dirs() {
-    mkdir -p "$XHY_ETC" "$XHY_CONFDIR" "$XHY_LOGDIR" "$XHY_BACKUP" "$XHY_NODES" "$XHY_SNAPSHOTS"
+    mkdir -p "$XHY_ETC" "$XHY_CONFDIR" "$XHY_LOGDIR" "$XHY_BACKUP" "$XHY_NODES" "$XHY_SNAPSHOTS" "$XHY_CERTS"
     chmod 0755 "$XHY_ETC" "$XHY_CONFDIR" "$XHY_LOGDIR" "$XHY_BACKUP" 2>/dev/null || true
-    chmod 0700 "$XHY_NODES" "$XHY_SNAPSHOTS" 2>/dev/null || true
+    chmod 0700 "$XHY_NODES" "$XHY_SNAPSHOTS" "$XHY_CERTS" 2>/dev/null || true
     [[ -f "$XHY_STATE" ]] || : >"$XHY_STATE"
     chmod 0600 "$XHY_STATE" 2>/dev/null || true
 }

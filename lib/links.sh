@@ -30,6 +30,12 @@ link_uri() {
                 q="encryption=none&security=reality&type=xhttp&path=$(url_encode "$NODE_PATH")&host=$(url_encode "$NODE_HOST")&mode=auto&sni=$(url_encode "$SNI")&fp=chrome&pbk=$(url_encode "$PUBLIC_KEY")&sid=$(url_encode "$SHORT_ID")"
             fi
             printf 'vless://%s@%s:%s?%s#%s\n' "$UUID" "$host" "$PORT" "$q" "$name" ;;
+        hy2)
+            host="$(_link_host "$NODE_HOST")"
+            # Self-signed cert: pin its SHA-256 instead of insecure=1.
+            q="pinSHA256=$(url_encode "$PIN_B64")&sni=$(url_encode "$SNI")"
+            printf 'hysteria2://%s@%s:%s?%s#%s\n' \
+                "$(url_encode "$AUTH")" "$host" "$PORT" "$q" "$name" ;;
         *) err "未知模式: $MODE"; return 1 ;;
     esac
 }
@@ -48,6 +54,14 @@ link_from_env() {
     [[ -n "${TARGET:-}" ]]    && printf '  Target   : %s\n' "$TARGET"
     [[ -n "${PUBLIC_KEY:-}" ]] && printf '  公钥 pbk : %s\n' "$PUBLIC_KEY"
     [[ -n "${SHORT_ID:-}" ]]  && printf '  shortId  : %s\n' "$SHORT_ID"
+    if [[ "$MODE" == "hy2" ]]; then
+        printf '  传输     : UDP / QUIC (Hysteria2, Xray 内置入站)\n'
+        printf '  伪装站   : %s\n' "$MASQ_URL"
+        printf '  证书     : %s\n' "$CERT_FILE"
+        printf '  指纹 SHA256: %s\n' "$PIN_HEX"
+        printf '  简易链接（跳过证书校验，不推荐）: hysteria2://%s@%s:%s?insecure=1&sni=%s#xray-hy-hy2-%s\n' \
+            "$AUTH" "$(_link_host "$NODE_HOST")" "$PORT" "$SNI" "$PORT"
+    fi
     printf '\n  %s\n\n' "$uri"
     printf '  %s\n' "注意：完整链接等同于访问凭证，请勿公开分享。"
 }
