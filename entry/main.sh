@@ -164,9 +164,15 @@ EOF
     case "$mode" in
         reality)
             if confirm "手动指定 REALITY target / SNI？" "n"; then
-                target="$(ask 'target (含 :443)')"
-                sni="$(ask 'SNI' "${target%%:*}")"
-                opts+=(--target "$target" --sni "$sni")
+                # 一条输入：host[:port][,sni=xxx]；不写 sni= 时 SNI 与 target 同名，
+                # 绝大多数情况两者就是同一个域，没必要问两遍。
+                local t_in ts
+                t_in="$(ask 'target (域名[:443]，SNI 不同才加 ,sni=其他域名)')"
+                [[ -n "$t_in" ]] || return 0
+                ts="${t_in#*,sni=}"; [[ "$ts" == "$t_in" ]] && ts=""
+                t_in="${t_in%%,*}"
+                [[ "$t_in" == *:* ]] || t_in="${t_in}:443"
+                opts+=(--target "$t_in" --sni "${ts:-${t_in%%:*}}")
             else
                 info "按地区自动选择伪装站并做 TLS 1.3 / H2 校验..."
             fi ;;

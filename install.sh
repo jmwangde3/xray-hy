@@ -105,7 +105,7 @@ fi
 set -Eeuo pipefail
 
 XHY_VERSION="1.0.0"
-XHY_BUILD="036dc75ea995"
+XHY_BUILD="4cb6f6410f6d"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -1465,10 +1465,13 @@ EOF
             2) local r; r="$(ask '地区代码' "$(target_region)")"
                target_rows | grep -q "^${r}|" || { warn "可用地区: $(target_list_regions)"; continue; }
                state_del TARGET_CUSTOM; state_del TARGET_SNI; state_set TARGET_REGION "$r"; pick_target ;;
-            3) local h s; h="$(ask 'target 域名(可带 :443)')"
+            3) local h s
+               h="$(ask 'target 域名(可带 :443，SNI 不同才加 ,sni=其他域名)')"
                [[ -n "$h" ]] || continue
+               s="${h#*,sni=}"; [[ "$s" == "$h" ]] && s=""
+               h="${h%%,*}"
                [[ "$h" == *:* ]] || h="${h}:443"
-               s="$(ask 'SNI' "${h%%:*}")"
+               s="${s:-${h%%:*}}"
                target_validate "$h" || confirm '校验未完全通过，仍要使用？' 'n' || continue
                state_set TARGET_CUSTOM "$h"; state_set TARGET_SNI "$s"
                ok "已固定 target=$h SNI=$s" ;;
@@ -2562,9 +2565,15 @@ EOF
     case "$mode" in
         reality)
             if confirm "手动指定 REALITY target / SNI？" "n"; then
-                target="$(ask 'target (含 :443)')"
-                sni="$(ask 'SNI' "${target%%:*}")"
-                opts+=(--target "$target" --sni "$sni")
+                # 一条输入：host[:port][,sni=xxx]；不写 sni= 时 SNI 与 target 同名，
+                # 绝大多数情况两者就是同一个域，没必要问两遍。
+                local t_in ts
+                t_in="$(ask 'target (域名[:443]，SNI 不同才加 ,sni=其他域名)')"
+                [[ -n "$t_in" ]] || return 0
+                ts="${t_in#*,sni=}"; [[ "$ts" == "$t_in" ]] && ts=""
+                t_in="${t_in%%,*}"
+                [[ "$t_in" == *:* ]] || t_in="${t_in}:443"
+                opts+=(--target "$t_in" --sni "${ts:-${t_in%%:*}}")
             else
                 info "按地区自动选择伪装站并做 TLS 1.3 / H2 校验..."
             fi ;;

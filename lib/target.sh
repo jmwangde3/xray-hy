@@ -157,10 +157,13 @@ EOF
             2) local r; r="$(ask '地区代码' "$(target_region)")"
                target_rows | grep -q "^${r}|" || { warn "可用地区: $(target_list_regions)"; continue; }
                state_del TARGET_CUSTOM; state_del TARGET_SNI; state_set TARGET_REGION "$r"; pick_target ;;
-            3) local h s; h="$(ask 'target 域名(可带 :443)')"
+            3) local h s
+               h="$(ask 'target 域名(可带 :443，SNI 不同才加 ,sni=其他域名)')"
                [[ -n "$h" ]] || continue
+               s="${h#*,sni=}"; [[ "$s" == "$h" ]] && s=""
+               h="${h%%,*}"
                [[ "$h" == *:* ]] || h="${h}:443"
-               s="$(ask 'SNI' "${h%%:*}")"
+               s="${s:-${h%%:*}}"
                target_validate "$h" || confirm '校验未完全通过，仍要使用？' 'n' || continue
                state_set TARGET_CUSTOM "$h"; state_set TARGET_SNI "$s"
                ok "已固定 target=$h SNI=$s" ;;
