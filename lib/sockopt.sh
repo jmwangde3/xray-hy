@@ -8,15 +8,16 @@
 
 # target_tfo_probe <连接地址> [端口] [TLS SNI]
 #   0 = target 的 SYN-ACK 带 TFO option
-#   1 = 不带
-#   2 = 无法判定（缺 tcpdump/openssl，或两次都没抓到包）
+#   1 = SYN-ACK 抓到了，但不带 TFO option
+#   2 = 无法判定（缺 tcpdump/openssl/timeout，或两次都没抓到 SYN-ACK）
 # 连接地址用 dest（可能是源站 IP），SNI 单独给 —— 域名解析到 CDN 时两者不同，
 # 要跟的是源站的 SYN-ACK，不是 Cloudflare 边缘的。
 target_tfo_probe() {
-    local host="$1" port="${2:-443}" sni="${3:-$1}" pcap pid rc=2 attempt rhost filt
+    local host="$1" port="${2:-443}" sni="${3:-$1}" out pid rc=2 attempt rhost filt
     have_cmd tcpdump  || return 2
     have_cmd openssl  || return 2
-    pcap="$(mktemp "${TMPDIR:-/tmp}/xhy-tfo.XXXXXX" 2>/dev/null)" || return 2
+    have_cmd timeout  || return 2
+    out="$(mktemp "${TMPDIR:-/tmp}/xhy-tfo.XXXXXX" 2>/dev/null)" || return 2
 
     # 必须按源 IP 收窄：只写 `src port 443` 会把本机 443 入站发出的 SYN-ACK
     # 一起抓进来（REALITY 自己就监听 443），那样测到的是自己不是目标。
@@ -36,31 +37,31 @@ target_tfo_probe() {
         filt="tcp and src host $rhost and src port $port and tcp[tcpflags] & (tcp-syn|tcp-ack) == (tcp-syn|tcp-ack)"
     fi
 
-    # 抓两次：tcpdump 建立监听要几百毫秒，第一次的 sleep 在慢机器上偶尔会
-    # 让握手抢在监听之前过去，pcap 空文件。
+    # 直接吃 tcpdump 的文本输出，不写 pcap：`-w` 有输出缓冲，杀进程那一刻
+    # 可能还是空文件（实测过），文本管道 + `grep -m1` 命中第一条 SYN-ACK 就
+    # 退出，既快也不依赖缓冲行为。
     for attempt in 1 2; do
-        : >"$pcap"
-        tcpdump -i any -nn -q -U -c 1 -w "$pcap" "$filt" >/dev/null 2>&1 &
+        : >"$out"
+        { timeout 3 tcpdump -i any -nn -vv "$filt" 2>/dev/null || true; } \
+            | grep -m1 -E 'Flags \[S\.\]' >"$out" &
         pid=$!
-        if (( attempt == 1 )); then sleep 0.6; else sleep 1.0; fi
-        timeout 5 openssl s_client -connect "${host}:${port}" -servername "$sni" \
+        # tcpdump 挂上过滤器要几百毫秒，太短会让握手抢在监听之前过去。
+        if (( attempt == 1 )); then sleep 0.7; else sleep 1.0; fi
+        timeout 4 openssl s_client -connect "${host}:${port}" -servername "$sni" \
             -tls1_3 -brief </dev/null >/dev/null 2>&1 || true
-        sleep 0.3
-        kill "$pid" 2>/dev/null || true
         wait "$pid" 2>/dev/null || true
-        if [[ -s "$pcap" ]]; then break; fi
-    done
-
-    if [[ -s "$pcap" ]]; then
-        # tcpdump 对 option 34 打印 "unknown-34"（老版本）/"fast open"（新版本），
-        # 部分发行版补丁写成 "tfo"，三个都认。
-        if tcpdump -nn -vv -r "$pcap" 2>/dev/null | grep -qiE 'unknown-34|fast.?open|\btfo\b'; then
-            rc=0
-        else
-            rc=1
+        if [[ -s "$out" ]]; then
+            # tcpdump 对 option 34 打印 "unknown-34"（老版本）/"fast open"（新版本），
+            # 部分发行版补丁写成 "tfo"，三个都认。
+            if grep -qiE 'unknown-34|fast.?open|\btfo\b' "$out"; then
+                rc=0
+            else
+                rc=1
+            fi
+            break
         fi
-    fi
-    rm -f "$pcap"
+    done
+    rm -f "$out"
     return $rc
 }
 
@@ -86,7 +87,7 @@ tfo_decide() {
     esac
     target_tfo_probe "$dest" "$port" "$sni" || trc=$?
     if (( trc == 2 )); then
-        info "无法探测 $dest 的 TFO（缺 tcpdump/openssl 或抓不到包），按关闭处理" >&2
+        info "无法探测 $dest 的 TFO（缺 tcpdump/openssl 或抓不到 SYN-ACK），按关闭处理" >&2
     fi
     if (( trc == 0 )); then printf '1'; else printf '0'; fi
 }
