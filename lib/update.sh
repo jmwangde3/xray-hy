@@ -187,6 +187,13 @@ self_check() {
     # v1.4.0 起 TFO 固定关闭，不再统计命中数 —— 那个数字永远是 0，
     # 摆出来只会让人以为"开了但没命中"。要确认真的没启用，看这里就够了。
     printf 'TFO       : off（固定，无开关；详见 lib/sockopt.sh 文件头）\n'
+    # v1.4.2：tcpcongestion 按内核能力决定写不写，无 bbr 时该字段根本不出现。
+    # 这里显示的是**实际渲染结果**而不是"应该是什么"，排查时少一层猜测。
+    if sockopt_cc_available; then
+        printf 'sockopt   : keepAliveIdle=45 uto=10000 cc=bbr（内核可用）\n'
+    else
+        printf 'sockopt   : keepAliveIdle=45 uto=10000 cc=继承（内核无 bbr，字段省略）\n'
+    fi
     printf '%s\n' "--------------------------------------"
     firewall_status --brief
     if have_cmd ip6tables; then

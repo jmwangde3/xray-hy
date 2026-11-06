@@ -2,6 +2,20 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.4.2 — 2026-11-07
+
+**口径修正：从「Xray 不支持」改成「运行时不生效」。** 这两者的行动后果完全相反 —— 说不生效只砍一个字段，说不支持会把整个 sockopt 连 `tcpKeepAliveIdle:45` 一起砍掉。
+
+- 依据：Xray **26.3.27**（`XHY_PINNED_VERSION`）与 **26.10.31** 对同一份含七字段的 sockopt（`tcpFastOpen` / `tcpNoDelay` / `tcpKeepAliveIdle` / `tcpUserTimeout` / `tcpcongestion` / `tcpMptcp` / `tcpFastOpenQueueLength`）都返回 `Configuration OK.`、`EXIT=0`，无 unknown field。字段全部被接受，`tcpMptcp` 的存在性顾虑就此作废
+- 但**能解析 ≠ 生效**：`tcpcongestion:"bbr"` 是 per-socket 设置，内核没编译 bbr 时 `setsockopt(TCP_CONGESTION)` 返回 EINVAL 被 Xray 静默忽略，那一项零效果。实测两台机器：`47.88.102.45` 是 `reno cubic bbr`（真生效），AX3600 路由器是 `reno cubic`（纯装饰）
+- **`tcpcongestion` 改为按内核能力决定写不写**：`net.ipv4.tcp_available_congestion_control` 含 `bbr` 才写，否则整个字段省略（省略 = 继承内核默认，写死 `cubic` 反而可能顶掉更优默认）。判定用 `available` 而非 `current`：per-socket 只需算法可用，不要求内核默认就是 bbr；也与 `hardening.sh` 里 `xhy bbr on` 的判定依据一致，不会出现「bbr on 报 unavailable、sockopt 却写着 bbr」的矛盾
+- **显式补 `tcpMptcp:false`**：GODEBUG 已在进程级关掉（`/etc/init.d/xray-hy` 第 14 行），写出来让读代码的人一眼看到结论，与 `tcpFastOpen:false` 同一风格
+- **明确不砍的四个字段**：`tcpNoDelay` / `tcpKeepAliveIdle:45` / `tcpUserTimeout:10000` / `tcpMptcp` —— 与 TFO、拥塞控制都无关
+- `tcpFastOpenQueueLength` 不写：TFO 关闭时队列长度无意义
+- `xhy check` 新增一行 `sockopt`，显示**实际渲染结果**（`cc=bbr（内核可用）` / `cc=继承（内核无 bbr，字段省略）`），排查时少猜一层
+- `test/sockopt-test.sh` 扩到 38 项：三种内核能力组合 × 四个无关字段的组合断言、`bbr2` 不算 bbr、两种输出都是合法 JSON、真实 sysctl 路径在 `set -u` 下不崩
+- 未改：TFO 仍恒关、`--tfo` 仍被拒（v1.4.0 结论不变）
+
 ## v1.4.1 — 2026-11-07
 
 - `xhy check` 不再统计 `TcpExtTCPFastOpenPassive` 命中数（TFO 固定关闭后它永远是 0，摆出来只会让人以为"开了但没命中"），改为明确显示 `TFO : off（固定，无开关）`
