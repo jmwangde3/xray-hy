@@ -44,8 +44,69 @@ IPv6 双栈防火墙与慢速爆破双窗口、DNS 并发查询取消的根因�
 gh repo clone jmwangde3/xray-hy /opt/xray-hy      # 私有仓库，需先 gh auth login
 # 或：git clone https://github.com/jmwangde3/xray-hy.git /opt/xray-hy
 cd /opt/xray-hy
-bash xhy install        # 依赖 -> Xray -> 服务 -> BBR -> 防火墙 -> 空配置自检
+./xhy install           # 依赖 -> Xray -> 服务 -> BBR -> 防火墙 -> 空配置自检
 xhy                     # 打开交互菜单（install 已创建 /usr/local/bin/xhy 软链）
+```
+
+> `./xhy` 与 `bash xhy` 等价：入口首段是 POSIX sh，检测不到 bash 时会先装 bash 再 `exec` 自己。
+> **`install` 不需要 git** —— git 只被 `xhy update script` 使用。
+
+### 2.1 全新机器：没有 bash、没有 git
+
+Alpine 官方镜像默认既没有 bash 也没有 git，而仓库是私有的（`git clone` 还要 token）。
+最省事的路径是**把代码打包传上去**，全程不碰 git：
+
+**Windows 侧（PowerShell / Git Bash 均可，Win10+ 自带 `tar` 与 `scp`）**
+
+```powershell
+cd H:\AI工作区\workbuddy
+tar --exclude=xray-hy/.git -czf xray-hy.tar.gz xray-hy
+scp xray-hy.tar.gz root@<服务器IP>:/tmp/
+```
+
+**服务器侧（root）**
+
+```sh
+cd /tmp
+tar -xzf xray-hy.tar.gz                       # 得到 /tmp/xray-hy
+sh /tmp/xray-hy/bootstrap.sh /tmp/xray-hy     # 装依赖 -> 复制到 /opt/xray-hy -> 体检 -> preflight
+cd /opt/xray-hy && ./xhy install
+```
+
+`bootstrap.sh` 只依赖 busybox，做的事按顺序打印 `[1/5] … [5/5]`：
+装 `bash curl ca-certificates openssl coreutils unzip iptables ip6tables` → 复制到 `/opt/xray-hy`
+→ 体检 DNS / 软件源 / GitHub 可达性 → 跑 `xhy preflight`。每步都有超时上限（默认 180s，`XHY_PKG_TIMEOUT` 可调）。
+
+只体检不改动：
+
+```sh
+sh /tmp/xray-hy/bootstrap.sh --check
+```
+
+不用 scp 也可以：`apk add bash git` 之后走上面的 `git clone`，或把 tar.gz 用 `base64` 贴进终端。
+
+### 2.2 「跑了没反应」怎么定位
+
+脚本以前把 `apk add bash` 的输出全部丢进 `/dev/null`，一旦软件源不通就会静静地卡几分钟 —— 看起来和死掉一样。
+现在每步都有 `==> [n/6]` banner 和超时上限，卡住先看停在哪一步。按顺序试：
+
+| 现象 | 含义 | 处理 |
+|---|---|---|
+| `bash: not found` | bash 没装（且你直接敲了 `bash`） | `apk add bash`，或改用 `sh xhy install` 让脚本自己装 |
+| `xhy: No such file or directory` | 当前目录没有 `xhy` | `cd /opt/xray-hy` 再执行；`pwd; ls xhy` 确认 |
+| 卡在 `[1/6] 依赖` | 软件源/DNS 不通，或 apk 锁被占 | 另开会话跑 `apk update`、`ps w \| grep apk`；换源 `sed -i 's#dl-cdn.alpinelinux.org#mirrors.aliyun.com#g' /etc/apk/repositories` |
+| 卡在 `[3/6] 下载并校验 Xray` | 到 GitHub 的线路不通 | `curl -I https://github.com` 验证；失败时按 `fetch` 打印的 curl 退出码处置 |
+| 十几秒后报「另一个 xhy 实例…」 | 上一轮没退干净，配置锁还在 | `ps w \| grep '[x]hy'`，杀掉残留进程后重试 |
+| 什么都不打印就退出 | 检查 `echo $?`；`sh -x xhy install` 逐行看 | 用 `XHY_TRACE=1 ./xhy install` 拿到行号 |
+
+一键体检（不需要先装任何东西，纯 busybox）：
+
+```sh
+{ uname -a; head -3 /etc/os-release 2>/dev/null
+  command -v bash || echo "缺少 bash"; command -v git || echo "缺少 git"
+  (nslookup github.com >/dev/null 2>&1 && echo "DNS ok") || echo "DNS 失败"
+  curl -sS -o /dev/null -m 10 -w 'github HTTP %{http_code}\n' https://github.com 2>/dev/null || echo "curl 不可用"
+  ps w | grep -E '[x]hy|[a]pk' || echo "没有卡住的 xhy/apk 进程"; } 2>&1
 ```
 
 添加节点：

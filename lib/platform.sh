@@ -69,21 +69,44 @@ detect_ssh_port() {
     XHY_SSH_PORT="$p"
 }
 
+# Every package operation is bounded. An unreachable mirror otherwise blocks
+# for minutes with no output, which users report as "the script does nothing".
+XHY_PKG_TIMEOUT="${XHY_PKG_TIMEOUT:-180}"
+
+run_lim() { # run_lim <seconds> <cmd...>
+    local t="$1"; shift
+    if have_cmd timeout; then timeout "$t" "$@"; else "$@"; fi
+}
+
+pkg_hint() {
+    warn "软件源操作失败或超时（上限 ${XHY_PKG_TIMEOUT}s）。按顺序排查："
+    case "$XHY_PKG" in
+        apk) warn "  1) 网络/DNS：apk update；cat /etc/resolv.conf"
+             warn "  2) 换源：sed -i 's#dl-cdn.alpinelinux.org#mirrors.aliyun.com#g' /etc/apk/repositories"
+             warn "  3) 锁：ps w | grep apk（云厂商 cloud-init 常占锁）"
+             warn "  4) 手动装：apk add bash curl ca-certificates openssl coreutils unzip iptables ip6tables" ;;
+        apt) warn "  1) 网络/DNS：apt-get update；cat /etc/resolv.conf"
+             warn "  2) 锁：ps aux | grep -E 'apt|dpkg'"
+             warn "  3) 手动装：apt-get install -y bash curl ca-certificates openssl coreutils unzip iptables" ;;
+        *)   warn "  检查网络、DNS 与软件源配置" ;;
+    esac
+}
+
 pkg_update() {
     case "$XHY_PKG" in
-        apt) DEBIAN_FRONTEND=noninteractive apt-get update -qq ;;
-        apk) apk update -q ;;
-        dnf) dnf -q makecache ;;
-        yum) yum -q makecache ;;
+        apt) DEBIAN_FRONTEND=noninteractive run_lim "$XHY_PKG_TIMEOUT" apt-get update -qq ;;
+        apk) run_lim "$XHY_PKG_TIMEOUT" apk update -q ;;
+        dnf) run_lim "$XHY_PKG_TIMEOUT" dnf -q makecache ;;
+        yum) run_lim "$XHY_PKG_TIMEOUT" yum -q makecache ;;
     esac
 }
 
 pkg_install() {
     case "$XHY_PKG" in
-        apt) DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "$@" ;;
-        apk) apk add --no-cache "$@" ;;
-        dnf) dnf install -y -q "$@" ;;
-        yum) yum install -y -q "$@" ;;
+        apt) DEBIAN_FRONTEND=noninteractive run_lim "$XHY_PKG_TIMEOUT" apt-get install -y -qq --no-install-recommends "$@" ;;
+        apk) run_lim "$XHY_PKG_TIMEOUT" apk add --no-cache "$@" ;;
+        dnf) run_lim "$XHY_PKG_TIMEOUT" dnf install -y -q "$@" ;;
+        yum) run_lim "$XHY_PKG_TIMEOUT" yum install -y -q "$@" ;;
     esac
 }
 
@@ -104,11 +127,13 @@ ensure_deps() {
         esac
     done
     if (( ${#missing[@]} > 0 )); then
-        info "安装依赖: ${missing[*]}"
-        pkg_update || warn "软件源更新失败，继续尝试安装。"
-        pkg_install "${missing[@]}" || die "依赖安装失败: ${missing[*]}"
+        info "缺少依赖: ${missing[*]}"
+        info "刷新软件源（上限 ${XHY_PKG_TIMEOUT}s，无输出时多半卡在这里）..."
+        pkg_update || { warn "软件源刷新失败，继续尝试安装。"; pkg_hint; }
+        info "安装中（上限 ${XHY_PKG_TIMEOUT}s）..."
+        pkg_install "${missing[@]}" || { pkg_hint; die "依赖安装失败: ${missing[*]}"; }
     fi
-    have_cmd bash || die "缺少 bash，无法继续。"
+    have_cmd bash || die "缺少 bash，无法继续（apk add bash / apt-get install -y bash）。"
     have_cmd unzip || have_cmd busybox || die "缺少 unzip/busybox，无法解压 Xray。"
 }
 

@@ -49,6 +49,11 @@ debug() { [[ "${XHY_DEBUG:-0}" == "1" ]] && printf '%s[dbg]%s %s\n' "$C_DIM" "$C
 
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
 
+# Progress banner. Every slow step must announce itself: a stalled download or
+# package install with no output is indistinguishable from a hung script, and
+# that is the single most common "the script does nothing" report.
+stage() { printf '\n%s==> [%s/%s]%s %s\n' "$C_BLUE" "$1" "$2" "$C_RESET" "$3"; }
+
 need_root() {
     [[ "$(id -u)" -eq 0 ]] || die "需要 root 权限运行，请使用 sudo 或切换到 root。"
 }
@@ -89,12 +94,18 @@ acquire_lock() {
         exec 9>"$XHY_ETC/.lock"
         for ((i = 0; i < 15; i++)); do
             if flock -n 9 2>/dev/null; then XHY_LOCK_MODE="flock"; return 0; fi
+            if (( i == 0 )); then
+                info "另一个 xhy 实例正持有配置锁，等待最多 15 秒..."
+            fi
             sleep 1
         done
-        die "另一个 xhy 实例正在修改配置（锁: $XHY_ETC/.lock）"
+        die "另一个 xhy 实例正在修改配置（锁: $XHY_ETC/.lock）。先确认它已退出：ps w | grep -c '[x]hy'"
     fi
     for ((i = 0; i < 15; i++)); do
         if mkdir "$XHY_ETC/.lock.d" 2>/dev/null; then XHY_LOCK_MODE="dir"; return 0; fi
+        if (( i == 0 )); then
+            info "另一个 xhy 实例正持有目录锁，等待最多 15 秒..."
+        fi
         sleep 1
     done
     die "无法取得配置锁，若确认无其它实例请删除 $XHY_ETC/.lock.d"
@@ -222,9 +233,26 @@ public_country() {
 }
 
 # Fetch with retries. Never pipes remote content into a shell.
+# --speed-time/--speed-limit turn a stalled connection into a fast failure:
+# without them a blackholed route just sits there for the full timeout and the
+# caller looks hung. Exit codes are translated so the report is actionable.
 fetch() {
-    local url="$1" dest="$2"
-    curl -fL --retry 3 --retry-delay 2 --connect-timeout 10 -m 120 -sS "$url" -o "$dest"
+    local url="$1" dest="$2" rc=0
+    debug "fetch $url"
+    curl -fL --retry 2 --retry-delay 2 --connect-timeout 10 \
+        --speed-time 30 --speed-limit 1024 -m 300 -sS "$url" -o "$dest" || rc=$?
+    if (( rc != 0 )); then
+        err "下载失败 (curl 退出码 $rc): $url"
+        case "$rc" in
+            6)      err "  6  = 域名解析失败 → 检查 /etc/resolv.conf、DNS、IPv6" ;;
+            7)      err "  7  = 连不上主机 → 出网被拦 / 端口被封 / 只解析到不可用地址" ;;
+            28)     err "  28 = 超时或速度过低 → 线路不通；先 curl -I <url> 验证" ;;
+            22)     err "  22 = HTTP 4xx/5xx → 版本号或路径不存在（404），或私有仓库未授权" ;;
+            35|60)  err "  $rc = TLS 握手/证书问题 → 装 ca-certificates、校准时间" ;;
+        esac
+        return "$rc"
+    fi
+    return 0
 }
 
 sha256_file() {

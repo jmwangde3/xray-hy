@@ -1,6 +1,7 @@
 # HANDOFF — xray-hy
 
 > 交接时间：2026-11-06 13:56 (UTC+8)
+> 更新：2026-11-06 15:35 —— 见 §11（无 bash / 无 git 的引导路径 + 卡死可见化）
 > 仓库：<https://github.com/jmwangde3/xray-hy>（**私有**，main 分支，工作树干净）
 > 基线 commit：`53cb4c6`（本文档为在此基础上的一次 docs 提交）
 > 生产服务器：`8.222.223.248`（Alpine 3.23 / OpenRC / Xray 26.10.31）
@@ -31,6 +32,10 @@
 git clone https://github.com/jmwangde3/xray-hy.git /opt/xray-hy   # 需要 gh 已登录或 PAT
 cd /opt/xray-hy && ./xhy install
 ```
+
+**没有 git / 没有 bash 的机器**（Alpine 官方镜像默认两者都没有，且仓库是私有的）：
+从 Windows 打包 `scp` 上去，用 `bootstrap.sh` 装依赖并摊到 `/opt/xray-hy`，全程不碰 git ——
+具体命令见 `README` §2.1。`install` 本身**不依赖 git**，git 只被 `xhy update script` 使用。
 
 脚本**以本地 git 工作树安装**，运行时绝不下载任何脚本；`xhy update script` 走 `git pull --ff-only`，拉完对所有 `.sh` 跑 `bash -n`，任一失败整组回滚到旧 commit。
 
@@ -170,8 +175,10 @@ cp -a /usr/local/etc/xray /root/xray-legacy-$(date +%F)
 ## 7. 常用命令速查
 
 ```sh
+sh bootstrap.sh --check       # 纯 busybox 体检：DNS / 软件源 / GitHub / 卡住的进程
+sh bootstrap.sh <dir|tar.gz>  # 装依赖 -> 摊到 /opt/xray-hy -> preflight
 xhy preflight                 # 安装前只读预检（内核修复线/MPTCP/端口/依赖/GitHub 可达）
-xhy install                   # 依赖 + Xray + 服务 + BBR + 防火墙
+xhy install                   # 依赖 + Xray + 服务 + BBR + 防火墙（分 6 步打印 banner）
 xhy check                     # 环境自检（版本两条边界、MPTCP、IPv6 链、配置语法、服务状态）
 
 xhy add reality --port 443 --host 1.2.3.4
@@ -226,3 +233,29 @@ bash test/run-all.sh          # 67 项断言（21 + 18 + 28），无需 root / �
 - 本轮所有临时改动（hy2 入站、证书、iptables 规则、sysctl）均已回滚，`config.json` 恢复为原版 3005 字节。
 - root 密码仅用于云控制台 VNC，且曾在聊天记录中明文出现，建议轮换。
 - 合规：此类工具的部署与使用涉及跨境联网合规，请自行确认所在地法律法规与服务商条款。
+
+## 11. 2026-11-06 15:35 · 「新服务器没反应」的修复
+
+**现象**：全新 Alpine 机器（默认无 bash、无 git），`bash xhy install` 没有任何输出。
+
+**先纠正一个判断**：`install` **不需要 git**。脚本是从本地目录读 `lib/*.sh`，git 只被 `xhy update script` 使用，且缺 git 时它已经会打印跳过。所以「没有 git」不是阻塞点，真正要解决的是**怎么把私有仓库的代码弄到机器上** —— 用 `tar.gz` + `scp`，见 README §2.1。
+
+**真正的缺陷是静默**：三处会把输出吞掉或无限期等待，任何一处网络不通，表现都是「几分钟没反应」：
+
+| 位置 | 原因 | 改法 |
+|---|---|---|
+| `xhy` 首段 | `apk add --no-cache bash >/dev/null 2>&1 \|\| true`，失败也不吭声 | 打印提示 + `timeout 180` + 4 条排查命令；补 apt/dnf/yum 分支 |
+| `lib/platform.sh` | `pkg_update` / `pkg_install` 无超时 | 统一走 `run_lim`（`XHY_PKG_TIMEOUT`，默认 180s），失败打印 `pkg_hint`（换源/锁/手动装） |
+| `lib/common.sh::fetch` | `-m 120` 只管总时长，连上后低速卡住照样干等 | 加 `--speed-time 30 --speed-limit 1024`，并按 curl 退出码（6/7/22/28/35/60）解释原因 |
+
+另外三处可观测性：
+- `cmd_install` 拆 6 步，每步 `==> [n/6]` banner —— 卡住时一眼知道停在哪。
+- `XHY_TRACE=1 xhy install` 开 `set -x`，`PS4` 带 `文件:行号`。
+- `acquire_lock` 等锁前先吭声，超时消息带 `ps w | grep '[x]hy'`。
+
+**新增 `bootstrap.sh`**（POSIX sh，只依赖 busybox，因为它在 bash 装好之前就要能跑）：
+`--check` 只体检 / 带目录或 tar.gz 参数时装依赖 + 摊平到 `/opt/xray-hy` + 跑 preflight。
+
+**验证**：`bash -n` 全过（xhy + 8 个 lib + bootstrap），`test/run-all.sh` 67 项断言仍全过（21 + 18 + 28）。
+
+**未解决**：新服务器 IP 没给，无法远程确认它到底卡在哪一步。需要一次现场输出（README §2.2 的一键体检）才能断定是 DNS、软件源还是 GitHub 线路。
