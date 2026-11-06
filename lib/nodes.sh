@@ -432,7 +432,7 @@ node_add() {
             read -r priv pub <<<"$kp"
             [[ -n "$priv" && -n "$pub" ]] || { err "x25519 密钥生成失败"; return 1; }
             sid="$(rand_hex 8)"
-            tfo_val="$(tfo_decide "$tfo_opt" "$t_sni")"
+            tfo_val="$(tfo_decide "$tfo_opt" "${tgt%%:*}" "${tgt##*:}" "$t_sni")"
             pairs=(
                 "MODE=reality" "PORT=$port" "PUBLIC=1" "UUID=$uuid" "NODE_PATH=$path"
                 "NODE_HOST=$host" "SNI=$t_sni" "TARGET=$tgt"
@@ -458,7 +458,7 @@ node_add() {
                 read -r priv pub <<<"$kp"
                 [[ -n "$priv" && -n "$pub" ]] || { err "x25519 密钥生成失败"; return 1; }
                 sid="$(rand_hex 8)"
-                tfo_val="$(tfo_decide "$tfo_opt" "$t_sni")"
+                tfo_val="$(tfo_decide "$tfo_opt" "${tgt%%:*}" "${tgt##*:}" "$t_sni")"
             fi
             pairs=(
                 "MODE=xhttp" "PORT=$port" "PUBLIC=1" "UUID=$uuid" "NODE_PATH=$path"
