@@ -328,3 +328,16 @@ gh release create v<版本> install.sh --title "..." --notes "..."
 **修复**（commit `b495f2d`，build `55e4c3638b68`）：凡是"合法地可能失败"的管道（grep 无匹配、curl/ss/df/ls 出错）所在的所有命令替换，一律在管道尾部兜 `|| true`，共 16 处，覆盖 platform/common/core/hardening/nodes/target/update 七个文件。教训：**`set -euo pipefail` + `x="$(a | b | grep ...)"` 是无声死亡的经典组合，新增代码必须逐条自查。**
 
 **真机验证（8.222.223.248，全新 Alpine 3.23 / 内核 6.18.60）**：release 资产更新后，`bash /tmp/install.sh install </dev/null` 七步全过；`xhy add reality --port 443` 自动匹配到同区域伪装站 `www.nus.edu.sg`，vless 链接生成，`rc-service xray-hy` started。待验证：客户端实连、重启后自启。
+
+### 12.2 2026-11-06 17:00 · 借鉴 idleleo (Xray_bash_onekey) 的四项运维能力
+
+来源：`hello-yunshu/Xray_bash_onekey`（GPL-3.0， mature fork of wulabing 系列）。取其运维周边之长，不取 Nginx/ACME/i18n/AI 助手（与本项目自包含定位冲突）。四项改动：
+
+1. **`xhy update script --yes [--allow-major]`**：同一主版本序列自动确认；跨主版本（v1→v2）非交互直接拒绝，需显式 `--allow-major`。从下载脚本里解析 `XHY_VERSION` 比对主版本号。
+2. **`xhy backup [--out FILE]` / `xhy restore <file>`**（新 `lib/backup.sh`）：备份 `/etc/xray-hy`（排除 snapshots/backups），归档含逐文件 SHA256+大小清单；restore 先全量校验（任何一项不过就整体放弃）、现状自动留底到 `$XHY_BACKUP/pre-restore-*`、`confs/` 与 `config.json` 一律从 nodes 重建、`xray -test` 失败整体回滚。新机器无 Xray 时只还原数据并指引装核心。
+3. **双栈出口检测**：`public_ip6()`（带缓存，无 v6 机器上避免重复等待超时）；`xhy check` 报告 v4/v6 出口；install 检测到 v6 出口自动 `DUAL_STACK=on`（监听 `::`）；`xhy link` 在「节点地址是 IPv4 字面量 + DUAL_STACK=on」时自动附 IPv6 变体链接（`link_uri` 新增可选 host 覆盖参数）。
+4. **`xhy export clash|singbox [--out FILE]`**（新 `lib/export.sh`）：从节点注册表生成 mihomo `proxies` YAML / sing-box outbounds JSON。reality/hy2/direct/tunnel 支持，xHTTP 两边都无对应传输、自动跳过并提示。hy2 自签证书在 mihomo 里只能 `skip-cert-verify`（mihomo 不支持 pinSHA256，README 有说明）。
+
+测试：新增 `test/export-test.sh`（19 项：YAML 内容、JSON 可解析+xhttp 跳过、--out 权限、空注册表 die；Windows 下 stat 权限断言自动 skip）。全套通过，build `00e638285083`。
+
+踩坑备忘：`ck "无节点时 die"` 的断言方向一开始写反了（die 非零退出才是预期，要用 ck_fail）；MSYS 下 `stat -c %a` 永远不是 0600，权限断言必须按平台 skip。

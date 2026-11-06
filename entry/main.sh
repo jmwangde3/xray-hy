@@ -76,6 +76,12 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
   版本与更新
     core [status|channel pinned|channel latest|channel vX.Y.Z|update]
     update [script|core|geodata|config|all]
+    update script --yes [--allow-major]   非交互更新（跨主版本需 --allow-major）
+
+  备份与导出
+    backup [--out FILE]              备份 /etc/xray-hy（内含逐文件 SHA256 清单）
+    restore <备份文件>               校验清单后还原（先备份现状，失败自动回滚）
+    export clash|singbox [--out F]   导出 mihomo/Clash 或 sing-box 节点配置
 
   服务与卸载
     service [start|stop|restart|status]
@@ -108,6 +114,10 @@ cmd_install() {
     create_symlink
     stage 3 7 "创建数据目录"
     init_dirs
+    if [[ -z "$(state_get DUAL_STACK '')" && -n "$(public_ip6 || true)" ]]; then
+        state_set DUAL_STACK on
+        ok "检测到 IPv6 出口，新节点默认双栈监听 (::)（xhy config set DUAL_STACK off 可改回）"
+    fi
     local ver
     stage 4 7 "下载并校验 Xray"
     # 版本二选一：最新版功能全，但 >=26.9.8 的 REALITY 要求 MLKEM ClientHello，
@@ -156,7 +166,15 @@ EOF
     esac
     port="$(ask '监听端口' "$(default_port "$mode")")"
     valid_port "$port" || { err "端口不合法"; return 1; }
-    host="$(ask '客户端连接地址(域名或 IP)' "$(public_ip)")"
+    local ip4 ip6
+    ip4="$(public_ip || true)"
+    ip6="$(public_ip6 || true)"
+    host="$(ask '客户端连接地址(域名或 IP)' "${ip4:-$ip6}")"
+    if [[ -n "$ip6" && -n "$ip4" ]]; then
+        info "检测到双栈出口 (v6: $ip6)。想让客户端也能走 v6：xhy config set DUAL_STACK on，链接会自动附 IPv6 变体。"
+    elif [[ -z "$ip4" && -n "$ip6" ]]; then
+        info "仅检测到 IPv6 出口 ($ip6)，已用它作为默认连接地址。"
+    fi
     path="$(ask '路径 (回车随机生成)' '')"
 
     local -a opts=(--host "$host")
@@ -388,6 +406,9 @@ main() {
         add)        cmd_add "$@" ;;
         list)       node_list ;;
         link)       cmd_link "$@" ;;
+        export)     cmd_export "$@" ;;
+        backup)     backup_create "$@" ;;
+        restore)    backup_restore "${1:?用法: xhy restore <备份文件>}" ;;
         del)        node_del "${1:?需要模式}" "${2:?需要端口}" ;;
         config)     if [[ "${1:-}" == "set" ]]; then cmd_config_set "${2:?需要 KEY}" "${3:?需要 VALUE}";
                     else cmd_config_menu; fi ;;
@@ -410,9 +431,11 @@ main() {
                         *) die "用法: xhy core [status|channel <值>|update]" ;;
                     esac ;;
         update)     case "${1:-all}" in
-                        all) update_all ;; script) update_script ;; core) update_core ;;
+                        all) update_all ;;
+                        script) shift; update_script "$@" ;;
+                        core) update_core ;;
                         geodata) update_geodata ;; config) update_config ;;
-                        *) die "用法: xhy update [all|script|core|geodata|config]" ;;
+                        *) die "用法: xhy update [all|script [--yes] [--allow-major]|core|geodata|config]" ;;
                     esac ;;
         service)    case "${1:-status}" in
                         start|stop|restart) "svc_$1" "$SVC_XRAY" ;;

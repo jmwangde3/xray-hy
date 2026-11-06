@@ -154,13 +154,16 @@ xhy check                                 # 全量环境自检
 | Xray 版本 | `xhy core channel pinned`（钉死 **`v26.3.27`**，保 sing-box / mihomo 客户端兼容）/ `latest` / `vX.Y.Z` 自定义；切换时提示 #4520 与 MPTCP 两条边界，`xhy core update` 重装并校验配置兼容性 |
 | 自动启动 | systemd unit 或 OpenRC init 脚本，`start_pre` 里先做配置校验；`Restart=on-failure` / OpenRC 自动重启策略 |
 | BT 阻断 | `sniffing` + `routing` 的 `protocol: ["bittorrent"]` → blackhole，开关 `BLOCK_BT` |
-| 防 SSH 爆破 | iptables `recent` **双窗口**：60 秒 5 次 + **1 小时 8 次**（后者专治「每几分钟来几发」的慢速爆破）；IPv4 / IPv6 双栈同时生效；缺 `xt_recent` 时降级并告警 |
+| 防 SSH 爆破 | iptables `recent` **双窗口**：60 秒 10 次 + **1 小时 25 次**（阈值按正常运维用量校准——诊断工具/VS Code/scp 一轮就是 5-10 个连接；暴力破解是每小时成百上千次）；IPv4 / IPv6 双栈同时生效；缺 `xt_recent` 时降级并告警 |
 | CF Tunnel | 可选；WS 只监听 `127.0.0.1`，cloudflared 由独立服务托管，Token 存 0600 文件；分享链接按 CF 边缘 TLS 生成 |
 | 防火墙 | `safe`（默认）/ `strict` / `off`；**同时构建 iptables 与 ip6tables 链** —— 只防 IPv4 等于给 `:::22` 留了后门；每次变更前备份两个 family 的规则转储 |
 | 伪装站 | `conf/targets.tsv` 地区库（US/GB/JP/HK/TW/SG/FR/DE/IN/CA/AU/NL/…），按 VPS 出口国家自动匹配，逐个做 TLS 1.3、HTTP/2、无重定向、非 CDN 校验；支持 `xhy target` 指定地区或手动固定 target/SNI |
 | 后续更新 | `xhy update script`（单文件：新构建整文件替换；克隆：git ff-only）/ `core` / `geodata` / `config`（重建全部节点）/ `all` |
 | 五种模式 | `direct`、`tunnel`、`reality`、`xhttp`、`hy2`（Xray 原生 Hysteria2 入站，UDP/QUIC + 自签证书 + `pinSHA256` 分享链接） |
-| 导出链接 | `xhy link --all` / `--uri` / `--qr` |
+| 导出链接 | `xhy link --all` / `--uri` / `--qr`（服务器是 IPv4 字面量且开了双栈时自动附 **IPv6 变体链接**） |
+| 导出客户端配置 | `xhy export clash|singbox [--out FILE]` —— 生成 mihomo/Clash.Meta 的 `proxies` YAML 或 sing-box 的 outbounds JSON；xHTTP 两边都暂不支持，自动跳过并提示 |
+| 备份 / 还原 | `xhy backup [--out FILE]` —— 打包 `/etc/xray-hy`（排除 snapshots/backups），**内含逐文件 SHA256 清单**；`xhy restore <文件>` 先全量校验、现状自动留底、从 nodes 重建配置并过 `xray -test`，失败整体回滚 |
+| 非交互更新 | `xhy update script --yes`（同一主版本序列自动确认；跨主版本再加 `--allow-major`） |
 | 额外补充 | 多节点并存与独立增删、**端口跨模式全局唯一检查**、**`DUAL_STACK=on` 双栈监听**、**`xhy preflight` 安装前只读预检**（内核修复线 / 端口 / 磁盘 / 内存 / MPTCP / GitHub 可达 / 依赖）、**Hysteria2 的 UDP 双栈放行与自签证书 pin**、节点注册表、**`flock` 并发锁（服务命令关闭锁 fd）**、配置变更原子校验+回滚、**最近 5 份整套状态快照 + `xhy rollback`**、更新 Xray 时二进制自动回滚、更新脚本后全量 `bash -n`、按内存/cgroup 设 `GOMEMLIMIT`、日志自动轮转、系统级关闭 MPTCP（钉死旧版的关键缓解）、私网/回国 IP/广告域名阻断开关、DoH 选择、日志级别与关闭、geodata 更新（带大小校验）、REALITY fallback 限速、系统自检报告、CLI 与菜单双入口、卸载可选保留配置 |
 
 ### 版本策略：两个相互冲突的上游边界

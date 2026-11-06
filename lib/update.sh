@@ -4,11 +4,23 @@
 # 单文件发布后，更新脚本 = 下载新的 install.sh -> 语法检查 -> 原子替换自己。
 # 不依赖 git，也不会把下载到的内容直接喂给 shell：先落到临时文件、跑
 # `bash -n`、比对构建号，确认后整文件替换。配置与节点数据完全不动。
+#
+# 非交互门控（借鉴 idleleo 的发布序列策略）：
+#   --yes          自动确认；仅限同一主版本序列内（v1.x -> v1.y）
+#   --allow-major  跨主版本（v1 -> v2）时解除 --yes 的限制，需与 --yes 同用
 update_script() {
+    local autoyes=0 allowmajor=0 a
+    for a in "$@"; do
+        case "$a" in
+            --yes) autoyes=1 ;;
+            --allow-major) allowmajor=1 ;;
+            *) die "update script 的选项只有 --yes 和 --allow-major，收到: $a" ;;
+        esac
+    done
     need_root
     info "当前版本: $XHY_VERSION (build $XHY_BUILD)"
     info "检查更新: $XHY_INSTALL_URL"
-    local tmp newbuild
+    local tmp newbuild newver
     tmp="$(mktemp "${TMPDIR:-/tmp}/xhy-update.XXXXXX")" || die "无法创建临时文件"
     if ! fetch "$XHY_INSTALL_URL" "$tmp"; then
         rm -f "$tmp"
@@ -29,11 +41,22 @@ update_script() {
         ok "脚本已是最新 ($XHY_VERSION build $newbuild)"
         return 0
     fi
-    info "发现新构建: $newbuild（当前 $XHY_BUILD）"
+    newver="$(sed -n 's/^XHY_VERSION="\(.*\)"$/\1/p' "$tmp" | head -1 || true)"
+    [[ -n "$newver" ]] || newver="未知"
+    info "发现新版本: $newver (build $newbuild，当前 $XHY_VERSION build $XHY_BUILD)"
     if have_cmd diff; then
         diff -u "$XHY_SELF" "$tmp" | head -40 || true
     fi
-    if ! confirm "替换 $XHY_SELF 为这个构建？配置与节点数据不受影响。" "y"; then
+    if [[ "${newver%%.*}" != "${XHY_VERSION%%.*}" ]]; then
+        warn "这是跨主版本更新 ($XHY_VERSION -> $newver)，可能包含不兼容变更，建议先看 release notes。"
+        if (( autoyes && ! allowmajor )); then
+            rm -f "$tmp"
+            die "非交互模式拒绝跨主版本更新；确认后请加 --allow-major 重试"
+        fi
+    fi
+    if (( autoyes )); then
+        info "--yes: 自动确认替换"
+    elif ! confirm "替换 $XHY_SELF 为这个构建？配置与节点数据不受影响。" "y"; then
         rm -f "$tmp"
         info "已取消"
         return 0
@@ -118,6 +141,13 @@ self_check() {
     printf '脚本版本 : %s (build %s)\n' "$XHY_VERSION" "$XHY_BUILD"
     printf '脚本路径 : %s\n' "$XHY_SELF"
     printf '配置目录 : %s\n' "$XHY_ETC"
+    printf '出口 IPv4: %s\n' "$(public_ip || true)"
+    local _ip6; _ip6="$(public_ip6 || true)"
+    if [[ -n "$_ip6" ]]; then
+        printf '出口 IPv6: %s（REALITY/hy2 客户端可直接用它做双栈连接）\n' "$_ip6"
+    else
+        printf '出口 IPv6: 无\n'
+    fi
     printf '%s\n' "--------------------------------------"
     core_status
     local inst mptcp v6rules

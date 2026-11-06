@@ -235,6 +235,18 @@ public_ip() {
     printf '%s' "${ip:-$(hostname -I 2>/dev/null | awk '{print $1}')}"
 }
 
+# IPv6 出口。结果缓存在 XHY_IP6_CACHE（含空值）：无 v6 的机器上每次调用都要
+# 等一次完整超时，而 link/check 会多次调用。无 v6 路由时 curl -6 立即报
+# "Network unreachable"，所以首次探测在有路由的机器上也是快的。
+public_ip6() {
+    if [[ -n "${XHY_IP6_CACHE+x}" ]]; then printf '%s' "$XHY_IP6_CACHE"; return 0; fi
+    local ip=""
+    ip="$(curl -fsS -m 5 -6 https://api64.ipify.org 2>/dev/null || true)"
+    [[ -z "$ip" ]] && ip="$(curl -fsS -m 5 -6 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n 's/^ip=//p' | head -1 || true)"
+    XHY_IP6_CACHE="$ip"
+    printf '%s' "$ip"
+}
+
 public_country() {
     local cc=""
     cc="$(curl -fsS -m 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n 's/^loc=//p' | head -1 || true)"

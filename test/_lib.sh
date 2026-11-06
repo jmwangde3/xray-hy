@@ -34,7 +34,7 @@ export MSYS2_ARG_CONV_EXCL='/CN;DNS'
 
 load_libs() {
     local l
-    for l in common platform core service hardening target nodes links update; do
+    for l in common platform core service hardening target nodes links export backup update; do
         # shellcheck disable=SC1090
         source "$REPO/lib/$l.sh"
     done

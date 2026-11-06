@@ -105,7 +105,7 @@ fi
 set -Eeuo pipefail
 
 XHY_VERSION="1.0.0"
-XHY_BUILD="74d4508a7286"
+XHY_BUILD="00e638285083"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -355,6 +355,18 @@ public_ip() {
     ip="$(curl -fsS -m 8 -4 https://api.ipify.org 2>/dev/null || true)"
     [[ -z "$ip" ]] && ip="$(curl -fsS -m 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n 's/^ip=//p' | head -1 || true)"
     printf '%s' "${ip:-$(hostname -I 2>/dev/null | awk '{print $1}')}"
+}
+
+# IPv6 出口。结果缓存在 XHY_IP6_CACHE（含空值）：无 v6 的机器上每次调用都要
+# 等一次完整超时，而 link/check 会多次调用。无 v6 路由时 curl -6 立即报
+# "Network unreachable"，所以首次探测在有路由的机器上也是快的。
+public_ip6() {
+    if [[ -n "${XHY_IP6_CACHE+x}" ]]; then printf '%s' "$XHY_IP6_CACHE"; return 0; fi
+    local ip=""
+    ip="$(curl -fsS -m 5 -6 https://api64.ipify.org 2>/dev/null || true)"
+    [[ -z "$ip" ]] && ip="$(curl -fsS -m 5 -6 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n 's/^ip=//p' | head -1 || true)"
+    XHY_IP6_CACHE="$ip"
+    printf '%s' "$ip"
 }
 
 public_country() {
@@ -2048,8 +2060,11 @@ _link_host() {
 }
 
 link_uri() {
-    local envf="$1" host="" q="" name=""
+    local envf="$1" host_ov="${2:-}" host="" q="" name=""
     node_load "$envf"
+    # host_ov：生成 IPv6 变体链接时覆盖连接地址（不影响 vless ws 的 Host 头，
+    # 那个必须保持真实域名/源地址，否则回源或伪装会错）。
+    [[ -n "$host_ov" ]] && NODE_HOST="$host_ov"
     name="xray-hy-${MODE}-${PORT}"
     case "$MODE" in
         direct)
@@ -2082,9 +2097,19 @@ link_uri() {
 }
 
 link_from_env() {
-    local envf="$1" uri
+    local envf="$1" uri uri6=""
     node_load "$envf"
     uri="$(link_uri "$envf")"
+    # IPv6 变体：仅当节点地址是 IPv4 字面量、服务器有 v6 出口、且节点确实
+    # 双栈监听（DUAL_STACK=on -> bind ::）时才有意义；域名本身有 AAAA 的话
+    # 同一条链接就覆盖双栈，不需要变体。
+    if [[ "${NODE_HOST:-}" =~ ^[0-9.]+$ ]] && [[ "$(state_get DUAL_STACK off)" == "on" ]]; then
+        local _ip6
+        _ip6="$(public_ip6 || true)"
+        if [[ -n "$_ip6" && "$_ip6" != "$NODE_HOST" ]]; then
+            uri6="$(link_uri "$envf" "$_ip6" || true)"
+        fi
+    fi
     printf '\n'
     printf '  节点     : %s_%s\n' "$MODE" "$PORT"
     printf '  地址     : %s\n' "${NODE_HOST:-$CF_DOMAIN}"
@@ -2104,6 +2129,7 @@ link_from_env() {
             "$AUTH" "$(_link_host "$NODE_HOST")" "$PORT" "$SNI" "$PORT"
     fi
     printf '\n  %s\n\n' "$uri"
+    [[ -n "$uri6" ]] && printf '  IPv6 变体: %s\n\n' "$uri6"
     printf '  %s\n' "注意：完整链接等同于访问凭证，请勿公开分享。"
 }
 
@@ -2125,17 +2151,337 @@ link_qr() {
     qrencode -t ANSIUTF8 "$uri"
 }
 
+# ===================== lib/export.sh =====================
+# xray-hy / client config export: mihomo (Clash.Meta) proxies and sing-box
+# outbounds, generated from the node registry. Read-only over /etc/xray-hy.
+
+_export_name() { printf 'xray-hy-%s-%s' "$MODE" "$PORT"; }
+
+# ---- mihomo / Clash.Meta --------------------------------------------------
+# 每个节点一段 YAML（列表项）。返回 1 表示该协议 mihomo 不支持（xHTTP）。
+_clash_node() {
+    local envf="$1"
+    node_load "$envf"
+    case "$MODE" in
+        reality)
+            printf -- '- name: "%s"\n' "$(_export_name)"
+            printf '  type: vless\n  server: "%s"\n  port: %s\n  uuid: "%s"\n' "$NODE_HOST" "$PORT" "$UUID"
+            printf '  network: tcp\n  udp: true\n  tls: true\n  flow: xtls-rprx-vision\n'
+            printf '  client-fingerprint: chrome\n  servername: "%s"\n' "$SNI"
+            printf '  reality-opts:\n    public-key: "%s"\n    short-id: "%s"\n' "$PUBLIC_KEY" "$SHORT_ID"
+            ;;
+        hy2)
+            printf -- '- name: "%s"\n  type: hysteria2\n  server: "%s"\n  port: %s\n' "$(_export_name)" "$NODE_HOST" "$PORT"
+            printf '  password: "%s"\n  sni: "%s"\n' "$AUTH" "$SNI"
+            # 自签证书：mihomo 不支持 pinSHA256，只能 skip-cert-verify。
+            printf '  skip-cert-verify: true\n'
+            if [[ -n "${BRUTAL_UP:-}" ]]; then
+                printf '  up: "%s"\n  down: "%s"\n' "$BRUTAL_UP" "$BRUTAL_DOWN"
+            fi
+            ;;
+        direct)
+            printf -- '- name: "%s"\n  type: vless\n  server: "%s"\n  port: %s\n  uuid: "%s"\n' "$(_export_name)" "$NODE_HOST" "$PORT" "$UUID"
+            printf '  network: ws\n  udp: true\n  tls: false\n'
+            printf '  ws-opts:\n    path: "%s"\n    headers:\n      Host: "%s"\n' "$NODE_PATH" "$NODE_HOST"
+            ;;
+        tunnel)
+            printf -- '- name: "%s"\n  type: vless\n  server: "%s"\n  port: 443\n  uuid: "%s"\n' "$(_export_name)" "$CF_DOMAIN" "$UUID"
+            printf '  network: ws\n  udp: true\n  tls: true\n  servername: "%s"\n  client-fingerprint: chrome\n' "$CF_DOMAIN"
+            printf '  ws-opts:\n    path: "%s"\n    headers:\n      Host: "%s"\n' "$NODE_PATH" "$CF_DOMAIN"
+            ;;
+        xhttp)
+            # mihomo 目前没有 xHTTP 传输：跳过并在汇总里说明。
+            return 1
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+# ---- sing-box -------------------------------------------------------------
+# 每个节点一个 JSON 对象。xHTTP / sing-box 无对应传输的同样返回 1。
+_singbox_node() {
+    local envf="$1"
+    node_load "$envf"
+    case "$MODE" in
+        reality)
+            printf '{\n'
+            printf '  "type": "vless",\n  "tag": "%s",\n' "$(json_escape "$(_export_name)")"
+            printf '  "server": "%s",\n  "server_port": %s,\n  "uuid": "%s",\n' \
+                "$(json_escape "$NODE_HOST")" "$PORT" "$(json_escape "$UUID")"
+            printf '  "flow": "xtls-rprx-vision",\n'
+            printf '  "tls": {\n    "enabled": true,\n    "server_name": "%s",\n' "$(json_escape "$SNI")"
+            printf '    "utls": { "enabled": true, "fingerprint": "chrome" },\n'
+            printf '    "reality": { "enabled": true, "public_key": "%s", "short_id": "%s" }\n  }\n' \
+                "$(json_escape "$PUBLIC_KEY")" "$(json_escape "$SHORT_ID")"
+            printf '}'
+            ;;
+        hy2)
+            printf '{\n'
+            printf '  "type": "hysteria2",\n  "tag": "%s",\n' "$(json_escape "$(_export_name)")"
+            printf '  "server": "%s",\n  "server_port": %s,\n  "password": "%s",\n' \
+                "$(json_escape "$NODE_HOST")" "$PORT" "$(json_escape "$AUTH")"
+            if [[ -n "${BRUTAL_UP:-}" ]]; then
+                # "100mbps" -> 100：纯 bash 提取数字，不依赖外部解释器。
+                local upn="${BRUTAL_UP//[!0-9]/}" downn="${BRUTAL_DOWN//[!0-9]/}"
+                printf '  "up_mbps": %s,\n  "down_mbps": %s,\n' "${upn:-0}" "${downn:-0}"
+            fi
+            printf '  "tls": { "enabled": true, "server_name": "%s", "insecure": true }\n' "$(json_escape "$SNI")"
+            printf '}'
+            ;;
+        direct)
+            printf '{\n'
+            printf '  "type": "vless",\n  "tag": "%s",\n' "$(json_escape "$(_export_name)")"
+            printf '  "server": "%s",\n  "server_port": %s,\n  "uuid": "%s",\n' \
+                "$(json_escape "$NODE_HOST")" "$PORT" "$(json_escape "$UUID")"
+            printf '  "tls": { "enabled": false },\n'
+            printf '  "transport": { "type": "ws", "path": "%s", "headers": { "Host": "%s" } }\n' \
+                "$(json_escape "$NODE_PATH")" "$(json_escape "$NODE_HOST")"
+            printf '}'
+            ;;
+        tunnel)
+            printf '{\n'
+            printf '  "type": "vless",\n  "tag": "%s",\n' "$(json_escape "$(_export_name)")"
+            printf '  "server": "%s",\n  "server_port": 443,\n  "uuid": "%s",\n' \
+                "$(json_escape "$CF_DOMAIN")" "$(json_escape "$UUID")"
+            printf '  "tls": { "enabled": true, "server_name": "%s", "utls": { "enabled": true, "fingerprint": "chrome" } },\n' "$(json_escape "$CF_DOMAIN")"
+            printf '  "transport": { "type": "ws", "path": "%s", "headers": { "Host": "%s" } }\n' \
+                "$(json_escape "$NODE_PATH")" "$(json_escape "$CF_DOMAIN")"
+            printf '}'
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+# 汇总导出。$1=clash|singbox，--out FILE 写文件（0600），否则打 stdout。
+cmd_export() {
+    local fmt="${1:-}" out=""
+    shift || true
+    while (($#)); do
+        case "$1" in
+            --out) out="${2:?需要文件路径}"; shift 2 ;;
+            *) die "未知参数: $1" ;;
+        esac
+    done
+    [[ "$fmt" == "clash" || "$fmt" == "singbox" ]] || die "用法: xhy export clash|singbox [--out FILE]"
+    local skipped=0 n=0 f item
+    local tmp
+    tmp="$(mktemp "${TMPDIR:-/tmp}/xhy-export.XXXXXX")"
+    if [[ "$fmt" == "clash" ]]; then
+        printf '# generated by xray-hy %s (build %s) at %s\n' "$XHY_VERSION" "$XHY_BUILD" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$tmp"
+        printf '# 节点数据来自 /etc/xray-hy，含凭证，请勿公开此文件\n' >>"$tmp"
+        printf 'proxies:\n' >>"$tmp"
+    else
+        printf '[\n' >>"$tmp"
+    fi
+    for f in "$XHY_NODES"/*.env; do
+        [[ -f "$f" ]] || continue
+        if [[ "$fmt" == "clash" ]]; then
+            if item="$(_clash_node "$f")"; then
+                printf '%s\n' "$item" >>"$tmp"
+                n=$((n + 1))
+            else
+                skipped=$((skipped + 1))
+            fi
+        else
+            if item="$(_singbox_node "$f")"; then
+                (( n > 0 )) && printf ',\n' >>"$tmp"
+                printf '%s\n' "$item" >>"$tmp"
+                n=$((n + 1))
+            else
+                skipped=$((skipped + 1))
+            fi
+        fi
+    done
+    if [[ "$fmt" == "singbox" ]]; then
+        printf '\n]\n' >>"$tmp"
+    fi
+    if (( n == 0 )); then
+        rm -f "$tmp"
+        die "没有可导出的节点（共 $(node_count) 个，跳过 $skipped 个）"
+    fi
+    # sing-box 输出必须是合法 JSON；机器上有没有 python 都校验一下。
+    if [[ "$fmt" == "singbox" ]] && [[ -n "${PY:-}" ]] && command -v "$PY" >/dev/null 2>&1; then
+        "$PY" -c "import json,sys; json.load(open(sys.argv[1]))" "$tmp" \
+            || { rm -f "$tmp"; die "生成的 sing-box JSON 校验失败（内部错误，请报告）"; }
+    fi
+    if [[ -n "$out" ]]; then
+        install -m 0600 "$tmp" "$out"
+        rm -f "$tmp"
+        ok "已导出 $n 个节点到 $out（含凭证，注意保管）"
+        (( skipped > 0 )) && warn "跳过 $skipped 个节点：$fmt 暂不支持 xHTTP"
+    else
+        cat "$tmp"
+        rm -f "$tmp"
+        (( skipped > 0 )) && warn "（已跳过 $skipped 个节点：$fmt 暂不支持 xHTTP）" >&2
+    fi
+    return 0
+}
+
+# ===================== lib/backup.sh =====================
+# xray-hy / backup & restore of script-managed state, with a per-file SHA256
+# manifest. 借鉴 idleleo 的「备份带完整性清单、恢复先校验、失败可回滚」。
+#
+# 备份范围：/etc/xray-hy 下的运行数据 —— config.json、confs/*.json、
+# nodes/*.env、certs/、state.env、target 自定义等；**排除** snapshots/ 与
+# backups/（历史与备份自身，避免递归与体积膨胀）。Xray 二进制与 geodata
+# 不入包：可按版本通道重新下载，备份里只记录版本号便于核对。
+#
+# 归档结构：
+#   payload/          /etc/xray-hy 的内容快照
+#   manifest.tsv      meta 行 + 每文件 "sha256<TAB>size<TAB>相对路径"
+
+_backup_meta() {
+    printf 'meta\tscript-version\t%s\n' "$XHY_VERSION"
+    printf 'meta\tscript-build\t%s\n' "$XHY_BUILD"
+    printf 'meta\tcreated\t%s\n' "$1"
+    printf 'meta\txray\t%s\n' "$(xray_installed_version 2>/dev/null || true)"
+}
+
+backup_create() {
+    local out=""
+    while (($#)); do
+        case "$1" in
+            --out) out="${2:?--out 需要路径}"; shift 2 ;;
+            *) die "backup 的参数只有 --out，收到: $1" ;;
+        esac
+    done
+    need_root
+    init_dirs
+    local ts stage f cnt=0
+    ts="$(date +%Y%m%d-%H%M%S)"
+    [[ -n "$out" ]] || out="$XHY_BACKUP/xhy-backup-$ts.tar.gz"
+    stage="$(mktemp -d "${TMPDIR:-/tmp}/xhy-bak.XXXXXX")"
+    mkdir -p "$stage/payload"
+    if [[ -d "$XHY_ETC" ]]; then
+        cp -a "$XHY_ETC/." "$stage/payload/"
+    else
+        die "$XHY_ETC 不存在：还没有可备份的数据（先 install）"
+    fi
+    rm -rf "$stage/payload/snapshots" "$stage/payload/backups"
+    {
+        printf '# xray-hy backup manifest v1\n'
+        _backup_meta "$ts"
+        # busybox find 没有 -printf，用相对路径逐行处理
+        ( cd "$stage/payload" && find . -type f | sed 's|^\./||' | LC_ALL=C sort ) \
+            | while IFS= read -r f; do
+                printf '%s\t%s\t%s\n' \
+                    "$(sha256sum "$stage/payload/$f" | awk '{print $1}')" \
+                    "$(wc -c <"$stage/payload/$f")" \
+                    "$f"
+            done
+    } >"$stage/manifest.tsv"
+    cnt="$(grep -c $'^[0-9a-f]\{64\}\t' "$stage/manifest.tsv" || true)"
+    if ! tar -C "$stage" -czf "$out" payload manifest.tsv; then
+        rm -rf "$stage"
+        die "打包失败: $out"
+    fi
+    rm -rf "$stage"
+    chmod 0600 "$out"
+    ok "备份完成: $out"
+    printf '  文件数: %s   大小: %s 字节\n' "$cnt" "$(wc -c <"$out")"
+    printf '  %s\n' "提示：备份含全部节点凭证与证书私钥，请按敏感文件保管。"
+}
+
+backup_restore() {
+    local arc="${1:-}"
+    [[ -n "$arc" ]] || die "用法: xhy restore <备份文件.tar.gz>"
+    [[ -f "$arc" ]] || die "备份文件不存在: $arc"
+    need_root
+    init_dirs
+    local stage bad=0 total=0 sum size f
+    stage="$(mktemp -d "${TMPDIR:-/tmp}/xhy-rst.XXXXXX")"
+    if ! tar -xzf "$arc" -C "$stage"; then
+        rm -rf "$stage"
+        die "解包失败：文件损坏或不是 tar.gz"
+    fi
+    [[ -d "$stage/payload" && -f "$stage/manifest.tsv" ]] \
+        || { rm -rf "$stage"; die "不是 xray-hy 备份（缺 payload/manifest.tsv）"; }
+
+    # 1) 完整性校验 —— 任何一项不过就整体放弃，绝不部分还原。
+    while IFS=$'\t' read -r sum size f; do
+        [[ "$sum" == "meta" || "$f" == "relative-path" ]] && continue
+        case "$sum" in '#'*) continue ;; esac
+        total=$((total + 1))
+        if [[ ! -f "$stage/payload/$f" ]] \
+           || [[ "$(sha256sum "$stage/payload/$f" 2>/dev/null | awk '{print $1}')" != "$sum" ]]; then
+            warn "校验失败: $f"
+            bad=1
+        fi
+    done <"$stage/manifest.tsv"
+    if (( bad )); then
+        rm -rf "$stage"
+        die "备份完整性校验未通过（$total 项中存在损坏），已放弃还原，目标机未做任何改动"
+    fi
+    ok "清单校验通过: $total 个文件"
+    grep '^meta' "$stage/manifest.tsv" | sed 's/^meta\t/  /'
+
+    # 2) 确认 + 现状留底
+    local pre="$XHY_BACKUP/pre-restore-$(date +%Y%m%d-%H%M%S)"
+    if [[ -d "$XHY_ETC" ]] && [[ -n "$(ls -A "$XHY_ETC" 2>/dev/null || true)" ]]; then
+        mkdir -p "$pre"
+        cp -a "$XHY_ETC/." "$pre/"
+        info "还原前现状已留底: $pre"
+    fi
+    if ! confirm "用这份备份覆盖 $XHY_ETC？（备份里没有的 nodes/confs 条目会被删除，保持与备份一致）" "n"; then
+        rm -rf "$stage"
+        info "已取消"
+        return 0
+    fi
+
+    # 3) 清掉会与备份产生歧义的内容，再整体拷入。
+    rm -rf "$XHY_ETC/confs" "$XHY_ETC/nodes" "$XHY_ETC/certs"
+    rm -f "$XHY_ETC/state.env" "$XHY_ETC/config.json"
+    cp -a "$stage/payload/." "$XHY_ETC/"
+    rm -rf "$stage"                                         # 配置一律从 nodes 重建：
+    rm -rf "$XHY_ETC/confs" "$XHY_ETC/config.json"          # confs/ 与 config.json 不沿用备份
+    chmod 0700 "$XHY_ETC/nodes" "$XHY_ETC/certs" 2>/dev/null || true
+    chmod 0600 "$XHY_ETC/state.env" 2>/dev/null || true
+
+    # 4) 新机器没有 Xray：数据已还原，指引装核心后再起服务。
+    if [[ ! -x "$XRAY_BIN" ]]; then
+        warn "本机还没有 Xray。数据已还原，接下来: xhy core update 安装核心，再 xhy service start"
+        return 0
+    fi
+
+    # 5) 从 nodes 重建配置并验证；失败整体回滚到留底。
+    local frag
+    if ! ( for frag in "$XHY_NODES"/*.env; do
+              [[ -f "$frag" ]] || continue
+              write_fragment "$frag" || exit 1
+          done && rebuild_config && xray_config_test ); then
+        err "还原后的配置重建/校验失败，回滚到还原前状态"
+        rm -rf "$XHY_ETC/confs" "$XHY_ETC/nodes" "$XHY_ETC/certs"
+        rm -f "$XHY_ETC/state.env" "$XHY_ETC/config.json"
+        cp -a "$pre/." "$XHY_ETC/"
+        die "已回滚。备份清单是完整的，问题多半在目标机环境（版本/端口冲突），看上面的报错"
+    fi
+    config_reload || warn "配置已写入，但服务重启失败（尚未 install？可 xhy service start 手动起）"
+    ok "还原完成（配置已按 nodes 重建并通过 xray -test）"
+}
+
 # ===================== lib/update.sh =====================
 # xray-hy / script, core, geodata and configuration updates.
 
 # 单文件发布后，更新脚本 = 下载新的 install.sh -> 语法检查 -> 原子替换自己。
 # 不依赖 git，也不会把下载到的内容直接喂给 shell：先落到临时文件、跑
 # `bash -n`、比对构建号，确认后整文件替换。配置与节点数据完全不动。
+#
+# 非交互门控（借鉴 idleleo 的发布序列策略）：
+#   --yes          自动确认；仅限同一主版本序列内（v1.x -> v1.y）
+#   --allow-major  跨主版本（v1 -> v2）时解除 --yes 的限制，需与 --yes 同用
 update_script() {
+    local autoyes=0 allowmajor=0 a
+    for a in "$@"; do
+        case "$a" in
+            --yes) autoyes=1 ;;
+            --allow-major) allowmajor=1 ;;
+            *) die "update script 的选项只有 --yes 和 --allow-major，收到: $a" ;;
+        esac
+    done
     need_root
     info "当前版本: $XHY_VERSION (build $XHY_BUILD)"
     info "检查更新: $XHY_INSTALL_URL"
-    local tmp newbuild
+    local tmp newbuild newver
     tmp="$(mktemp "${TMPDIR:-/tmp}/xhy-update.XXXXXX")" || die "无法创建临时文件"
     if ! fetch "$XHY_INSTALL_URL" "$tmp"; then
         rm -f "$tmp"
@@ -2156,11 +2502,22 @@ update_script() {
         ok "脚本已是最新 ($XHY_VERSION build $newbuild)"
         return 0
     fi
-    info "发现新构建: $newbuild（当前 $XHY_BUILD）"
+    newver="$(sed -n 's/^XHY_VERSION="\(.*\)"$/\1/p' "$tmp" | head -1 || true)"
+    [[ -n "$newver" ]] || newver="未知"
+    info "发现新版本: $newver (build $newbuild，当前 $XHY_VERSION build $XHY_BUILD)"
     if have_cmd diff; then
         diff -u "$XHY_SELF" "$tmp" | head -40 || true
     fi
-    if ! confirm "替换 $XHY_SELF 为这个构建？配置与节点数据不受影响。" "y"; then
+    if [[ "${newver%%.*}" != "${XHY_VERSION%%.*}" ]]; then
+        warn "这是跨主版本更新 ($XHY_VERSION -> $newver)，可能包含不兼容变更，建议先看 release notes。"
+        if (( autoyes && ! allowmajor )); then
+            rm -f "$tmp"
+            die "非交互模式拒绝跨主版本更新；确认后请加 --allow-major 重试"
+        fi
+    fi
+    if (( autoyes )); then
+        info "--yes: 自动确认替换"
+    elif ! confirm "替换 $XHY_SELF 为这个构建？配置与节点数据不受影响。" "y"; then
         rm -f "$tmp"
         info "已取消"
         return 0
@@ -2245,6 +2602,13 @@ self_check() {
     printf '脚本版本 : %s (build %s)\n' "$XHY_VERSION" "$XHY_BUILD"
     printf '脚本路径 : %s\n' "$XHY_SELF"
     printf '配置目录 : %s\n' "$XHY_ETC"
+    printf '出口 IPv4: %s\n' "$(public_ip || true)"
+    local _ip6; _ip6="$(public_ip6 || true)"
+    if [[ -n "$_ip6" ]]; then
+        printf '出口 IPv6: %s（REALITY/hy2 客户端可直接用它做双栈连接）\n' "$_ip6"
+    else
+        printf '出口 IPv6: 无\n'
+    fi
     printf '%s\n' "--------------------------------------"
     core_status
     local inst mptcp v6rules
@@ -2480,6 +2844,12 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
   版本与更新
     core [status|channel pinned|channel latest|channel vX.Y.Z|update]
     update [script|core|geodata|config|all]
+    update script --yes [--allow-major]   非交互更新（跨主版本需 --allow-major）
+
+  备份与导出
+    backup [--out FILE]              备份 /etc/xray-hy（内含逐文件 SHA256 清单）
+    restore <备份文件>               校验清单后还原（先备份现状，失败自动回滚）
+    export clash|singbox [--out F]   导出 mihomo/Clash 或 sing-box 节点配置
 
   服务与卸载
     service [start|stop|restart|status]
@@ -2512,6 +2882,10 @@ cmd_install() {
     create_symlink
     stage 3 7 "创建数据目录"
     init_dirs
+    if [[ -z "$(state_get DUAL_STACK '')" && -n "$(public_ip6 || true)" ]]; then
+        state_set DUAL_STACK on
+        ok "检测到 IPv6 出口，新节点默认双栈监听 (::)（xhy config set DUAL_STACK off 可改回）"
+    fi
     local ver
     stage 4 7 "下载并校验 Xray"
     # 版本二选一：最新版功能全，但 >=26.9.8 的 REALITY 要求 MLKEM ClientHello，
@@ -2560,7 +2934,15 @@ EOF
     esac
     port="$(ask '监听端口' "$(default_port "$mode")")"
     valid_port "$port" || { err "端口不合法"; return 1; }
-    host="$(ask '客户端连接地址(域名或 IP)' "$(public_ip)")"
+    local ip4 ip6
+    ip4="$(public_ip || true)"
+    ip6="$(public_ip6 || true)"
+    host="$(ask '客户端连接地址(域名或 IP)' "${ip4:-$ip6}")"
+    if [[ -n "$ip6" && -n "$ip4" ]]; then
+        info "检测到双栈出口 (v6: $ip6)。想让客户端也能走 v6：xhy config set DUAL_STACK on，链接会自动附 IPv6 变体。"
+    elif [[ -z "$ip4" && -n "$ip6" ]]; then
+        info "仅检测到 IPv6 出口 ($ip6)，已用它作为默认连接地址。"
+    fi
     path="$(ask '路径 (回车随机生成)' '')"
 
     local -a opts=(--host "$host")
@@ -2792,6 +3174,9 @@ main() {
         add)        cmd_add "$@" ;;
         list)       node_list ;;
         link)       cmd_link "$@" ;;
+        export)     cmd_export "$@" ;;
+        backup)     backup_create "$@" ;;
+        restore)    backup_restore "${1:?用法: xhy restore <备份文件>}" ;;
         del)        node_del "${1:?需要模式}" "${2:?需要端口}" ;;
         config)     if [[ "${1:-}" == "set" ]]; then cmd_config_set "${2:?需要 KEY}" "${3:?需要 VALUE}";
                     else cmd_config_menu; fi ;;
@@ -2814,9 +3199,11 @@ main() {
                         *) die "用法: xhy core [status|channel <值>|update]" ;;
                     esac ;;
         update)     case "${1:-all}" in
-                        all) update_all ;; script) update_script ;; core) update_core ;;
+                        all) update_all ;;
+                        script) shift; update_script "$@" ;;
+                        core) update_core ;;
                         geodata) update_geodata ;; config) update_config ;;
-                        *) die "用法: xhy update [all|script|core|geodata|config]" ;;
+                        *) die "用法: xhy update [all|script [--yes] [--allow-major]|core|geodata|config]" ;;
                     esac ;;
         service)    case "${1:-status}" in
                         start|stop|restart) "svc_$1" "$SVC_XRAY" ;;

@@ -33,7 +33,7 @@ if [[ "${XHY_TRACE:-0}" == "1" ]]; then
     set -x
 fi
 
-for _lib in common platform core service hardening target nodes links update; do
+for _lib in common platform core service hardening target nodes links export backup update; do
     # shellcheck disable=SC1090
     source "$REPO/lib/${_lib}.sh" || { echo "cannot load lib/${_lib}.sh" >&2; exit 1; }
 done

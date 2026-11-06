@@ -7,8 +7,11 @@ _link_host() {
 }
 
 link_uri() {
-    local envf="$1" host="" q="" name=""
+    local envf="$1" host_ov="${2:-}" host="" q="" name=""
     node_load "$envf"
+    # host_ov：生成 IPv6 变体链接时覆盖连接地址（不影响 vless ws 的 Host 头，
+    # 那个必须保持真实域名/源地址，否则回源或伪装会错）。
+    [[ -n "$host_ov" ]] && NODE_HOST="$host_ov"
     name="xray-hy-${MODE}-${PORT}"
     case "$MODE" in
         direct)
@@ -41,9 +44,19 @@ link_uri() {
 }
 
 link_from_env() {
-    local envf="$1" uri
+    local envf="$1" uri uri6=""
     node_load "$envf"
     uri="$(link_uri "$envf")"
+    # IPv6 变体：仅当节点地址是 IPv4 字面量、服务器有 v6 出口、且节点确实
+    # 双栈监听（DUAL_STACK=on -> bind ::）时才有意义；域名本身有 AAAA 的话
+    # 同一条链接就覆盖双栈，不需要变体。
+    if [[ "${NODE_HOST:-}" =~ ^[0-9.]+$ ]] && [[ "$(state_get DUAL_STACK off)" == "on" ]]; then
+        local _ip6
+        _ip6="$(public_ip6 || true)"
+        if [[ -n "$_ip6" && "$_ip6" != "$NODE_HOST" ]]; then
+            uri6="$(link_uri "$envf" "$_ip6" || true)"
+        fi
+    fi
     printf '\n'
     printf '  节点     : %s_%s\n' "$MODE" "$PORT"
     printf '  地址     : %s\n' "${NODE_HOST:-$CF_DOMAIN}"
@@ -63,6 +76,7 @@ link_from_env() {
             "$AUTH" "$(_link_host "$NODE_HOST")" "$PORT" "$SNI" "$PORT"
     fi
     printf '\n  %s\n\n' "$uri"
+    [[ -n "$uri6" ]] && printf '  IPv6 变体: %s\n\n' "$uri6"
     printf '  %s\n' "注意：完整链接等同于访问凭证，请勿公开分享。"
 }
 

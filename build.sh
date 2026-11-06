@@ -12,7 +12,7 @@ set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="$ROOT/install.sh"
-LIBS=(common platform core service hardening target nodes links update)
+LIBS=(common platform core service hardening target nodes links export backup update)
 PRELUDE="$ROOT/entry/prelude.sh"
 MAIN="$ROOT/entry/main.sh"
 TARGETS="$ROOT/conf/targets.tsv"
