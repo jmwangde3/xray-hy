@@ -176,10 +176,10 @@ scanner_domain_ok() {
     return 0
 }
 
-# scanner_score <appconnect_ms> <http_code> <size> <wildcard 0|1>
+# scanner_score <appconnect_ms> <http_code> <size> <wildcard 0|1> <www 0|1>
 # 分数只用于排序，不做合格判定（合格与否由 scanner_probe 决定）。
 scanner_score() {
-    local ms="${1:-9999}" code="${2:-0}" size="${3:-0}" wild="${4:-0}" s=100
+    local ms="${1:-9999}" code="${2:-0}" size="${3:-0}" wild="${4:-0}" www="${5:-0}" s=100
     [[ "$ms" =~ ^[0-9]+$ ]] || ms=9999
     (( ms <= 0 )) && ms=9999
     # 同机房通常 <10ms。每 10ms 扣 3 分，最低 70：延迟差一点不该盖过站点质量。
@@ -194,6 +194,8 @@ scanner_score() {
     esac
     (( size > 2000 )) && s=$(( s + 6 ))
     (( wild == 1 )) && s=$(( s - 4 ))
+    # www. 是最常见的访问形态，回落时看起来最像普通用户访问。
+    (( www == 1 )) && s=$(( s + 2 ))
     printf '%d' "$s"
 }
 
@@ -267,11 +269,10 @@ scanner_rank() {
             if ! res="$(scanner_probe "$ip" "$sni")"; then continue; fi
             IFS='|' read -r hv ms code size redir cdn <<<"$res"
             if (( redir == 1 || cdn == 1 )); then continue; fi
-            if [[ "$cn" == \*.* ]]; then
-                sc="$(scanner_score "$ms" "$code" "$size" 1)"
-            else
-                sc="$(scanner_score "$ms" "$code" "$size" 0)"
-            fi
+            local ww=0 wc=0
+            if [[ "$cn" == \*.* ]]; then ww=1; fi
+            if [[ "${sni#www.}" != "$sni" ]]; then wc=1; fi
+            sc="$(scanner_score "$ms" "$code" "$size" "$ww" "$wc")" 
             printf '%s\t%s\t%s\t%s:443\t%s\t%s\t%s\t%s\t%s\t%s\n' \
                 "$sc" "$ip" "$sni" "$ip" "$ms" "$code" "$size" "$iss" "$tls" "$(date -Is)" >>"$out"
             keep=$(( keep + 1 ))
@@ -280,8 +281,9 @@ scanner_rank() {
         done
     done < <(scanner_candidates "$csv")
     (( keep > 0 )) || return 1
-    sort -t "$tab" -k1,1nr "$out" >"$out.sorted" && mv -f "$out.sorted" "$out"
-    sc_ok "验证完成：$keep 个可用候选（共 $total 个 TLS 1.3 + h2 命中）"
+    # 分数相同的按握手延迟升序，再按行内容定序（避免每次扫描结果漂移）。
+    sort -t "$tab" -k1,1nr -k5,5n "$out" >"$out.sorted" && mv -f "$out.sorted" "$out"
+    sc_ok "验证完成：$keep 个可用候选（共 $total 个去重候选）"
 }
 
 # ---------------------------------------------------------------------------
@@ -319,7 +321,7 @@ scanner_cache_count() {
 scanner_cache_best() {
     local tab=$'\t'
     [[ -s "$SCANNER_CACHE" ]] || return 1
-    { grep -v '^#' "$SCANNER_CACHE" 2>/dev/null || true; } | sort -t "$tab" -k1,1nr
+    { grep -v '^#' "$SCANNER_CACHE" 2>/dev/null || true; } | sort -t "$tab" -k1,1nr -k5,5n
 }
 
 # 同 ip|sni 只留分数最高的那条。
@@ -333,7 +335,7 @@ scanner_cache_merge() {
                 if (!(k in score) || s > score[k]) { score[k] = s; line[k] = $0 }
             }
             END { for (k in line) print line[k] }' \
-        | sort -t "$tab" -k1,1nr
+        | sort -t "$tab" -k1,1nr -k5,5n
 }
 
 # scanner_cache_save <cidr> <ranked.tsv> [replace 0|1]
@@ -352,7 +354,7 @@ scanner_cache_save() {
         if [[ "$replace" == "0" ]] && scanner_cache_valid; then
             scanner_cache_merge "$SCANNER_CACHE" "$rows"
         else
-            sort -t "$tab" -k1,1nr "$rows"
+            sort -t "$tab" -k1,1nr -k5,5n "$rows"
         fi
     } >"$tmp" || { rm -f "$tmp"; return 1; }
     install -m 0600 "$tmp" "$SCANNER_CACHE" || { rm -f "$tmp"; return 1; }
@@ -433,7 +435,7 @@ scanner_cache_pick_valid() {
 # ---------------------------------------------------------------------------
 
 scanner_scan() {
-    local cidr="$1" ts csv log ranked n
+    local cidr="$1" ts csv log ranked n uniq
     scanner_ensure || return 1
     install -d -m 0700 "$SCANNER_WORK" || return 1
     ts="$(date +%s)"
@@ -446,11 +448,12 @@ scanner_scan() {
         return 1
     fi
     n=$(( $(wc -l <"$csv" | tr -d ' ') - 1 ))
+    uniq="$(scanner_candidates "$csv" | wc -l | tr -d ' ')"
     if (( n <= 0 )); then
         warn "$cidr 内没有 TLS 1.3 + HTTP/2 站点（日志: $log）"
         return 1
     fi
-    sc_info "命中 $n 个 TLS 1.3 + h2 站点，逐个用真实 SNI 验证（最多 ${SCANNER_MAX_VERIFY} 个）..."
+    sc_info "命中 ${uniq:-0} 个 TLS 1.3 + h2 站点（$n 条记录，按域名去重），逐个用真实 SNI 验证（最多 ${SCANNER_MAX_VERIFY} 个）..."
     ranked="$SCANNER_WORK/ranked-${ts}.tsv"
     if ! scanner_rank "$csv" "$ranked"; then
         warn "没有既非 CDN、又不跳转、证书可校验的站点（日志: $log）"

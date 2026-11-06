@@ -47,6 +47,7 @@ slow="$(scanner_score 300 404 100 0)"
 wild="$(scanner_score 5 200 5000 1)"
 chk "低延迟高分"         '(( fast > slow ))'
 chk "通配符略扣分"       '(( wild < fast ))'
+chk "www 前缀加分"       '(( $(scanner_score 5 200 5000 0 1) > fast ))'
 chk "分数是整数"         '[[ "$fast" =~ ^[0-9]+$ ]]'
 
 # ---- CSV 解析：只保留 TLS1.3 + h2 + 可用的 CN ----
