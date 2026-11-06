@@ -105,7 +105,7 @@ fi
 set -Eeuo pipefail
 
 XHY_VERSION="1.2.0"
-XHY_BUILD="7daca7c9ac46"
+XHY_BUILD="7eb7d8ade85c"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
