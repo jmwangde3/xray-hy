@@ -4,9 +4,23 @@
 # attacker bypass every IPv4-only rate limit (sshd usually listens on :::22).
 
 FW_CHAIN="XHY-IN"
+XHY_SYSCTL_FILE="/etc/sysctl.d/90-xray-hy.conf"
 
 in_container() {
     [[ -r /proc/1/environ ]] && tr '\0' '\n' </proc/1/environ 2>/dev/null | grep -qE '^container=|^lxc'
+}
+
+# 只有运行中的内核真的暴露了该键才写。容器/老内核上不存在的键会让
+# `sysctl -p` 整体失败，把同一个文件里本来有效的 BBR 设置一起带走。
+# 调用方先设置 XHY_SYSCTL_FILE。
+add_sysctl() {
+    local key="$1" val="$2" path
+    [[ -n "${XHY_SYSCTL_FILE:-}" ]] || return 0
+    path="/proc/sys/${key//./\/}"
+    [[ -e "$path" ]] || return 0
+    printf '%s = %s\n' "$key" "$val" >>"$XHY_SYSCTL_FILE"
+    sysctl -w "$key=$val" >/dev/null 2>&1 || true
+    return 0
 }
 
 # Alpine does not load tcp_bbr / sch_fq at boot and its sysctl service lives in
@@ -49,6 +63,16 @@ net.core.rmem_max = 16777216
 net.core.wmem_max = 16777216
 net.ipv4.ip_forward = 0
 EOF
+    XHY_SYSCTL_FILE="$sysctl_file"
+    # PMTU 黑洞：握手成功但传不动数据，跨境链路第一号原因
+    add_sysctl net.ipv4.tcp_mtu_probing 1
+    # idle 后 cwnd 归 1，长连接周期性掉速
+    add_sysctl net.ipv4.tcp_slow_start_after_idle 0
+    # 默认 32768-60999 只有 28k 个临时端口，高并发出站会 cannot assign requested address
+    add_sysctl "net.ipv4.ip_local_port_range" "10240 65000"
+    add_sysctl net.core.netdev_max_backlog 16384
+    # listen_addr() 用 "::" 监听依赖 bindv6only=0，被别的工具改过就会 v4 全挂
+    add_sysctl net.ipv6.bindv6only 0
     # XTLS#7291 / CVE-2026-98432: Go 1.24+ enables MPTCP on listeners by
     # default. Disable it system-wide when the kernel exposes the knob.
     if [[ -e /proc/sys/net/mptcp/enabled ]]; then
@@ -78,6 +102,9 @@ bbr_status() {
     printf '可用算法 : %s\n' "$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || echo '?')"
     printf 'MPTCP    : %s (应为 0)\n' "$(sysctl -n net.mptcp.enabled 2>/dev/null || echo '内核未暴露')"
     printf 'migrate_req: %s (应为 0)\n' "$(sysctl -n net.ipv4.tcp_migrate_req 2>/dev/null || echo '内核未暴露')"
+    printf '端口范围 : %s\n' "$(sysctl -n net.ipv4.ip_local_port_range 2>/dev/null || echo '?')"
+    printf 'MTU 探测 : %s (应为 1)\n' "$(sysctl -n net.ipv4.tcp_mtu_probing 2>/dev/null || echo '?')"
+    printf 'access日志: %s\n' "$(state_get ACCESS_LOG 'off (默认关闭)')"
     printf '脚本状态 : %s\n' "$(state_get BBR_STATUS 'unset')"
 }
 

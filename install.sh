@@ -104,8 +104,8 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.2.0"
-XHY_BUILD="7eb7d8ade85c"
+XHY_VERSION="1.3.0"
+XHY_BUILD="8f3e6abb7375"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -123,7 +123,7 @@ fi
 # ===================== lib/common.sh =====================
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.2.0}"
+XHY_VERSION="${XHY_VERSION:-1.3.0}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -422,6 +422,70 @@ verify_release_digest() {
         return 1
     fi
     ok "SHA-256 校验通过 (${actual:0:16}...)"
+}
+
+# ===================== lib/sockopt.sh =====================
+# xray-hy / per-inbound sockopt + TCP Fast Open probing.
+#
+# TFO 不是吞吐参数：它最多省掉 TCP 握手最后半程，且只有 CLIENT 也发 TFO
+# option 时才生效。Xray / sing-box / mihomo 客户端默认 tcpFastOpen=false，
+# 所以服务端单方面打开等于零收益。这里不做"一律开"，而是让 REALITY 节点
+# 跟着被伪装站自己的 SYN-ACK 走 —— 与伪装目标不一致才是特征，一致不是。
+
+# 0 = target 的 SYN-ACK 带 TFO option，1 = 不带，2 = 无法判定
+target_tfo_probe() {
+    local host="$1" port="${2:-443}" pcap pid rc=2
+    have_cmd tcpdump  || return 2
+    have_cmd openssl  || return 2
+    pcap="$(mktemp "${TMPDIR:-/tmp}/xhy-tfo.XXXXXX" 2>/dev/null)" || return 2
+    # 按源端口抓，不按主机名：BPF 过滤器从不做 DNS 解析，而 0.5 秒窗口内
+    # 唯一一条来自 :$port 的 SYN-ACK 就是我们自己触发的那条。
+    tcpdump -i any -nn -q -c 2 -w "$pcap" \
+        "tcp and src port $port and tcp[tcpflags] & (tcp-syn|tcp-ack) == (tcp-syn|tcp-ack)" \
+        >/dev/null 2>&1 &
+    pid=$!
+    sleep 0.4
+    timeout 5 openssl s_client -connect "${host}:${port}" -servername "$host" \
+        -tls1_3 -brief </dev/null >/dev/null 2>&1 || true
+    sleep 0.3
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    if [[ -s "$pcap" ]]; then
+        if tcpdump -nn -vv -r "$pcap" 2>/dev/null | grep -qiE 'unknown-34|fast.?open'; then
+            rc=0
+        else
+            rc=1
+        fi
+    fi
+    rm -f "$pcap"
+    return $rc
+}
+
+sockopt_json() {
+    local tfo="false"
+    [[ "${TFO:-0}" == "1" ]] && tfo="true"
+    # tcpMptcp 不写：GODEBUG 已经在进程级关掉，字段存在性未在 v26.3.27 上验证，
+    # 少一个 unknown field 风险点。
+    printf '"sockopt":{"tcpFastOpen":%s,"tcpNoDelay":true,"tcpKeepAliveIdle":45,"tcpUserTimeout":10000,"tcpcongestion":"bbr"}' "$tfo"
+}
+
+# tfo_decide auto|on|off <sni> -> 打印 0 或 1。
+# auto 走真实探测：只有伪装站的 SYN-ACK 自己带 TFO option 时才跟着开。
+# 客户端不请求 TFO 时服务端开与不开的握手完全一样，所以「跟随目标」既没有
+# 收益损失，也避开了「节点与伪装站 TCP 行为不一致」这个指纹。
+tfo_decide() {
+    local opt="${1:-auto}" sni="$2" trc=0
+    case "$opt" in
+        on)       printf '1'; return 0 ;;
+        off)      printf '0'; return 0 ;;
+        auto|"")  ;;
+        *)        warn "未知 --tfo 取值: $opt（应为 auto / on / off），按 auto 处理" >&2 ;;
+    esac
+    target_tfo_probe "$sni" 443 || trc=$?
+    if (( trc == 2 )); then
+        info "无法探测 $sni 的 TFO（缺 tcpdump/openssl），按关闭处理" >&2
+    fi
+    if (( trc == 0 )); then printf '1'; else printf '0'; fi
 }
 
 # ===================== lib/platform.sh =====================
@@ -902,7 +966,7 @@ EOF
 }
 
 install_xray_service() {
-    local memlimit
+    local memlimit sup_note="" bg="true" restart_desc
     memlimit="$(compute_gomemlimit)"
     backup_file "$XHY_ETC/config.json"
     if [[ "$XHY_INIT" == "systemd" ]]; then
@@ -925,6 +989,23 @@ Restart=on-failure
 RestartSec=3
 LimitNOFILE=1048576
 NoNewPrivileges=true
+# ProtectSystem=strict 会把整个文件系统挂成只读，ReadWritePaths 必须同时上：
+# 没有它 append 日志写不进去，服务会直接起不来。
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=${XHY_LOGDIR}
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+# 万一 Go runtime 用到集合外的调用，返回 EPERM 而不是 SIGSYS 直接杀进程。
+SystemCallErrorNumber=EPERM
 StandardOutput=append:${XHY_LOGDIR}/xray.log
 StandardError=append:${XHY_LOGDIR}/xray.err
 
@@ -933,13 +1014,32 @@ WantedBy=multi-user.target
 EOF
         systemctl daemon-reload
     else
-        cat >/etc/init.d/xray-hy <<'EOF'
+        # command_background=true 只是把进程丢到后台，挂了不会拉起。OpenRC 上
+        # 真正的重启策略要靠 supervise-daemon；老版本没有它时退回后台模式，
+        # 但要明确告知"崩溃不自动拉起"，否则 README 里写的自动重启是空的。
+        if have_cmd supervise-daemon; then
+            bg="false"
+        else
+            sup_note="本机无 supervise-daemon，Xray 崩溃后不会自动拉起"
+        fi
+        {
+            cat <<'EOF'
 #!/sbin/openrc-run
 name="xray-hy"
 description="xray-hy Xray multi-node service"
 command="/usr/local/bin/xray"
 command_args="run -c /etc/xray-hy/config.json"
-command_background=true
+EOF
+            if [[ "$bg" == "false" ]]; then
+                cat <<'EOF'
+command_background=false
+supervisor=supervise-daemon
+supervise_daemon_args="--respawn-max 5 --respawn-delay 3 --respawn-period 60"
+EOF
+            else
+                printf 'command_background=true\n'
+            fi
+            cat <<'EOF'
 pidfile="/run/xray-hy.pid"
 output_log="/var/log/xray-hy/xray.log"
 error_log="/var/log/xray-hy/xray.err"
@@ -958,12 +1058,21 @@ start_pre() {
         "$command" run -test -c /etc/xray-hy/config.json || return 1
 }
 EOF
+        } >/etc/init.d/xray-hy
         chmod 0755 /etc/init.d/xray-hy
         sed -i "s|MEMLIMIT|${memlimit}|" /etc/init.d/xray-hy
+        if [[ -n "$sup_note" ]]; then warn "$sup_note"; fi
+    fi
+    if [[ "$XHY_INIT" == "systemd" ]]; then
+        restart_desc="systemd Restart=on-failure"
+    elif have_cmd supervise-daemon; then
+        restart_desc="supervise-daemon (5 次/60s)"
+    else
+        restart_desc="无（后台模式，崩溃不拉起）"
     fi
     svc_enable "$SVC_XRAY"
     install_logrotate
-    ok "Xray 服务已安装并设为开机自启 ($XHY_INIT, GOMEMLIMIT=${memlimit})"
+    ok "Xray 服务已安装并设为开机自启 ($XHY_INIT, GOMEMLIMIT=${memlimit}, 重启策略=${restart_desc})"
 }
 
 install_cf_service() {
@@ -1053,9 +1162,23 @@ config_reload() {
 # attacker bypass every IPv4-only rate limit (sshd usually listens on :::22).
 
 FW_CHAIN="XHY-IN"
+XHY_SYSCTL_FILE="/etc/sysctl.d/90-xray-hy.conf"
 
 in_container() {
     [[ -r /proc/1/environ ]] && tr '\0' '\n' </proc/1/environ 2>/dev/null | grep -qE '^container=|^lxc'
+}
+
+# 只有运行中的内核真的暴露了该键才写。容器/老内核上不存在的键会让
+# `sysctl -p` 整体失败，把同一个文件里本来有效的 BBR 设置一起带走。
+# 调用方先设置 XHY_SYSCTL_FILE。
+add_sysctl() {
+    local key="$1" val="$2" path
+    [[ -n "${XHY_SYSCTL_FILE:-}" ]] || return 0
+    path="/proc/sys/${key//./\/}"
+    [[ -e "$path" ]] || return 0
+    printf '%s = %s\n' "$key" "$val" >>"$XHY_SYSCTL_FILE"
+    sysctl -w "$key=$val" >/dev/null 2>&1 || true
+    return 0
 }
 
 # Alpine does not load tcp_bbr / sch_fq at boot and its sysctl service lives in
@@ -1098,6 +1221,16 @@ net.core.rmem_max = 16777216
 net.core.wmem_max = 16777216
 net.ipv4.ip_forward = 0
 EOF
+    XHY_SYSCTL_FILE="$sysctl_file"
+    # PMTU 黑洞：握手成功但传不动数据，跨境链路第一号原因
+    add_sysctl net.ipv4.tcp_mtu_probing 1
+    # idle 后 cwnd 归 1，长连接周期性掉速
+    add_sysctl net.ipv4.tcp_slow_start_after_idle 0
+    # 默认 32768-60999 只有 28k 个临时端口，高并发出站会 cannot assign requested address
+    add_sysctl "net.ipv4.ip_local_port_range" "10240 65000"
+    add_sysctl net.core.netdev_max_backlog 16384
+    # listen_addr() 用 "::" 监听依赖 bindv6only=0，被别的工具改过就会 v4 全挂
+    add_sysctl net.ipv6.bindv6only 0
     # XTLS#7291 / CVE-2026-98432: Go 1.24+ enables MPTCP on listeners by
     # default. Disable it system-wide when the kernel exposes the knob.
     if [[ -e /proc/sys/net/mptcp/enabled ]]; then
@@ -1127,6 +1260,9 @@ bbr_status() {
     printf '可用算法 : %s\n' "$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || echo '?')"
     printf 'MPTCP    : %s (应为 0)\n' "$(sysctl -n net.mptcp.enabled 2>/dev/null || echo '内核未暴露')"
     printf 'migrate_req: %s (应为 0)\n' "$(sysctl -n net.ipv4.tcp_migrate_req 2>/dev/null || echo '内核未暴露')"
+    printf '端口范围 : %s\n' "$(sysctl -n net.ipv4.ip_local_port_range 2>/dev/null || echo '?')"
+    printf 'MTU 探测 : %s (应为 1)\n' "$(sysctl -n net.ipv4.tcp_mtu_probing 2>/dev/null || echo '?')"
+    printf 'access日志: %s\n' "$(state_get ACCESS_LOG 'off (默认关闭)')"
     printf '脚本状态 : %s\n' "$(state_get BBR_STATUS 'unset')"
 }
 
@@ -2206,6 +2342,7 @@ node_load() {
     FP=""; CF_DOMAIN=""; CF_TOKEN_SET=""; SECURITY="none"; CREATED=""
     PROTO="tcp"; AUTH=""; CERT_FILE=""; KEY_FILE=""; PIN_B64=""; PIN_HEX=""
     MASQ_URL=""; BRUTAL_UP=""; BRUTAL_DOWN=""
+    TFO=""; MASQ_MODE=""
     while IFS= read -r line; do
         # Keys may contain digits (PIN_B64, BRUTAL_UP); [A-Z_]+ would silently
         # skip them and produce an empty pinSHA256 in the share link.
@@ -2213,7 +2350,7 @@ node_load() {
         key="${line%%=*}"; val="${line#*=}"
         val="${val%\"}"; val="${val#\"}"
         case "$key" in
-            MODE|PORT|PUBLIC|UUID|NODE_PATH|NODE_HOST|SNI|TARGET|PRIVATE_KEY|PUBLIC_KEY|SHORT_ID|FP|CF_DOMAIN|CF_TOKEN_SET|SECURITY|CREATED|PROTO|AUTH|CERT_FILE|KEY_FILE|PIN_B64|PIN_HEX|MASQ_URL|BRUTAL_UP|BRUTAL_DOWN)
+            MODE|PORT|PUBLIC|UUID|NODE_PATH|NODE_HOST|SNI|TARGET|PRIVATE_KEY|PUBLIC_KEY|SHORT_ID|FP|CF_DOMAIN|CF_TOKEN_SET|SECURITY|CREATED|PROTO|AUTH|CERT_FILE|KEY_FILE|PIN_B64|PIN_HEX|MASQ_URL|BRUTAL_UP|BRUTAL_DOWN|TFO|MASQ_MODE)
                 printf -v "$key" '%s' "$val" ;;
         esac
     done <"$f"
@@ -2230,10 +2367,17 @@ node_save() {
 log_json() {
     local lvl dir
     lvl="$(state_get LOG_LEVEL warning)"
-    [[ "$lvl" == "none" ]] && { printf '{"loglevel":"none"}'; return; }
+    [[ "$lvl" == "none" ]] && { printf '{"loglevel":"none"}'; return 0; }
     dir="$(json_escape "$XHY_LOGDIR")"
-    printf '{"loglevel":"%s","access":"%s/xray-access.log","error":"%s/xray-error.log"}' \
-        "$lvl" "$dir" "$dir"
+    # access log 记录每条连接的源 IP + 时间 + 目标，纯转发服务器不需要，
+    # 且是磁盘 IO 与隐私的双重负担。排障时 `xhy config set ACCESS_LOG on`。
+    if [[ "$(state_get ACCESS_LOG off)" == "on" ]]; then
+        printf '{"loglevel":"%s","access":"%s/xray-access.log","error":"%s/xray-error.log"}' \
+            "$lvl" "$dir" "$dir"
+    else
+        printf '{"loglevel":"%s","access":"none","error":"%s/xray-error.log"}' \
+            "$lvl" "$dir"
+    fi
 }
 
 dns_json() {
@@ -2264,6 +2408,14 @@ routing_json() {
 
 outbounds_json() {
     printf '[{"protocol":"freedom","tag":"direct","settings":{}},{"protocol":"blackhole","tag":"block"}]'
+}
+
+policy_json() {
+    # bufferSize 单位 KB，是每连接单向缓冲。默认 512；跨境高 BDP 链路可调到
+    # 1024，但 1G 内存机器上 1024 × 2 方向 × 200 并发就是 400MB，别盲目加。
+    # stats* 全关：REALITY / hy2 都是单用户或小规模，流量统计只会白烧内存。
+    printf '{"levels":{"0":{"handshake":4,"connIdle":300,"uplinkOnly":2,"downlinkOnly":5,"bufferSize":%s}},"system":{"statsInboundUplink":false,"statsInboundDownlink":false,"statsOutboundUplink":false,"statsOutboundDownlink":false}}' \
+        "$(state_get BUFFER_SIZE 512)"
 }
 
 # Snapshot the *source of truth* only: node registry, config fragments, hy2
@@ -2305,13 +2457,23 @@ rebuild_config() {
         printf '  "inbounds": [%s],\n' "$joined"
         printf '  "dns": %s,\n' "$(dns_json)"
         printf '  "routing": %s,\n' "$(routing_json)"
-        printf '  "outbounds": %s\n}\n' "$(outbounds_json)"
+        printf '  "outbounds": %s,\n' "$(outbounds_json)"
+        printf '  "policy": %s\n}\n' "$(policy_json)"
     } | atomic_write "$XHY_ETC/config.json" 0600
     ok "配置已重建: $XHY_ETC/config.json ($(node_count) 个节点)"
 }
 
 sniffing_json() {
-    printf '"sniffing":{"enabled":true,"destOverride":["http","tls","quic"],"routeOnly":true}'
+    local override='["tls"]'
+    case "${MODE:-}" in
+        # 明文 WS：只有 http 头可嗅探
+        direct|tunnel) override='["http","tls"]' ;;
+        # hy2 自身就是 QUIC，再解析一次 quic 是纯开销
+        hy2)           override='["tls"]' ;;
+        # reality / xhttp --reality：全程 TLS 1.3
+        *)             override='["tls"]' ;;
+    esac
+    printf '"sniffing":{"enabled":true,"destOverride":%s,"routeOnly":true}' "$override"
 }
 
 # ---------------------------------------------------------------------------
@@ -2340,7 +2502,8 @@ render_direct() {
   "settings": { "clients": [ { "id": "${UUID}", "email": "direct-${PORT}" } ], "decryption": "none" },
   "streamSettings": {
     "network": "ws", "security": "none",
-    "wsSettings": { "path": "${NODE_PATH}", "host": "${NODE_HOST}" }
+    "wsSettings": { "path": "${NODE_PATH}", "host": "${NODE_HOST}" },
+    $(sockopt_json)
   },
   $(sniffing_json)
 }
@@ -2355,7 +2518,8 @@ render_tunnel() {
   "settings": { "clients": [ { "id": "${UUID}", "email": "tunnel-${PORT}" } ], "decryption": "none" },
   "streamSettings": {
     "network": "ws", "security": "none",
-    "wsSettings": { "path": "${NODE_PATH}", "host": "${CF_DOMAIN}" }
+    "wsSettings": { "path": "${NODE_PATH}", "host": "${CF_DOMAIN}" },
+    $(sockopt_json)
   },
   $(sniffing_json)
 }
@@ -2381,7 +2545,8 @@ render_reality() {
       "shortIds": [ "${SHORT_ID}" ],
 $(limit_fallback_json)
       "xver": 0
-    }
+    },
+    $(sockopt_json)
   },
   $(sniffing_json)
 }
@@ -2415,7 +2580,8 @@ EOF
   "streamSettings": {
     "network": "xhttp", ${sec_block}
 ${reality_block}
-    "xhttpSettings": { "path": "${NODE_PATH}", "host": "${NODE_HOST}", "mode": "auto" }
+    "xhttpSettings": { "path": "${NODE_PATH}", "host": "${NODE_HOST}", "mode": "auto" },
+    $(sockopt_json)
   },
   $(sniffing_json)
 }
@@ -2425,13 +2591,19 @@ EOF
 # Xray's native Hysteria2 inbound (v26.3.27+). Verified with `xray run -test`:
 # protocol "hysteria", version 2, network "hysteria", security "tls", alpn h3.
 render_hy2() {
-    local qp="" masq
+    local qp="" masq masq_block
     [[ -n "$BRUTAL_UP" ]] && qp="\"brutalUp\": \"${BRUTAL_UP}\""
     if [[ -n "$BRUTAL_DOWN" ]]; then
         [[ -n "$qp" ]] && qp+=", "
         qp+="\"brutalDown\": \"${BRUTAL_DOWN}\""
     fi
     masq="$(json_escape "$MASQ_URL")"
+    if [[ "${MASQ_MODE:-string}" == "proxy" ]]; then
+        # 反代真站最像，但被扫描时未认证流量会经你机器转发 = 拿你的带宽
+        masq_block="\"masquerade\": { \"type\": \"proxy\", \"url\": \"${masq}\", \"rewriteHost\": true }"
+    else
+        masq_block="\"masquerade\": { \"type\": \"string\", \"statusCode\": 200, \"headers\": { \"content-type\": [\"text/html\"] }, \"content\": \"<html><head><title>Welcome to nginx!</title></head><body><h1>Welcome to nginx!</h1></body></html>\" }"
+    fi
     cat <<EOF
 {
   "listen": "$(listen_addr)", "port": ${PORT}, "protocol": "hysteria",
@@ -2444,7 +2616,7 @@ render_hy2() {
     "network": "hysteria", "security": "tls",
     "hysteriaSettings": {
       "version": 2,
-      "masquerade": { "type": "proxy", "url": "${masq}", "rewriteHost": true }
+      ${masq_block}
     },
     "tlsSettings": {
       "alpn": [ "h3" ],
@@ -2475,11 +2647,13 @@ write_fragment() {
 # node_add MODE PORT [--host H] [--path P] [--sni S] [--target T]
 #                    [--token TOKEN] [--domain D] [--reality] [--uuid U]
 #                    [--scan] [--scan-cidr CIDR] [--scan-refresh]
+#                    [--tfo auto|on|off] [--masq-proxy]
 node_add() {
     local mode="$1" port="$2"; shift 2
     local host="" path="" sni="" target="" token="" domain="" uuid="" with_reality="0"
     local masq="" up="" down=""
     local use_scan="0" scan_cidr="" scan_refresh="0"
+    local tfo_opt="auto" masq_mode="string"
     while (( $# > 0 )); do
         case "$1" in
             --host)   host="$2"; shift 2 ;;
@@ -2492,6 +2666,8 @@ node_add() {
             --masq)   masq="$2"; shift 2 ;;
             --up)     up="$2"; shift 2 ;;
             --down)   down="$2"; shift 2 ;;
+            --tfo)    tfo_opt="$2"; shift 2 ;;
+            --masq-proxy) masq_mode="proxy"; shift ;;
             --reality) with_reality="1"; shift ;;
             --scan)        use_scan="1"; shift ;;
             --scan-cidr)   scan_cidr="$2"; shift 2 ;;
@@ -2544,7 +2720,7 @@ node_add() {
     fi
 
     local public=1 priv="" pub="" sid="" tgt="" t_sni="" label="" security="none"
-    local pairs=() picked="" kp=""
+    local pairs=() picked="" kp="" tfo_val="0"
     if [[ -n "$target" && "$target" != *:* ]]; then target="${target}:443"; fi
 
     case "$mode" in
@@ -2565,11 +2741,12 @@ node_add() {
             read -r priv pub <<<"$kp"
             [[ -n "$priv" && -n "$pub" ]] || { err "x25519 密钥生成失败"; return 1; }
             sid="$(rand_hex 8)"
+            tfo_val="$(tfo_decide "$tfo_opt" "$t_sni")"
             pairs=(
                 "MODE=reality" "PORT=$port" "PUBLIC=1" "UUID=$uuid" "NODE_PATH=$path"
                 "NODE_HOST=$host" "SNI=$t_sni" "TARGET=$tgt"
                 "PRIVATE_KEY=$priv" "PUBLIC_KEY=$pub" "SHORT_ID=$sid"
-                "FP=chrome" "SECURITY=reality" "CREATED=$(date -Is)"
+                "FP=chrome" "SECURITY=reality" "TFO=$tfo_val" "CREATED=$(date -Is)"
             ) ;;
         xhttp)
             if [[ "$with_reality" == "1" || -n "$target" ]]; then
@@ -2590,12 +2767,13 @@ node_add() {
                 read -r priv pub <<<"$kp"
                 [[ -n "$priv" && -n "$pub" ]] || { err "x25519 密钥生成失败"; return 1; }
                 sid="$(rand_hex 8)"
+                tfo_val="$(tfo_decide "$tfo_opt" "$t_sni")"
             fi
             pairs=(
                 "MODE=xhttp" "PORT=$port" "PUBLIC=1" "UUID=$uuid" "NODE_PATH=$path"
                 "NODE_HOST=$host" "SNI=${t_sni:-$host}" "TARGET=${tgt:-}"
                 "PRIVATE_KEY=${priv:-}" "PUBLIC_KEY=${pub:-}" "SHORT_ID=${sid:-}"
-                "FP=chrome" "SECURITY=$security" "CREATED=$(date -Is)"
+                "FP=chrome" "SECURITY=$security" "TFO=$tfo_val" "CREATED=$(date -Is)"
             ) ;;
         direct)
             pairs=(
@@ -2623,6 +2801,10 @@ node_add() {
             local hy2sni masq_url crt key pin64 pinhex
             hy2sni="${sni:-www.bing.com}"
             masq_url="${masq:-https://www.bing.com/}"
+            if [[ -n "$up" || -n "$down" ]]; then
+                warn "Brutal 会无视丢包、按设定速率持续发包：按流量计费的实例会产生真实账单，"
+                warn "共享/突发带宽实例可能被云厂商限速或判定滥用。仅在带宽独占时使用。"
+            fi
             read -r crt key pin64 pinhex <<<"$(hy2_gen_cert "$port" "$hy2sni")"
             [[ -s "$crt" && -s "$key" ]] || die "Hysteria2 自签证书生成失败"
             pairs=(
@@ -2631,6 +2813,7 @@ node_add() {
                 "SNI=$hy2sni" "CERT_FILE=$crt" "KEY_FILE=$key"
                 "PIN_B64=$pin64" "PIN_HEX=$pinhex" "MASQ_URL=$masq_url"
                 "BRUTAL_UP=$up" "BRUTAL_DOWN=$down"
+                "TFO=0" "MASQ_MODE=$masq_mode"
                 "SECURITY=tls" "CREATED=$(date -Is)"
             )
             info "Hysteria2 走 UDP $port，防火墙会自动放行 UDP；客户端需支持 hy2（sing-box / mihomo / v2rayN）" ;;
@@ -3344,7 +3527,7 @@ self_check() {
     fi
     printf '%s\n' "--------------------------------------"
     core_status
-    local inst mptcp v6rules
+    local inst mptcp v6rules tfo_hits
     inst="$(xray_installed_version)"
     if [[ "$inst" == [0-9]* ]]; then
         if version_lt "v$inst" "$XHY_MPTCP_FIXED_VERSION"; then
@@ -3363,6 +3546,17 @@ self_check() {
     [[ "$mptcp" == "1" ]] && warn "MPTCP 已启用，请执行 xhy bbr on 关闭它（钉死旧版时的关键缓解）"
     printf '%s\n' "--------------------------------------"
     bbr_status
+    printf '%s\n' "--------------------------------------"
+    printf 'access日志: %s\n' "$(state_get ACCESS_LOG 'off')"
+    printf 'bufferSize: %s KB\n' "$(state_get BUFFER_SIZE 512)"
+    printf '端口范围  : %s\n' "$(sysctl -n net.ipv4.ip_local_port_range 2>/dev/null || echo '?')"
+    # TFO 只在客户端也请求时才有意义，统计为 0 说明一次都没命中
+    tfo_hits="不可用"
+    if have_cmd nstat; then
+        tfo_hits="$(nstat -az TcpExtTCPFastOpenPassive 2>/dev/null | awk 'NR==2{print $2}')"
+        [[ -n "$tfo_hits" ]] || tfo_hits="0"
+    fi
+    printf 'TFO 命中  : %s\n' "$tfo_hits"
     printf '%s\n' "--------------------------------------"
     firewall_status | head -4
     if have_cmd ip6tables; then
@@ -3566,10 +3760,13 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
 
     mode: direct | tunnel | reality | xhttp | hy2
     add 选项: --host --path --uuid --sni --target --domain --token --reality
-              --masq --up --down   (hy2 专用)
+              --tfo auto|on|off             (TCP 节点；auto 跟随伪装站 SYN-ACK)
+              --masq --masq-proxy --up --down   (hy2 专用)
               --scan [--scan-cidr CIDR] [--scan-refresh]   (reality 专用)
     默认端口: direct 8080 / tunnel 10086 / reality 443 / xhttp 8081 / hy2 8443(UDP)
     hy2 用 Xray 内置 Hysteria2 入站(v26.3.27+)，自签证书 + pinSHA256 链接
+    hy2 默认 masquerade type=string（静态页）；--masq-proxy 改为反代真站，
+      伪装性更好，但未认证流量会走本机带宽
 
   伪装站自动扫描
     scan [网段]                 扫本机机房网段，挑最优伪装站（结果缓存复用）
@@ -3765,6 +3962,10 @@ EOF
             if confirm "自定义伪装站 URL？" "n"; then
                 opts+=(--masq "$(ask '伪装站 URL' 'https://www.bing.com/')")
             fi
+            # 默认静态页：proxy 模式被扫到未认证流量时会拿本机带宽替真站转发。
+            if confirm "改为反代真站（更像，但走本机带宽）？" "n"; then
+                opts+=(--masq-proxy)
+            fi
             if confirm "设置 Brutal 带宽上限？" "n"; then
                 opts+=(--up "$(ask '上行 (如 100mbps)' '100mbps')" --down "$(ask '下行' '300mbps')")
             fi ;;
@@ -3780,9 +3981,9 @@ cmd_add() {
     while (( $# > 0 )); do
         case "$1" in
             --port)   port="$2"; shift 2 ;;
-            --host|--path|--uuid|--sni|--target|--domain|--token|--masq|--up|--down|--scan-cidr)
+            --host|--path|--uuid|--sni|--target|--domain|--token|--masq|--up|--down|--scan-cidr|--tfo)
                 opts+=("$1" "$2"); shift 2 ;;
-            --reality|--scan|--scan-refresh) opts+=("$1"); shift ;;
+            --reality|--scan|--scan-refresh|--masq-proxy) opts+=("$1"); shift ;;
             *) die "未知参数: $1（见 xhy --help）" ;;
         esac
     done

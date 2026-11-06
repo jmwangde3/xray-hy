@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.2.0}"
+XHY_VERSION="${XHY_VERSION:-1.3.0}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 

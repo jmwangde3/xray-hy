@@ -150,7 +150,7 @@ self_check() {
     fi
     printf '%s\n' "--------------------------------------"
     core_status
-    local inst mptcp v6rules
+    local inst mptcp v6rules tfo_hits
     inst="$(xray_installed_version)"
     if [[ "$inst" == [0-9]* ]]; then
         if version_lt "v$inst" "$XHY_MPTCP_FIXED_VERSION"; then
@@ -169,6 +169,17 @@ self_check() {
     [[ "$mptcp" == "1" ]] && warn "MPTCP 已启用，请执行 xhy bbr on 关闭它（钉死旧版时的关键缓解）"
     printf '%s\n' "--------------------------------------"
     bbr_status
+    printf '%s\n' "--------------------------------------"
+    printf 'access日志: %s\n' "$(state_get ACCESS_LOG 'off')"
+    printf 'bufferSize: %s KB\n' "$(state_get BUFFER_SIZE 512)"
+    printf '端口范围  : %s\n' "$(sysctl -n net.ipv4.ip_local_port_range 2>/dev/null || echo '?')"
+    # TFO 只在客户端也请求时才有意义，统计为 0 说明一次都没命中
+    tfo_hits="不可用"
+    if have_cmd nstat; then
+        tfo_hits="$(nstat -az TcpExtTCPFastOpenPassive 2>/dev/null | awk 'NR==2{print $2}')"
+        [[ -n "$tfo_hits" ]] || tfo_hits="0"
+    fi
+    printf 'TFO 命中  : %s\n' "$tfo_hits"
     printf '%s\n' "--------------------------------------"
     firewall_status | head -4
     if have_cmd ip6tables; then

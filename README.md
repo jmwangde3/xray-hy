@@ -141,7 +141,7 @@ xhy check                                 # 全量环境自检
 | 需求 | 实现 |
 |---|---|
 | 多系统 | Debian / Ubuntu / Devuan (systemd)、Alpine (OpenRC)、RHEL 系 (systemd)；x86_64 与 aarch64 |
-| BBR | Debian 写 `/etc/sysctl.d/`；**Alpine 额外**写 `/etc/modules-load.d/xray-hy.conf` 加载 `tcp_bbr`/`sch_fq`、追加 `/etc/sysctl.conf`、`rc-update add sysctl boot`（Alpine 的 sysctl 服务在 boot runlevel 且默认不加载 BBR 模块）。容器环境自动跳过并说明原因 |
+| BBR | Debian 写 `/etc/sysctl.d/`；**Alpine 额外**写 `/etc/modules-load.d/xray-hy.conf` 加载 `tcp_bbr`/`sch_fq`、追加 `/etc/sysctl.conf`、`rc-update add sysctl boot`（Alpine 的 sysctl 服务在 boot runlevel 且默认不加载 BBR 模块）。容器环境自动跳过并说明原因。**TFO 跟随 REALITY 伪装站自身的 SYN-ACK 自动对齐，不单独作为性能项宣传** |
 | Xray 版本 | `xhy core channel pinned`（钉死 **`v26.3.27`**，保 sing-box / mihomo 客户端兼容）/ `latest` / `vX.Y.Z` 自定义；切换时提示 #4520 与 MPTCP 两条边界，`xhy core update` 重装并校验配置兼容性 |
 | 自动启动 | systemd unit 或 OpenRC init 脚本，`start_pre` 里先做配置校验；`Restart=on-failure` / OpenRC 自动重启策略 |
 | BT 阻断 | `sniffing` + `routing` 的 `protocol: ["bittorrent"]` → blackhole，开关 `BLOCK_BT` |
@@ -227,7 +227,7 @@ xhy add reality --port 443 --target 1.2.3.4:443 --sni www.example.com   # 手动
 
 > ⚠️ **这些是缓解，不是修复。** CVE-2026-98432 的根因在普通 IPv4 TCP 路径的 use-after-free，Go 团队与各发行商都明确表示「关掉 MPTCP 不等于安全」。真正根治是**安装已修补的内核并重启**（Debian 12/13 已发布修复版本）。容器的 `net.mptcp.enabled` 按 network namespace 生效，需在容器内也设置；还可用 `nft ... tcp flags syn ip hdrlength != 5 counter drop` 丢弃带 IPv4 options 的 SYN 进一步收窄。
 
-> 如果哪天 sing-box / mihomo 修好了 uTLS 指纹，或者你的客户端全是 Xray 系，就可以把通道切到 `latest` 吃到 MPTCP 官方修复；在那之前保持 `pinned` + 内核 MPTCP=0 是更稳的组合。
+> 如果哪天 sing-box / mihomo 修好了 uTLS 指纹，或者你的客户端全是 Xray 系，可以切 `latest`。但**切 `latest` 是为了修 CVE-2026-98432，不是为了启用 MPTCP**：单网卡上 MPTCP 只有开销没有收益，`net.mptcp.enabled=0` 与 `GODEBUG=multipathtcp=0` 永久保留；在那之前保持 `pinned` + 内核 MPTCP=0 是更稳的组合。
 
 ---
 
@@ -253,7 +253,7 @@ CF Tunnel 模式下多个 tunnel 节点共用同一个 cloudflared 服务与 Tok
 | **sing-box** | ✅ 一直原生支持 | `type: hysteria2`，单块配置、带宽用纯整数 Mbps，端口跳跃用 `server_ports`。功能更成熟（Salamander / Gecko 混淆、端口跳跃），但要引入第二个核心与另一套配置格式。 |
 | Hysteria 官方服务端 | ✅ | `apernet/hysteria` 独立二进制 + YAML 配置，是很多一键脚本的做法（如 `whherui/xray-reality-hy2-ss`）。 |
 
-本脚本选 Xray 内置方案，保持「一套核心、一套配置、一次 `run -test`」。`hy2` 节点会：用 openssl 生成 10 年自签证书（0600，证书 CN/SAN = SNI）、把证书 SHA-256 以 `pinSHA256` 写进 `hysteria2://` 链接（比 `insecure=1` 安全，同时输出简易链接备选）、配置 `masquerade` 反代伪装站、可选 `--up/--down` Brutal 带宽、并让防火墙对 **IPv4 和 IPv6 都放行对应 UDP 端口**。
+本脚本选 Xray 内置方案，保持「一套核心、一套配置、一次 `run -test`」。`hy2` 节点会：用 openssl 生成 10 年自签证书（0600，证书 CN/SAN = SNI）、把证书 SHA-256 以 `pinSHA256` 写进 `hysteria2://` 链接（比 `insecure=1` 安全，同时输出简易链接备选）、默认 `masquerade type=string`（一张静态页）；`--masq-proxy` 改为反代真站，伪装性更好但未认证流量会消耗本机带宽；可选 `--up/--down` Brutal 带宽、并让防火墙对 **IPv4 和 IPv6 都放行对应 UDP 端口**。
 
 > 注意：`pinSHA256` 依赖客户端支持该标准参数；若导入失败，改用输出里给的 `insecure=1` 简易链接，或把 `PIN_HEX` 填到客户端的证书指纹字段。Hysteria2 是 UDP/QUIC，别忘了云安全组也要放行 UDP 端口。
 
@@ -379,10 +379,10 @@ tools/bump-version.sh major --note "破坏性变更"   # 1.3.1 -> 2.0.0
 已在真实 VPS（Alpine 3.23 / OpenRC，`47.88.102.45`）上完成端到端部署：`install` 七步全过、REALITY 节点实测可连、`xhy scan` 实机扫出并应用了同机房伪装站。下面的离线测试仍保留，任何机器上都能复跑（不需要 root、不需要网络、不需要真实 Xray）：
 
 ```sh
-bash test/run-all.sh     # bash -n + 渲染 + hy2 + 生命周期 + 伪装站/扫描，共 139 项断言
+bash test/run-all.sh     # bash -n + 渲染 + hy2 + 生命周期 + 伪装站/扫描，共 154 项断言
 ```
 
-覆盖：全部脚本语法；四种 VLESS 模式与 `hy2` 的 inbound 片段和合并 `config.json` 是否合法 JSON；`hy2` 自签证书生成与 `pinSHA256` 链接；UDP 端口是否进入防火墙；`add → snapshot → del → rollback` 的整套状态恢复；跨模式端口冲突；伪装站地区优先与 BOM 防御；IP+SNI 校验与删除节点选择器；扫描模块的网段换算 / 域名过滤 / 打分 / CSV 解析 / 缓存合并与过期 / 缓存优先选站。
+覆盖：全部脚本语法；四种 VLESS 模式与 `hy2` 的 inbound 片段和合并 `config.json` 是否合法 JSON；`hy2` 自签证书生成与 `pinSHA256` 链接；UDP 端口是否进入防火墙；`add → snapshot → del → rollback` 的整套状态恢复；跨模式端口冲突；伪装站地区优先与 BOM 防御；IP+SNI 校验与删除节点选择器；扫描模块的网段换算 / 域名过滤 / 打分 / CSV 解析 / 缓存合并与过期 / 缓存优先选站；`sockopt` 是否按节点类型出现（`TFO=1/0` 对应 `tcpFastOpen` true/false、`hy2` 无 `sockopt`）、`policy.bufferSize` 取自 state、`ACCESS_LOG` 开关对 `log.access` 的影响、`sniffing.destOverride` 按模式裁剪、`hy2` 的 `masquerade.type` 默认 `string` 与 `--masq-proxy` 切 `proxy`。
 
 此外 `hy2` 的配置字段在真实 Xray **26.10.31** 上用 `xray run -test` 验证通过（`protocol: hysteria` / `version: 2` / `alpn: ["h3"]` / `masquerade` / `finalmask.quicParams`），`hysteria2://` 链接格式经人工核对。
 

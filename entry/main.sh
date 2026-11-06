@@ -60,10 +60,13 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
 
     mode: direct | tunnel | reality | xhttp | hy2
     add 选项: --host --path --uuid --sni --target --domain --token --reality
-              --masq --up --down   (hy2 专用)
+              --tfo auto|on|off             (TCP 节点；auto 跟随伪装站 SYN-ACK)
+              --masq --masq-proxy --up --down   (hy2 专用)
               --scan [--scan-cidr CIDR] [--scan-refresh]   (reality 专用)
     默认端口: direct 8080 / tunnel 10086 / reality 443 / xhttp 8081 / hy2 8443(UDP)
     hy2 用 Xray 内置 Hysteria2 入站(v26.3.27+)，自签证书 + pinSHA256 链接
+    hy2 默认 masquerade type=string（静态页）；--masq-proxy 改为反代真站，
+      伪装性更好，但未认证流量会走本机带宽
 
   伪装站自动扫描
     scan [网段]                 扫本机机房网段，挑最优伪装站（结果缓存复用）
@@ -259,6 +262,10 @@ EOF
             if confirm "自定义伪装站 URL？" "n"; then
                 opts+=(--masq "$(ask '伪装站 URL' 'https://www.bing.com/')")
             fi
+            # 默认静态页：proxy 模式被扫到未认证流量时会拿本机带宽替真站转发。
+            if confirm "改为反代真站（更像，但走本机带宽）？" "n"; then
+                opts+=(--masq-proxy)
+            fi
             if confirm "设置 Brutal 带宽上限？" "n"; then
                 opts+=(--up "$(ask '上行 (如 100mbps)' '100mbps')" --down "$(ask '下行' '300mbps')")
             fi ;;
@@ -274,9 +281,9 @@ cmd_add() {
     while (( $# > 0 )); do
         case "$1" in
             --port)   port="$2"; shift 2 ;;
-            --host|--path|--uuid|--sni|--target|--domain|--token|--masq|--up|--down|--scan-cidr)
+            --host|--path|--uuid|--sni|--target|--domain|--token|--masq|--up|--down|--scan-cidr|--tfo)
                 opts+=("$1" "$2"); shift 2 ;;
-            --reality|--scan|--scan-refresh) opts+=("$1"); shift ;;
+            --reality|--scan|--scan-refresh|--masq-proxy) opts+=("$1"); shift ;;
             *) die "未知参数: $1（见 xhy --help）" ;;
         esac
     done

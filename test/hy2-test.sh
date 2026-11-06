@@ -36,7 +36,9 @@ chk "protocol is hysteria"      "grep -q '\"protocol\": \"hysteria\"' '$XHY_CONF
 chk "network is hysteria"       "grep -q '\"network\": \"hysteria\"' '$XHY_CONFDIR/hy2_8443.json'"
 chk "tls alpn is h3"            "grep -q '\"h3\"' '$XHY_CONFDIR/hy2_8443.json'"
 chk "brutal params present"     "grep -q 'brutalUp' '$XHY_CONFDIR/hy2_8443.json'"
-chk "masquerade is proxy"       "grep -q '\"type\": \"proxy\"' '$XHY_CONFDIR/hy2_8443.json'"
+# v1.3.0 起默认收敛为静态页面：proxy 模式会被扫描器当免费反代用掉本机带宽。
+chk "masquerade defaults to string" "grep -q '\"type\": \"string\"' '$XHY_CONFDIR/hy2_8443.json'"
+chk "default has no proxy url"      "! grep -q 'rewriteHost' '$XHY_CONFDIR/hy2_8443.json'"
 
 echo "=== real certificate generation ==="
 read -r crt key pin64 pinhex <<<"$(hy2_gen_cert 18444 www.bing.com)"

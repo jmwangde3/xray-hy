@@ -102,7 +102,7 @@ EOF
 }
 
 install_xray_service() {
-    local memlimit
+    local memlimit sup_note="" bg="true" restart_desc
     memlimit="$(compute_gomemlimit)"
     backup_file "$XHY_ETC/config.json"
     if [[ "$XHY_INIT" == "systemd" ]]; then
@@ -125,6 +125,23 @@ Restart=on-failure
 RestartSec=3
 LimitNOFILE=1048576
 NoNewPrivileges=true
+# ProtectSystem=strict 会把整个文件系统挂成只读，ReadWritePaths 必须同时上：
+# 没有它 append 日志写不进去，服务会直接起不来。
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=${XHY_LOGDIR}
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+# 万一 Go runtime 用到集合外的调用，返回 EPERM 而不是 SIGSYS 直接杀进程。
+SystemCallErrorNumber=EPERM
 StandardOutput=append:${XHY_LOGDIR}/xray.log
 StandardError=append:${XHY_LOGDIR}/xray.err
 
@@ -133,13 +150,32 @@ WantedBy=multi-user.target
 EOF
         systemctl daemon-reload
     else
-        cat >/etc/init.d/xray-hy <<'EOF'
+        # command_background=true 只是把进程丢到后台，挂了不会拉起。OpenRC 上
+        # 真正的重启策略要靠 supervise-daemon；老版本没有它时退回后台模式，
+        # 但要明确告知"崩溃不自动拉起"，否则 README 里写的自动重启是空的。
+        if have_cmd supervise-daemon; then
+            bg="false"
+        else
+            sup_note="本机无 supervise-daemon，Xray 崩溃后不会自动拉起"
+        fi
+        {
+            cat <<'EOF'
 #!/sbin/openrc-run
 name="xray-hy"
 description="xray-hy Xray multi-node service"
 command="/usr/local/bin/xray"
 command_args="run -c /etc/xray-hy/config.json"
-command_background=true
+EOF
+            if [[ "$bg" == "false" ]]; then
+                cat <<'EOF'
+command_background=false
+supervisor=supervise-daemon
+supervise_daemon_args="--respawn-max 5 --respawn-delay 3 --respawn-period 60"
+EOF
+            else
+                printf 'command_background=true\n'
+            fi
+            cat <<'EOF'
 pidfile="/run/xray-hy.pid"
 output_log="/var/log/xray-hy/xray.log"
 error_log="/var/log/xray-hy/xray.err"
@@ -158,12 +194,21 @@ start_pre() {
         "$command" run -test -c /etc/xray-hy/config.json || return 1
 }
 EOF
+        } >/etc/init.d/xray-hy
         chmod 0755 /etc/init.d/xray-hy
         sed -i "s|MEMLIMIT|${memlimit}|" /etc/init.d/xray-hy
+        if [[ -n "$sup_note" ]]; then warn "$sup_note"; fi
+    fi
+    if [[ "$XHY_INIT" == "systemd" ]]; then
+        restart_desc="systemd Restart=on-failure"
+    elif have_cmd supervise-daemon; then
+        restart_desc="supervise-daemon (5 次/60s)"
+    else
+        restart_desc="无（后台模式，崩溃不拉起）"
     fi
     svc_enable "$SVC_XRAY"
     install_logrotate
-    ok "Xray 服务已安装并设为开机自启 ($XHY_INIT, GOMEMLIMIT=${memlimit})"
+    ok "Xray 服务已安装并设为开机自启 ($XHY_INIT, GOMEMLIMIT=${memlimit}, 重启策略=${restart_desc})"
 }
 
 install_cf_service() {

@@ -78,4 +78,58 @@ chk "state read back off" "[[ \"\$(state_get BLOCK_BT on)\" == off ]]"
 state_set BLOCK_BT on
 chk "state read back on"  "[[ \"\$(state_get BLOCK_BT off)\" == on ]]"
 
+# ---------------------------------------------------------------------------
+# v1.3.0：sockopt / policy / 日志开关 / sniffing 裁剪 / hy2 伪装面
+# ---------------------------------------------------------------------------
+add_kv() { # add_kv <file> <KEY> <VALUE> —— 覆盖式追加，重复调用不会堆重复键
+    local f="$1" k="$2" v="$3"
+    grep -v "^${k}=" "$f" >"$f.tmp" || true
+    mv "$f.tmp" "$f"
+    printf '%s=%s\n' "$k" "$v" >>"$f"
+}
+
+echo "=== sockopt ==="
+add_kv "$XHY_NODES/reality_443.env" TFO 1
+write_fragment "$XHY_NODES/reality_443.env"
+chk "reality 片段含 sockopt"        "grep -q '\"sockopt\"' '$XHY_CONFDIR/reality_443.json'"
+chk "TFO=1 -> tcpFastOpen true"     "grep -q '\"tcpFastOpen\":true' '$XHY_CONFDIR/reality_443.json'"
+add_kv "$XHY_NODES/reality_443.env" TFO 0
+write_fragment "$XHY_NODES/reality_443.env"
+chk "TFO=0 -> tcpFastOpen false"    "grep -q '\"tcpFastOpen\":false' '$XHY_CONFDIR/reality_443.json'"
+
+# hy2 走 QUIC，没有 TCP 握手，sockopt 对它全是死字段
+mk hy2 8443
+write_fragment "$XHY_NODES/hy2_8443.env"
+chk "hy2 片段无 sockopt"            "! grep -q '\"sockopt\"' '$XHY_CONFDIR/hy2_8443.json'"
+
+echo "=== hy2 masquerade ==="
+add_kv "$XHY_NODES/hy2_8443.env" MASQ_MODE string
+write_fragment "$XHY_NODES/hy2_8443.env"
+chk "默认 masquerade.type=string"        "grep -q '\"type\": \"string\"' '$XHY_CONFDIR/hy2_8443.json'"
+add_kv "$XHY_NODES/hy2_8443.env" MASQ_MODE proxy
+write_fragment "$XHY_NODES/hy2_8443.env"
+chk "--masq-proxy -> masquerade.type=proxy" "grep -q '\"type\": \"proxy\"' '$XHY_CONFDIR/hy2_8443.json'"
+rm -f "$XHY_NODES/hy2_8443.env" "$XHY_CONFDIR/hy2_8443.json"
+
+echo "=== policy ==="
+state_set BUFFER_SIZE 768
+rebuild_config >/dev/null
+chk "config 顶层含 policy"          "$PY -c 'import json,sys; d=json.load(open(sys.argv[1])); assert \"policy\" in d' '$XHY_ETC/config.json'"
+chk "policy.bufferSize 取自 state"  "$PY -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d[\"policy\"][\"levels\"][\"0\"][\"bufferSize\"]==768' '$XHY_ETC/config.json'"
+chk "policy 关闭四路流量统计"        "$PY -c 'import json,sys; d=json.load(open(sys.argv[1])); s=d[\"policy\"][\"system\"]; assert not any([s[\"statsInboundUplink\"],s[\"statsInboundDownlink\"],s[\"statsOutboundUplink\"],s[\"statsOutboundDownlink\"]])' '$XHY_ETC/config.json'"
+
+echo "=== access log switch ==="
+state_set LOG_LEVEL warning
+state_set ACCESS_LOG off
+rebuild_config >/dev/null
+chk "ACCESS_LOG=off -> access none" "$PY -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d[\"log\"][\"access\"]==\"none\"' '$XHY_ETC/config.json'"
+state_set ACCESS_LOG on
+rebuild_config >/dev/null
+chk "ACCESS_LOG=on -> 写 xray-access.log" "$PY -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d[\"log\"][\"access\"].endswith(\"xray-access.log\")' '$XHY_ETC/config.json'"
+
+echo "=== sniffing by mode ==="
+chk "direct destOverride 含 http"    "$PY -c 'import json,sys; d=json.load(open(sys.argv[1])); assert \"http\" in d[\"sniffing\"][\"destOverride\"]' '$XHY_CONFDIR/direct_8080.json'"
+chk "reality destOverride 不含 http" "$PY -c 'import json,sys; d=json.load(open(sys.argv[1])); assert \"http\" not in d[\"sniffing\"][\"destOverride\"]' '$XHY_CONFDIR/reality_443.json'"
+chk "reality 只嗅探 tls"             "$PY -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d[\"sniffing\"][\"destOverride\"]==[\"tls\"]' '$XHY_CONFDIR/reality_443.json'"
+
 summary
