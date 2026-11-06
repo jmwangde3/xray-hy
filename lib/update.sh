@@ -166,7 +166,9 @@ self_check() {
     fi
     mptcp="$(sysctl -n net.mptcp.enabled 2>/dev/null || echo '内核未暴露')"
     printf '内核 MPTCP: %s (应为 0)\n' "$mptcp"
-    [[ "$mptcp" == "1" ]] && warn "MPTCP 已启用，请执行 xhy bbr on 关闭它（钉死旧版时的关键缓解）"
+    if [[ "$mptcp" == "1" ]]; then
+        warn "MPTCP 已启用，请执行 xhy bbr on 关闭它（钉死旧版时的关键缓解）"
+    fi
     printf '%s\n' "--------------------------------------"
     bbr_status
     printf '%s\n' "--------------------------------------"
@@ -185,7 +187,9 @@ self_check() {
     if have_cmd ip6tables; then
         v6rules="$(ip6tables -S 2>/dev/null | grep -c "$FW_CHAIN" || true)"
         printf 'IPv6 链规则: %s 条\n' "${v6rules:-0}"
-        [[ "${v6rules:-0}" == "0" ]] && warn "IPv6 未受保护，SSH 可能绕过防爆破"
+        if [[ "${v6rules:-0}" == "0" ]]; then
+            warn "IPv6 未受保护，SSH 可能绕过防爆破"
+        fi
     else
         warn "未安装 ip6tables，IPv6 未受保护"
     fi

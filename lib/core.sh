@@ -169,7 +169,12 @@ core_status() {
     printf 'Geodata  : %s\n' "$XRAY_ASSET"
     [[ -s "$XRAY_ASSET/geoip.dat" ]] && printf '  geoip.dat   %s bytes\n' "$(stat -c%s "$XRAY_ASSET/geoip.dat" 2>/dev/null || echo '?')"
     [[ -s "$XRAY_ASSET/geosite.dat" ]] && printf '  geosite.dat %s bytes\n' "$(stat -c%s "$XRAY_ASSET/geosite.dat" 2>/dev/null || echo '?')"
-    [[ -x "$CF_BIN" ]] && printf 'cloudflared: %s\n' "$("$CF_BIN" --version 2>&1 | head -1)"
+    if [[ -x "$CF_BIN" ]]; then
+        printf 'cloudflared: %s\n' "$("$CF_BIN" --version 2>&1 | head -1)"
+    fi
+    # 显式 return 0：最后一条若是 `[[ ... ]] && printf`，条件为假时函数返回 1，
+    # 在 `set -e` 下调用方（xhy check）会直接中断，自检报告只印一半。
+    return 0
 }
 
 # Xray-core gained a native Hysteria2 inbound in v26.3.27 (protocol name is

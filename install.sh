@@ -105,7 +105,7 @@ fi
 set -Eeuo pipefail
 
 XHY_VERSION="1.3.0"
-XHY_BUILD="8f3e6abb7375"
+XHY_BUILD="b66b756c62dc"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -830,7 +830,12 @@ core_status() {
     printf 'Geodata  : %s\n' "$XRAY_ASSET"
     [[ -s "$XRAY_ASSET/geoip.dat" ]] && printf '  geoip.dat   %s bytes\n' "$(stat -c%s "$XRAY_ASSET/geoip.dat" 2>/dev/null || echo '?')"
     [[ -s "$XRAY_ASSET/geosite.dat" ]] && printf '  geosite.dat %s bytes\n' "$(stat -c%s "$XRAY_ASSET/geosite.dat" 2>/dev/null || echo '?')"
-    [[ -x "$CF_BIN" ]] && printf 'cloudflared: %s\n' "$("$CF_BIN" --version 2>&1 | head -1)"
+    if [[ -x "$CF_BIN" ]]; then
+        printf 'cloudflared: %s\n' "$("$CF_BIN" --version 2>&1 | head -1)"
+    fi
+    # 显式 return 0：最后一条若是 `[[ ... ]] && printf`，条件为假时函数返回 1，
+    # 在 `set -e` 下调用方（xhy check）会直接中断，自检报告只印一半。
+    return 0
 }
 
 # Xray-core gained a native Hysteria2 inbound in v26.3.27 (protocol name is
@@ -3543,7 +3548,9 @@ self_check() {
     fi
     mptcp="$(sysctl -n net.mptcp.enabled 2>/dev/null || echo '内核未暴露')"
     printf '内核 MPTCP: %s (应为 0)\n' "$mptcp"
-    [[ "$mptcp" == "1" ]] && warn "MPTCP 已启用，请执行 xhy bbr on 关闭它（钉死旧版时的关键缓解）"
+    if [[ "$mptcp" == "1" ]]; then
+        warn "MPTCP 已启用，请执行 xhy bbr on 关闭它（钉死旧版时的关键缓解）"
+    fi
     printf '%s\n' "--------------------------------------"
     bbr_status
     printf '%s\n' "--------------------------------------"
@@ -3562,7 +3569,9 @@ self_check() {
     if have_cmd ip6tables; then
         v6rules="$(ip6tables -S 2>/dev/null | grep -c "$FW_CHAIN" || true)"
         printf 'IPv6 链规则: %s 条\n' "${v6rules:-0}"
-        [[ "${v6rules:-0}" == "0" ]] && warn "IPv6 未受保护，SSH 可能绕过防爆破"
+        if [[ "${v6rules:-0}" == "0" ]]; then
+            warn "IPv6 未受保护，SSH 可能绕过防爆破"
+        fi
     else
         warn "未安装 ip6tables，IPv6 未受保护"
     fi
