@@ -25,16 +25,6 @@
 | 内存 | 依据物理内存与 cgroup `memory.max` 给 Xray 设 `GOMEMLIMIT`（取 1/4，下限 32MiB），128–256MB 小鸡不易被 OOM Kill |
 | 自更新 | `xhy update script` 下载新构建 → `bash -n` 语法检查 → 比对构建号 → 确认后原子替换；任一步失败本地脚本保持原样，旧版本自动备份在 `/etc/xray-hy/backups/`。克隆方式则走 `git pull --ff-only` |
 
-参考与致谢：`XTLS/Xray-core`、`XTLS/Xray-install`、`zxcvos/Xray-script`（交互式菜单、target 校验、规则开关）、`audsiui/xray-jb`（多节点注册表与四模式划分）、`0xevn/xray-reality-setup`（加固项与文档结构）、`ICMP-UNREACHABLE/Minimal-Xray-Script`、`miku111/XrayOnAlpine`。
-
-另外从 `driftray/easyxray` 借鉴了**校验后替换 + 配置快照回滚**、**切换 Xray 版本前备份二进制并在不兼容时自动换回**、**最低安全版本基线**和**诊断清单**这几项工程思路（它是 GPL-3.0、仅支持 Debian/Ubuntu + systemd、强依赖域名与 Nginx，架构与本项目不同，未复用其代码）。
-
-从 `0xdabiaoge/singbox-lite`（**已获作者授权阅读源码**）借鉴了跨脚本共享状态锁 + 原子写入、下载/更新后语法与版本校验再提交、按内存设 `GOMEMLIMIT`、日志自动清理。读源码后又发现几处我们自己的实现缺陷并修正：**服务操作必须显式关闭锁 fd（`9>&-`），否则 OpenRC 守护进程继承锁会让后续所有 `xhy` 命令死锁**；**事务快照要覆盖 config + 节点注册表 + 分片 + state 整套状态**，只存 config.json 回滚后会产生静默不一致；**用 `flock -n` 而非 `-w`**（BusyBox 不支持后者）；`memory.high` 与 `memory.max` 取较小值；`sha256sum` 缺失时用 `openssl dgst` 兜底。只借鉴实现思路、未复制其代码（该仓库无 LICENSE，且是 4 个 Shell 共 744 KB 的巨型单文件方案，功能覆盖双核心 / 中转 / 端口转发 / 订阅，与本项目轻量定位相反）。
-
-同类脚本调研时还参考了 `fscarmen/ArgoX`（2046★，Xray 只听 localhost、由 Argo 隧道对外，不暴露代理端口 —— 我们的 `tunnel` 模式同思路）、`Suysker/xray-agent`（安装前把证书库存 / DNS 解析 / 端口占用 / 网络栈状态列清楚再动手 → `xhy preflight`）、`whherui/xray-reality-hy2-ss`（Hysteria2 必须放行 **UDP**，我们因此在 iptables 与 ip6tables 都加了 UDP 端口放行）、`sincalaway/ArgoSB` 与 `miihhaa/v2ray-1agent`（多核心组合、命令生成器、订阅）。这些都只取了思路，未复用代码。
-
-IPv6 双栈防火墙与慢速爆破双窗口、DNS 并发查询取消的根因则来自本项目在一台真实 Alpine VPS 上的巡检发现。
-
 ---
 
 ## 2. 快速开始
