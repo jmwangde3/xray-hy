@@ -118,6 +118,7 @@ xhy check            # 已安装后的全量自检
 ```sh
 xhy add reality --port 443                 # 自动按 VPS 地区挑伪装站并校验
 xhy add reality --port 8443 --target www.example.com:443 --sni www.example.com
+xhy add reality --port 443 --target 1.2.3.4:443 --sni www.example.com   # 站点在 CDN 后：dest 用源站 IP、SNI 用域名
 xhy add direct  --port 8080 --host node.example.com
 xhy add xhttp   --port 8081 --reality     # XHTTP + REALITY
 xhy add tunnel  --port 10086 --domain node.example.com --token <CF_TUNNEL_TOKEN>
@@ -147,7 +148,7 @@ xhy check                                 # 全量环境自检
 | 防 SSH 爆破 | iptables `recent` **双窗口**：60 秒 10 次 + **1 小时 25 次**（阈值按正常运维用量校准——诊断工具/VS Code/scp 一轮就是 5-10 个连接；暴力破解是每小时成百上千次）；IPv4 / IPv6 双栈同时生效；缺 `xt_recent` 时降级并告警 |
 | CF Tunnel | 可选；WS 只监听 `127.0.0.1`，cloudflared 由独立服务托管，Token 存 0600 文件；分享链接按 CF 边缘 TLS 生成 |
 | 防火墙 | `safe`（默认）/ `strict` / `off`；**同时构建 iptables 与 ip6tables 链** —— 只防 IPv4 等于给 `:::22` 留了后门；每次变更前备份两个 family 的规则转储 |
-| 伪装站 | `conf/targets.tsv` 地区库（US/GB/JP/HK/TW/SG/FR/DE/IN/CA/AU/NL/…），按 VPS 出口国家自动匹配，逐个做 TLS 1.3、HTTP/2、无重定向、非 CDN 校验；支持 `xhy target` 指定地区或手动固定 target/SNI |
+| 伪装站 | `conf/targets.tsv` 地区库（US/GB/JP/HK/TW/SG/FR/DE/IN/CA/AU/NL/…），按 VPS 出口国家自动匹配，逐个做 TLS 1.3、HTTP/2、无重定向、非 CDN 校验；`xhy target` 可指定地区、手动固定 target/SNI、单独校验，或查看 target/dest、SNI、serverNames 的名词说明。目标站在 CDN 之后时支持「dest=源站 IP、SNI=域名」：`--target 1.2.3.4:443 --sni www.example.com`（交互菜单里写作 `1.2.3.4:443,sni=www.example.com`）|
 | 后续更新 | `xhy update script`（单文件：新构建整文件替换；克隆：git ff-only）/ `core` / `geodata` / `config`（重建全部节点）/ `all` |
 | 五种模式 | `direct`、`tunnel`、`reality`、`xhttp`、`hy2`（Xray 原生 Hysteria2 入站，UDP/QUIC + 自签证书 + `pinSHA256` 分享链接） |
 | 导出链接 | `xhy link --all` / `--uri` / `--qr`（服务器是 IPv4 字面量且开了双栈时自动附 **IPv6 变体链接**） |
@@ -156,7 +157,24 @@ xhy check                                 # 全量环境自检
 | 非交互更新 | `xhy update script --yes`（同一主版本序列自动确认；跨主版本再加 `--allow-major`） |
 | 额外补充 | 多节点并存与独立增删、**端口跨模式全局唯一检查**、**`DUAL_STACK=on` 双栈监听**、**`xhy preflight` 安装前只读预检**（内核修复线 / 端口 / 磁盘 / 内存 / MPTCP / GitHub 可达 / 依赖）、**Hysteria2 的 UDP 双栈放行与自签证书 pin**、节点注册表、**`flock` 并发锁（服务命令关闭锁 fd）**、配置变更原子校验+回滚、**最近 5 份整套状态快照 + `xhy rollback`**、更新 Xray 时二进制自动回滚、更新脚本后全量 `bash -n`、按内存/cgroup 设 `GOMEMLIMIT`、日志自动轮转、系统级关闭 MPTCP（钉死旧版的关键缓解）、私网/回国 IP/广告域名阻断开关、DoH 选择、日志级别与关闭、geodata 更新（带大小校验）、REALITY fallback 限速、系统自检报告、CLI 与菜单双入口、卸载可选保留配置 |
 
-### 版本策略：两个相互冲突的上游边界
+### 伪装站：target / dest / SNI / serverNames 是什么
+
+| 名词 | 含义 |
+|---|---|
+| `target`（= `dest`） | 服务端主动去连的**目的地址**（`IP:端口` 或 `域名:端口`）。REALITY 把认证失败的探测流量原样转发到这里，所以它必须是一个真实存在、长期稳定的 HTTPS 站点。 |
+| `SNI` | 客户端 TLS 握手时明文声明的域名（ClientHello 的 `server_name`）。服务端按它选证书，REALITY 也拿它判断这次访问像不像正常流量。 |
+| `serverNames` | Xray 配置字段，等于允许的 SNI 白名单，一般写一个域名；它必须被 target 的证书覆盖，否则回落握手会证书不匹配——看起来就是一台假站。 |
+
+**为什么有时要「IP 和域名分开填」**：目标站挂在 CDN 后面时，域名解析到的是 CDN 边缘 IP。此时 `target` 若也写域名，REALITY 就在替 CDN 做转发（特征不像源站，Xray 官方把这叫「变成开放转发器」）。正确做法是 `target` 写源站 IP、`SNI` 仍写域名：
+
+```sh
+xhy add reality --port 443 --target 1.2.3.4:443 --sni www.example.com
+# 或交互菜单：xhy target → 3) 手动指定 target / SNI → 1.2.3.4:443,sni=www.example.com
+```
+
+校验会带 `curl --resolve www.example.com:443:1.2.3.4` 去打这台 IP，验的是**真实回落到源站**时证书是否覆盖该域名、是否没有 CDN 头，而不是公共 DNS 解析出的边缘节点。target 是 IP 却没给 SNI 时脚本会直接拒绝（否则会渲染出 `SNI=IP` 的废节点）。
+
+## 版本策略：两个相互冲突的上游边界
 
 `pinned` 默认钉死 **v26.3.27**。这不是随便选的，而是因为 Xray 上游有两处互不相容的变化：
 
@@ -315,7 +333,7 @@ bash test/run-all.sh     # bash -n + 渲染 + hy2 + 生命周期，共 67 项断
 不同发行版、内核、容器环境差异较大，请务必：
 
 1. 先在一台**可随时重置的一次性 VPS** 上跑 `xhy install`，再看 `xhy check` 输出；
-2. REALITY 部署前执行 `xhy target` → `5) 校验指定域名`，确认目标站点当前仍满足 TLS 1.3 / H2 / 非 CDN；`conf/targets.tsv` 只是初始候选，站点会变；
+2. REALITY 部署前执行 `xhy target` → `5) 校验指定域名或 IP+SNI`（IP 写法 `1.2.3.4:443,sni=www.example.com`），确认目标站点当前仍满足 TLS 1.3 / H2 / 非 CDN；`conf/targets.tsv` 只是初始候选，站点会变；
 3. `direct` 与未加 `--reality` 的 `xhttp` 是明文传输，公网使用请自行套 TLS 终结层；
 4. OpenVZ / LXC 等容器通常无法加载 `tcp_bbr`、无法写 sysctl，脚本会跳过并给出说明；
 5. `xhy core channel latest` 除上游格式变更风险外（历史上 `xray x25519` 输出从 `Password` 改为 `Password (PublicKey)` 曾让多个脚本的 REALITY 安装必定失败），**≥ v26.9.8 还会让 sing-box / mihomo 客户端连不上 REALITY**（#4520）。本项目解析器已兼容两种密钥输出格式，`update core` 也会在配置不兼容时自动换回旧二进制；升级前请先读上面的「版本策略：两个相互冲突的上游边界」；
