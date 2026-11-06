@@ -138,5 +138,7 @@ echo "=== self-check exit codes ==="
 chk "core_status 缺 cloudflared 仍返回 0" "CF_BIN=/nonexistent/cloudflared core_status >/dev/null"
 chk "firewall_status --brief 返回 0"      "firewall_status --brief >/dev/null"
 chk "firewall_status --brief 只有四行"     "[[ \$(firewall_status --brief | wc -l) -eq 4 ]]"
+# 裸 sed s|MEMLIMIT|...| 会把 GOMEMLIMIT 的子串一起替换成 GO108MiB，变量名坏掉
+chk "OpenRC 只用带引号锚点替换 GOMEMLIMIT"  "grep -qF 'GOMEMLIMIT=\"MEMLIMIT\"' '$REPO/lib/service.sh'"
 
 summary

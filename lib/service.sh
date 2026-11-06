@@ -196,7 +196,10 @@ start_pre() {
 EOF
         } >/etc/init.d/xray-hy
         chmod 0755 /etc/init.d/xray-hy
-        sed -i "s|MEMLIMIT|${memlimit}|" /etc/init.d/xray-hy
+        # 只能替换带引号的值：裸 "s|MEMLIMIT|$memlimit|" 会把 GOMEMLIMIT 里的
+        # 子串一起改掉，产出 GO108MiB="108MiB" —— 变量名坏了，Go 根本读不到，
+        # 内存上限从未生效过（小内存机器会 OOM）。
+        sed -i "s|GOMEMLIMIT=\"MEMLIMIT\"|GOMEMLIMIT=\"${memlimit}\"|" /etc/init.d/xray-hy
         if [[ -n "$sup_note" ]]; then warn "$sup_note"; fi
     fi
     if [[ "$XHY_INIT" == "systemd" ]]; then

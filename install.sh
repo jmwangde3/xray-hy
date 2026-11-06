@@ -105,7 +105,7 @@ fi
 set -Eeuo pipefail
 
 XHY_VERSION="1.3.0"
-XHY_BUILD="ca8eebded5f5"
+XHY_BUILD="64f65bb02bbe"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -1065,7 +1065,10 @@ start_pre() {
 EOF
         } >/etc/init.d/xray-hy
         chmod 0755 /etc/init.d/xray-hy
-        sed -i "s|MEMLIMIT|${memlimit}|" /etc/init.d/xray-hy
+        # 只能替换带引号的值：裸 "s|MEMLIMIT|$memlimit|" 会把 GOMEMLIMIT 里的
+        # 子串一起改掉，产出 GO108MiB="108MiB" —— 变量名坏了，Go 根本读不到，
+        # 内存上限从未生效过（小内存机器会 OOM）。
+        sed -i "s|GOMEMLIMIT=\"MEMLIMIT\"|GOMEMLIMIT=\"${memlimit}\"|" /etc/init.d/xray-hy
         if [[ -n "$sup_note" ]]; then warn "$sup_note"; fi
     fi
     if [[ "$XHY_INIT" == "systemd" ]]; then
