@@ -21,7 +21,7 @@
 | 防火墙 | 只维护自己的 iptables 链，不 flush `INPUT`、不覆盖用户已有规则；开机时幂等重建而非 `iptables-restore` 全量覆盖。 |
 | 凭证 | 节点 `.env` 权限 0600，目录 0700，Tunnel Token 单独 0600；分享链接输出时提示等同凭证。 |
 | REALITY | 上游官方警告：认证失败的流量会被转发到 target，CDN 后面的站点会让服务器变成开放转发器。因此内置 TLS 1.3 / H2 / 无跳转 / 非 CDN 校验，并默认加上 `limitFallback*` 限速。 |
-| 并发与磁盘 | 全局 `flock` 串行化所有配置变更，避免两个 `xhy` 实例交错写碎片导致丢节点；自动生成 logrotate 策略（weekly / 保留 4 份 / 32M 触发），日志不会写满小磁盘 |
+| 并发与磁盘 | 全局 `flock` 串行化所有配置变更，且服务命令显式关闭锁 fd（防 OpenRC 守护进程继承导致死锁）；**快照是整套状态 tar**（config + confs + nodes + state），回滚不会出现配置与节点注册表不一致；自动生成 logrotate 策略（weekly / 保留 4 份 / 32M 触发） |
 | 内存 | 依据物理内存与 cgroup `memory.max` 给 Xray 设 `GOMEMLIMIT`（取 1/4，下限 32MiB），128–256MB 小鸡不易被 OOM Kill |
 | 自更新 | `git pull --ff-only` 后对入口与所有 `lib/*.sh` 跑 `bash -n`，任一失败整组回滚到更新前 commit，不会留下跑不起来的入口 |
 
@@ -29,7 +29,7 @@
 
 另外从 `driftray/easyxray` 借鉴了**校验后替换 + 配置快照回滚**、**切换 Xray 版本前备份二进制并在不兼容时自动换回**、**最低安全版本基线**和**诊断清单**这几项工程思路（它是 GPL-3.0、仅支持 Debian/Ubuntu + systemd、强依赖域名与 Nginx，架构与本项目不同，未复用其代码）。
 
-从 `0xdabiaoge/singbox-lite` 借鉴了**跨脚本共享状态锁 + 原子写入**、**下载/更新后做语法与版本校验再提交**、**按内存设 `GOMEMLIMIT`** 和**日志自动清理**四项（该仓库无 LICENSE，只借鉴思路、未复用任何代码；它是 4 个 Shell 文件共 744 KB 的巨型单文件方案，且功能覆盖双核心 / 中转 / 端口转发 / 订阅，与本项目轻量定位相反）。
+从 `0xdabiaoge/singbox-lite`（**已获作者授权阅读源码**）借鉴了跨脚本共享状态锁 + 原子写入、下载/更新后语法与版本校验再提交、按内存设 `GOMEMLIMIT`、日志自动清理。读源码后又发现几处我们自己的实现缺陷并修正：**服务操作必须显式关闭锁 fd（`9>&-`），否则 OpenRC 守护进程继承锁会让后续所有 `xhy` 命令死锁**；**事务快照要覆盖 config + 节点注册表 + 分片 + state 整套状态**，只存 config.json 回滚后会产生静默不一致；**用 `flock -n` 而非 `-w`**（BusyBox 不支持后者）；`memory.high` 与 `memory.max` 取较小值；`sha256sum` 缺失时用 `openssl dgst` 兜底。只借鉴实现思路、未复制其代码（该仓库无 LICENSE，且是 4 个 Shell 共 744 KB 的巨型单文件方案，功能覆盖双核心 / 中转 / 端口转发 / 订阅，与本项目轻量定位相反）。
 
 IPv6 双栈防火墙与慢速爆破双窗口、DNS 并发查询取消的根因则来自本项目在一台真实 Alpine VPS 上的巡检发现。
 
@@ -72,7 +72,7 @@ xhy check                                 # 全量环境自检
 |---|---|
 | 多系统 | Debian / Ubuntu / Devuan (systemd)、Alpine (OpenRC)、RHEL 系 (systemd)；x86_64 与 aarch64 |
 | BBR | Debian 写 `/etc/sysctl.d/`；**Alpine 额外**写 `/etc/modules-load.d/xray-hy.conf` 加载 `tcp_bbr`/`sch_fq`、追加 `/etc/sysctl.conf`、`rc-update add sysctl boot`（Alpine 的 sysctl 服务在 boot runlevel 且默认不加载 BBR 模块）。容器环境自动跳过并说明原因 |
-| Xray 版本 | `xhy core channel pinned`（钉死 `v26.10.31`）/ `latest` / `vX.Y.Z` 自定义；切换后 `xhy core update` 重装并校验配置兼容性 |
+| Xray 版本 | `xhy core channel pinned`（钉死 **`v26.3.27`**，保 sing-box / mihomo 客户端兼容）/ `latest` / `vX.Y.Z` 自定义；切换时提示 #4520 与 MPTCP 两条边界，`xhy core update` 重装并校验配置兼容性 |
 | 自动启动 | systemd unit 或 OpenRC init 脚本，`start_pre` 里先做配置校验；`Restart=on-failure` / OpenRC 自动重启策略 |
 | BT 阻断 | `sniffing` + `routing` 的 `protocol: ["bittorrent"]` → blackhole，开关 `BLOCK_BT` |
 | 防 SSH 爆破 | iptables `recent` **双窗口**：60 秒 5 次 + **1 小时 8 次**（后者专治「每几分钟来几发」的慢速爆破）；IPv4 / IPv6 双栈同时生效；缺 `xt_recent` 时降级并告警 |
@@ -82,17 +82,26 @@ xhy check                                 # 全量环境自检
 | 后续更新 | `xhy update script`（git ff-only） / `core` / `geodata` / `config`（重建全部节点）/ `all` |
 | 四种模式 | `direct`、`tunnel`、`reality`、`xhttp` |
 | 导出链接 | `xhy link --all` / `--uri` / `--qr` |
-| 额外补充 | 多节点并存与独立增删、节点注册表、**`flock` 并发锁**、配置变更原子校验+回滚、**最近 5 份配置快照 + `xhy rollback`**、更新 Xray 时二进制自动回滚、更新脚本后全量 `bash -n`、按内存设 `GOMEMLIMIT`、日志自动轮转、系统级关闭 MPTCP、私网/回国 IP/广告域名阻断开关、DoH 选择、日志级别与关闭、geodata 更新（带大小校验）、REALITY fallback 限速、系统自检报告（含版本安全线 / MPTCP / IPv6 检查）、CLI 与菜单双入口、卸载可选保留配置 |
+| 额外补充 | 多节点并存与独立增删、**端口跨模式全局唯一检查**、**`DUAL_STACK=on` 让新节点监听 `::` 双栈**、节点注册表、**`flock` 并发锁（服务命令关闭锁 fd）**、配置变更原子校验+回滚、**最近 5 份整套状态快照 + `xhy rollback`**、更新 Xray 时二进制自动回滚、更新脚本后全量 `bash -n`、按内存/cgroup 设 `GOMEMLIMIT`、日志自动轮转、系统级关闭 MPTCP（钉死旧版的关键缓解）、私网/回国 IP/广告域名阻断开关、DoH 选择、日志级别与关闭、geodata 更新（带大小校验）、REALITY fallback 限速、系统自检报告（含两条版本边界 / MPTCP / IPv6 检查）、CLI 与菜单双入口、卸载可选保留配置 |
 
-### 版本策略与安全基线
+### 版本策略：两个相互冲突的上游边界
 
-`pinned` 默认钉死 **v26.10.31** 而不是更早的版本，原因是一条真实的安全问题：
+`pinned` 默认钉死 **v26.3.27**。这不是随便选的，而是因为 Xray 上游有两处互不相容的变化：
 
-> `XTLS/Xray-core#7291` / `CVE-2026-98432`（Linux 内核 TCP 竞态，CVSS 9.8）：Go 1.24+ 默认在监听器上启用 MPTCP，暴露在公网的 Go 代理服务端可被远程利用提权到 root。Xray 从 **v26.10.31** 起默认关闭 MPTCP。
+| 边界 | 影响 |
+|---|---|
+| **≥ v26.9.8** | `XTLS/REALITY` 升级后，服务端要求 ClientHello 携带 `X25519MLKEM768` key share（且排在普通 X25519 之前）。**sing-box / mihomo 的 uTLS chrome 指纹不带它**，这些客户端连 REALITY 会一律报 `reality verification failed`。见 [SagerNet/sing-box#4520](https://github.com/SagerNet/sing-box/issues/4520)，1.12.25 / 1.14.0 / 1.15.0-alpha 均受影响；Xray 官方客户端不受影响。 |
+| **≥ v26.10.31** | Xray 才默认关闭 MPTCP，修掉 [XTLS#7291 / CVE-2026-98432](https://github.com/XTLS/Xray-core/pull/7291)（Linux 内核 TCP 竞态，CVSS 9.8；Go 1.24+ 默认在监听器启用 MPTCP，公网 Go 代理可被远程提权到 root）。 |
 
-因此本脚本还会：在内核暴露 `net.mptcp.enabled` 时把它设为 `0`；`xhy check` 报告当前版本与安全线、MPTCP 状态；`xhy core channel vX.Y.Z` 允许强制钉死旧版本，但会打印明确警告。切换版本前备份当前二进制，若新核心无法加载现有配置则自动换回。
+也就是说 **v26.9.8 ~ v26.10.30 两头不讨好**：客户端不兼容，MPTCP 又还没修。所以本项目默认选 v26.3.27 保住客户端兼容性，并用三层措施压住 MPTCP 暴露面：
 
-`xhy core channel latest` 拉取最新正式版；`pinned` 用于「上游格式变更不破坏生产」的场景（历史上 `xray x25519` 输出格式变化曾让多个脚本的 REALITY 安装必定失败）。生产环境建议定期评估把 pinned 版本往前推，而不是永远不升。
+- **进程级**：systemd unit / OpenRC init 给 Xray 注入 `GODEBUG=multipathtcp=0`。即使 sysctl 被重置，Go 1.24+ 监听器也主动使用普通 TCP；
+- **内核级**：`xhy bbr on` 在内核暴露 `net.mptcp.enabled` 时设为 `0`（实测 Go 会自动回退普通 TCP、端口照常监听），并把 `net.ipv4.tcp_migrate_req` 设为 `0` 关掉该 CVE 的第二条路径；已存在的 listener 不会变，改完要重启服务；
+- **可见性**：`xhy check` / `xhy bbr status` 报告版本相对两条边界的位置、MPTCP 与 migrate_req 状态；`xhy core channel latest|vX.Y.Z` 切换时提示对应风险但**不阻止**选择；切换前备份二进制，新核心加载不了现有配置会自动换回。
+
+> ⚠️ **这些是缓解，不是修复。** CVE-2026-98432 的根因在普通 IPv4 TCP 路径的 use-after-free，Go 团队与各发行商都明确表示「关掉 MPTCP 不等于安全」。真正根治是**安装已修补的内核并重启**（Debian 12/13 已发布修复版本）。容器的 `net.mptcp.enabled` 按 network namespace 生效，需在容器内也设置；还可用 `nft ... tcp flags syn ip hdrlength != 5 counter drop` 丢弃带 IPv4 options 的 SYN 进一步收窄。
+
+> 如果哪天 sing-box / mihomo 修好了 uTLS 指纹，或者你的客户端全是 Xray 系，就可以把通道切到 `latest` 吃到 MPTCP 官方修复；在那之前保持 `pinned` + 内核 MPTCP=0 是更稳的组合。
 
 ---
 
@@ -175,13 +184,15 @@ xhy update all        # 以上全部 + 自检
 
 脚本更新**不会**触碰 `/etc/xray-hy`。`update script` 拉取后会对 `xhy` 和所有 `lib/*.sh` 跑 `bash -n`，任一文件语法错误就整组回滚到更新前的 commit；所有会改配置的命令都持有全局 `flock`，并发执行不会互相踩。
 
-若配置渲染或校验失败，新增节点会被回滚，已有配置保持原样。每次重建配置都会先把上一份可用配置存进 `snapshots/`（保留最近 5 份）：
+若配置渲染或校验失败，新增节点会被回滚，已有配置保持原样。每次重建配置都会把**整套可变状态**（`config.json` + `confs/` + `nodes/` + `state.env`）打包进 `snapshots/`（保留最近 5 份），回滚时整套恢复，不会出现「配置回去了但节点凭证还留着」的不一致：
 
 ```sh
 xhy snapshots          # 列出快照
 xhy rollback           # 回滚到最近一份
-xhy rollback /etc/xray-hy/snapshots/config.20261106120000.json   # 指定快照
+xhy rollback /etc/xray-hy/snapshots/state.20261106120000.tar.gz   # 指定快照
 ```
+
+回滚前会自动把当前状态另存为 `state.pre-rollback.*.tar.gz`，所以回滚本身也可撤销。
 
 `xhy update core` 在安装新 Xray 前会备份当前二进制；若新核心无法加载现有配置，自动换回原版本。更早的二进制副本也留在 `/etc/xray-hy/backups/`。
 
@@ -195,7 +206,7 @@ xhy rollback /etc/xray-hy/snapshots/config.20261106120000.json   # 指定快照
 2. REALITY 部署前执行 `xhy target` → `5) 校验指定域名`，确认目标站点当前仍满足 TLS 1.3 / H2 / 非 CDN；`conf/targets.tsv` 只是初始候选，站点会变；
 3. `direct` 与未加 `--reality` 的 `xhttp` 是明文传输，公网使用请自行套 TLS 终结层；
 4. OpenVZ / LXC 等容器通常无法加载 `tcp_bbr`、无法写 sysctl，脚本会跳过并给出说明；
-5. `xhy core channel latest` 存在上游格式变更风险（历史上 `xray x25519` 输出从 `Password` 改为 `Password (PublicKey)` 曾导致多个脚本 REALITY 安装失败）。本项目解析器已兼容两种格式，且 `update core` 会在新版本不兼容时自动换回旧二进制；但钉死版本也不要长期不升，见上面的「版本策略与安全基线」；
+5. `xhy core channel latest` 除上游格式变更风险外（历史上 `xray x25519` 输出从 `Password` 改为 `Password (PublicKey)` 曾让多个脚本的 REALITY 安装必定失败），**≥ v26.9.8 还会让 sing-box / mihomo 客户端连不上 REALITY**（#4520）。本项目解析器已兼容两种密钥输出格式，`update core` 也会在配置不兼容时自动换回旧二进制；升级前请先读上面的「版本策略：两个相互冲突的上游边界」；
 6. cloudflared raw 二进制没有官方校验和，无法做密码学验证；介意的话请改用 Cloudflare 官方软件源或 `.deb` 包自行替换 `$CF_BIN`；
 7. `xhy firewall strict` 与任何会改动网络的操作，请确保有带外控制台（VNC / 救援模式）；
 8. Xray 26.10.31 起已对 **WebSocket 传输发出弃用提示**。`direct` 与 `tunnel` 两个 WS 模式短期可用，但长期使用请关注上游动向；CF Tunnel 目前仍依赖 WS，暂无等价替代。需要长期稳定的直连优先选 `reality` 或 `xhttp --reality`。

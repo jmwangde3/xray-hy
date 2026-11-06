@@ -24,29 +24,31 @@ svc_disable() {
     fi
 }
 
-svc_start()   { if [[ "$XHY_INIT" == "systemd" ]]; then systemctl start "$1";   else rc-service "$1" start;   fi; }
-svc_stop()    { if [[ "$XHY_INIT" == "systemd" ]]; then systemctl stop "$1" >/dev/null 2>&1 || true; else rc-service "$1" stop >/dev/null 2>&1 || true; fi; }
-svc_restart() { if [[ "$XHY_INIT" == "systemd" ]]; then systemctl restart "$1"; else rc-service "$1" restart; fi; }
-svc_status()  { if [[ "$XHY_INIT" == "systemd" ]]; then systemctl status "$1" --no-pager -l; else rc-service "$1" status; fi; }
-svc_active()  { if [[ "$XHY_INIT" == "systemd" ]]; then systemctl is-active --quiet "$1"; else rc-service "$1" status >/dev/null 2>&1; fi; }
+# Close fd 9 (the global config lock) on every service command. OpenRC forks
+# daemons from the calling shell: if Xray inherits the lock fd, the lock stays
+# held for the lifetime of the service and every later `xhy` call deadlocks.
+# Same pattern as singbox-lite's explicit `9>&- 219>&-` on service actions.
+svc_start()   { if [[ "$XHY_INIT" == "systemd" ]]; then systemctl start "$1" 9>&-;   else rc-service "$1" start 9>&-;   fi; }
+svc_stop()    { if [[ "$XHY_INIT" == "systemd" ]]; then systemctl stop "$1" 9>&- >/dev/null 2>&1 || true; else rc-service "$1" stop 9>&- >/dev/null 2>&1 || true; fi; }
+svc_restart() { if [[ "$XHY_INIT" == "systemd" ]]; then systemctl restart "$1" 9>&-; else rc-service "$1" restart 9>&-; fi; }
+svc_status()  { if [[ "$XHY_INIT" == "systemd" ]]; then systemctl status "$1" --no-pager -l 9>&-; else rc-service "$1" status 9>&-; fi; }
+svc_active()  { if [[ "$XHY_INIT" == "systemd" ]]; then systemctl is-active --quiet "$1" 9>&-; else rc-service "$1" status 9>&- >/dev/null 2>&1; fi; }
 
 # Bound the Go runtime heap on small VPS / memory-limited containers. singbox-lite
 # does this via GOMEMLIMIT; without it a 128-256MB box can OOM-kill Xray.
 compute_gomemlimit() {
-    local kb cg mb
+    local kb cg mb f
     kb="$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)"
-    if [[ -r /sys/fs/cgroup/memory.max ]]; then
-        cg="$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo max)"
-        if [[ "$cg" =~ ^[0-9]+$ ]]; then
-            cg=$((cg / 1024))
-            if (( cg > 0 && cg < kb )); then kb="$cg"; fi
-        fi
-    elif [[ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then
-        cg="$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo 0)"
-        if [[ "$cg" =~ ^[0-9]+$ ]] && (( cg > 0 && cg / 1024 < kb )); then
-            kb=$((cg / 1024))
-        fi
-    fi
+    # cgroup v2 exposes both a hard limit (memory.max) and a soft throttle
+    # (memory.high); take the smaller of the two, then min() with physical RAM.
+    for f in /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.high \
+             /sys/fs/cgroup/memory/memory.limit_in_bytes; do
+        [[ -r "$f" ]] || continue
+        cg="$(cat "$f" 2>/dev/null || echo max)"
+        [[ "$cg" =~ ^[0-9]+$ ]] || continue
+        cg=$((cg / 1024))
+        if (( cg > 0 && cg < kb )); then kb="$cg"; fi
+    done
     mb=$((kb / 1024 / 4))
     (( mb < 32 )) && mb=32
     (( mb > 512 )) && mb=512
@@ -111,6 +113,9 @@ Type=simple
 ExecStart=${XRAY_BIN} run -c ${XHY_ETC}/config.json
 Environment=XRAY_LOCATION_ASSET=${XRAY_ASSET}
 Environment=GOMEMLIMIT=${memlimit}
+# Defence in depth for pinned Xray < v26.10.31: Go 1.24+ listeners ask the
+# kernel for MPTCP by default. Force plain TCP even if the sysctl is reset.
+Environment=GODEBUG=multipathtcp=0
 Restart=on-failure
 RestartSec=3
 LimitNOFILE=1048576
@@ -135,6 +140,7 @@ output_log="/var/log/xray-hy/xray.log"
 error_log="/var/log/xray-hy/xray.err"
 export XRAY_LOCATION_ASSET="/usr/local/share/xray"
 export GOMEMLIMIT="MEMLIMIT"
+export GODEBUG="multipathtcp=0"
 
 depend() {
     need net

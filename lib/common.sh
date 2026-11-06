@@ -15,12 +15,18 @@ XRAY_BIN="${XRAY_BIN:-/usr/local/bin/xray}"
 XRAY_ASSET="${XRAY_ASSET:-/usr/local/share/xray}"
 CF_BIN="${CF_BIN:-/usr/local/bin/cloudflared}"
 
-# v26.10.31 is the first Xray release that disables MPTCP by default.
-# XTLS/Xray-core#7291 / CVE-2026-98432 (CVSS 9.8): Go 1.24+ enables MPTCP
-# on listeners, which makes an exposed Go proxy trivially root-able remotely.
-# Older pinned versions remain possible but always produce a loud warning.
-XHY_PINNED_VERSION="v26.10.31"
-XHY_MIN_SAFE_VERSION="v26.10.31"
+# Two upstream boundaries pull in opposite directions:
+#   >= v26.9.8    REALITY server requires X25519MLKEM768 in the ClientHello.
+#                 sing-box / mihomo uTLS cannot send it, so those clients fail
+#                 with "reality verification failed" (SagerNet/sing-box#4520).
+#   >= v26.10.31  Xray disables MPTCP by default (XTLS#7291 / CVE-2026-98432,
+#                 CVSS 9.8): Go 1.24+ otherwise exposes a remotely root-able
+#                 MPTCP listener.
+# We pin v26.3.27 by default for client compatibility and mitigate the MPTCP
+# exposure at the kernel level with net.mptcp.enabled=0 (hardening.sh).
+XHY_PINNED_VERSION="v26.3.27"
+XHY_PQ_BREAK_VERSION="v26.9.8"
+XHY_MPTCP_FIXED_VERSION="v26.10.31"
 XHY_RELEASE_DL="https://github.com/XTLS/Xray-core/releases/download"
 XHY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases"
 XHY_CF_DL="https://github.com/cloudflare/cloudflared/releases/latest/download"
@@ -215,7 +221,15 @@ fetch() {
     curl -fL --retry 3 --retry-delay 2 --connect-timeout 10 -m 120 -sS "$url" -o "$dest"
 }
 
-sha256_file() { sha256sum "$1" | awk '{print $1}'; }
+sha256_file() {
+    if have_cmd sha256sum; then
+        sha256sum "$1" | awk '{print $1}'
+    elif have_cmd openssl; then
+        openssl dgst -sha256 "$1" | awk '{print $NF}'
+    else
+        die "缺少 sha256sum / openssl，无法校验下载内容"
+    fi
+}
 
 # Force-verified download of an Xray release archive.
 # Xray publishes <asset>.dgst files containing the SHA-256 of each archive.

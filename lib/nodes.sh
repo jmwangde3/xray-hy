@@ -9,6 +9,23 @@ node_frag()   { printf '%s/%s_%s.json' "$XHY_CONFDIR" "$1" "$2"; }
 node_exists() { [[ -f "$(node_file "$1" "$2")" ]]; }
 node_count()  { find "$XHY_NODES" -maxdepth 1 -name '*.env' -type f 2>/dev/null | wc -l; }
 
+# A port must be unique across ALL modes, not just within one mode.
+port_used_by_node() {
+    local p="$1" f v
+    for f in "$XHY_NODES"/*.env; do
+        [[ -f "$f" ]] || continue
+        v="$(grep -m1 '^PORT=' "$f" 2>/dev/null | cut -d= -f2-)"
+        if [[ "$v" == "$p" ]]; then basename "$f" .env; return 0; fi
+    done
+    return 1
+}
+
+# "::" listens on both v4 and v6 (when bindv6only=0). Opt-in because some VPS
+# ship with IPv6 disabled, where "::" would fail to bind at all.
+listen_addr() {
+    if [[ "$(state_get DUAL_STACK off)" == "on" ]]; then printf '::'; else printf '0.0.0.0'; fi
+}
+
 node_load() {
     local f="$1" line key val
     MODE=""; PORT=""; PUBLIC=""; UUID=""; NODE_PATH=""; NODE_HOST=""
@@ -75,15 +92,20 @@ outbounds_json() {
 rebuild_config() {
     local joined="" sep="" f snap n=0
     init_dirs
-    # Snapshot the last known-good config; keep the 5 most recent. This is the
-    # safety net for `xhy rollback` (inspired by easyxray's apply/rollback).
+    # Snapshot the WHOLE mutable state, not just config.json: restoring only
+    # the config while leaving a newly added node's .env / fragment behind
+    # produces a silently inconsistent deployment. Keep the 5 most recent.
     if [[ -s "$XHY_ETC/config.json" ]]; then
-        snap="$XHY_SNAPSHOTS/config.$(date +%Y%m%d%H%M%S).json"
-        cp -a "$XHY_ETC/config.json" "$snap" 2>/dev/null || true
+        snap="$XHY_SNAPSHOTS/state.$(date +%Y%m%d%H%M%S).tar.gz"
+        if tar czf "$snap" -C "$XHY_ETC" config.json confs nodes state.env 2>/dev/null; then
+            chmod 600 "$snap" 2>/dev/null || true
+        else
+            rm -f "$snap"
+        fi
         while IFS= read -r f; do
             n=$((n + 1))
             if (( n > 5 )); then rm -f "$f"; fi
-        done < <(ls -1t "$XHY_SNAPSHOTS"/config.*.json 2>/dev/null)
+        done < <(ls -1t "$XHY_SNAPSHOTS"/state.*.tar.gz 2>/dev/null)
     fi
     for f in "$XHY_CONFDIR"/*.json; do
         [[ -s "$f" ]] || continue
@@ -124,7 +146,7 @@ render_inbound() {
 render_direct() {
     cat <<EOF
 {
-  "listen": "0.0.0.0", "port": ${PORT}, "protocol": "vless",
+  "listen": "$(listen_addr)", "port": ${PORT}, "protocol": "vless",
   "tag": "in-direct-${PORT}",
   "settings": { "clients": [ { "id": "${UUID}", "email": "direct-${PORT}" } ], "decryption": "none" },
   "streamSettings": {
@@ -154,7 +176,7 @@ EOF
 render_reality() {
     cat <<EOF
 {
-  "listen": "0.0.0.0", "port": ${PORT}, "protocol": "vless",
+  "listen": "$(listen_addr)", "port": ${PORT}, "protocol": "vless",
   "tag": "in-reality-${PORT}",
   "settings": {
     "clients": [ { "id": "${UUID}", "flow": "xtls-rprx-vision", "email": "reality-${PORT}" } ],
@@ -198,7 +220,7 @@ EOF
     fi
     cat <<EOF
 {
-  "listen": "0.0.0.0", "port": ${PORT}, "protocol": "vless",
+  "listen": "$(listen_addr)", "port": ${PORT}, "protocol": "vless",
   "tag": "in-xhttp-${PORT}",
   "settings": { "clients": [ { "id": "${UUID}", "email": "xhttp-${PORT}" } ], "decryption": "none" },
   "streamSettings": {
@@ -250,7 +272,9 @@ node_add() {
         *) die "模式只能是 direct / tunnel / reality / xhttp" ;;
     esac
     valid_port "$port" || die "端口不合法: $port"
-    node_exists "$mode" "$port" && die "节点 ${mode}_${port} 已存在，请先删除或使用其它端口。"
+    local clash
+    clash="$(port_used_by_node "$port")" || true
+    [[ -n "$clash" ]] && die "端口 $port 已被节点 ${clash} 占用（不同模式也不能共用端口）"
     need_root
     init_dirs
     [[ -x "$XRAY_BIN" ]] || die "尚未安装 Xray，请先运行: xhy install"
@@ -410,24 +434,30 @@ node_rebuild_all() {
 
 list_snapshots() {
     local f
-    if ! ls "$XHY_SNAPSHOTS"/config.*.json >/dev/null 2>&1; then
+    if ! ls "$XHY_SNAPSHOTS"/state.*.tar.gz >/dev/null 2>&1; then
         warn "暂无快照"; return 0
     fi
-    for f in $(ls -1t "$XHY_SNAPSHOTS"/config.*.json 2>/dev/null); do
+    for f in $(ls -1t "$XHY_SNAPSHOTS"/state.*.tar.gz 2>/dev/null); do
         printf '%s  (%s bytes)\n' "$f" "$(stat -c%s "$f" 2>/dev/null || echo '?')"
     done
 }
 
 rollback_config() {
-    local target="${1:-}"
+    local target="${1:-}" pre
     need_root
     if [[ -z "$target" ]]; then
-        target="$(ls -1t "$XHY_SNAPSHOTS"/config.*.json 2>/dev/null | head -1)"
+        target="$(ls -1t "$XHY_SNAPSHOTS"/state.*.tar.gz 2>/dev/null | head -1)"
     fi
-    [[ -s "$target" ]] || die "没有可用的配置快照"
-    cp -a "$XHY_ETC/config.json" "$XHY_SNAPSHOTS/config.pre-rollback.$(date +%s).json" 2>/dev/null || true
-    cp -a "$target" "$XHY_ETC/config.json"
-    xray_config_test || die "快照配置校验失败，未重载服务"
+    [[ -s "$target" ]] || die "没有可用的状态快照（快照格式在最近一次更新后改为 state.*.tar.gz）"
+    # Save the state we are about to replace, so the rollback itself is undoable.
+    pre="$XHY_SNAPSHOTS/state.pre-rollback.$(date +%s).tar.gz"
+    tar czf "$pre" -C "$XHY_ETC" config.json confs nodes state.env 2>/dev/null || true
+    chmod 600 "$pre" 2>/dev/null || true
+    rm -f "$XHY_NODES"/*.env "$XHY_CONFDIR"/*.json
+    tar xzf "$target" -C "$XHY_ETC" || die "快照解包失败，当前状态已另存为 $pre"
+    chmod 600 "$XHY_ETC/config.json" "$XHY_ETC/state.env" 2>/dev/null || true
+    chmod 700 "$XHY_NODES" 2>/dev/null || true
+    xray_config_test || die "快照配置校验失败，未重载服务（当前状态备份: $pre）"
     config_reload
-    ok "已回滚到 $target"
+    ok "已回滚整套状态到 $target（含节点注册表与配置分片）"
 }

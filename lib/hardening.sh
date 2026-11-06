@@ -58,6 +58,11 @@ EOF
     else
         state_set MPTCP_STATUS "kernel-key-absent"
     fi
+    # CVE-2026-98432 also has a request-socket-migration path.
+    if [[ -e /proc/sys/net/ipv4/tcp_migrate_req ]]; then
+        printf '\n# CVE-2026-98432 secondary path\nnet.ipv4.tcp_migrate_req = 0\n' >>"$sysctl_file"
+        sysctl -w net.ipv4.tcp_migrate_req=0 >/dev/null 2>&1 || true
+    fi
     if sysctl -p "$sysctl_file" >/dev/null 2>&1 || sysctl --system >/dev/null 2>&1; then
         state_set BBR_STATUS "on"
         ok "BBR 已启用 ($(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null))"
@@ -72,6 +77,7 @@ bbr_status() {
     printf 'qdisc    : %s\n' "$(sysctl -n net.core.default_qdisc 2>/dev/null || echo '?')"
     printf '可用算法 : %s\n' "$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || echo '?')"
     printf 'MPTCP    : %s (应为 0)\n' "$(sysctl -n net.mptcp.enabled 2>/dev/null || echo '内核未暴露')"
+    printf 'migrate_req: %s (应为 0)\n' "$(sysctl -n net.ipv4.tcp_migrate_req 2>/dev/null || echo '内核未暴露')"
     printf '脚本状态 : %s\n' "$(state_get BBR_STATUS 'unset')"
 }
 

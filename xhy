@@ -53,8 +53,8 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
   配置
     config                      路由/DNS/日志开关菜单（也可直接 set）
     config set KEY VALUE        直接改设置，见下方 KEY
-    snapshots                   列出最近 5 份配置快照
-    rollback [快照路径]         回滚到最近一份（或指定）配置
+    snapshots                   列出最近 5 份整套状态快照
+    rollback [快照路径]         回滚整套状态（config + 节点 + 分片 + state）
     target                      伪装站选择 / 校验菜单
     firewall [apply|strict|off|status]   双栈 IPv4 + IPv6
     bbr [on|status]             含 MPTCP 关闭 (CVE-2026-98432)
@@ -70,6 +70,7 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
 config 的 KEY: BLOCK_BT BLOCK_PRIVATE BLOCK_CN BLOCK_ADS
                DNS_PROVIDER(cloudflare|quad9|dns-sb|system)
                LOG_LEVEL(warning|info|none) SSH_GUARD TARGET_REGION
+               DUAL_STACK(on=新节点监听 :: 双栈，off=0.0.0.0)
 EOF
 }
 
@@ -170,7 +171,7 @@ cmd_add() {
 cmd_config_set() {
     local key="$1" val="$2"
     case "$key" in
-        BLOCK_BT|BLOCK_PRIVATE|BLOCK_CN|BLOCK_ADS|SSH_GUARD)
+        BLOCK_BT|BLOCK_PRIVATE|BLOCK_CN|BLOCK_ADS|SSH_GUARD|DUAL_STACK)
             [[ "$val" == "on" || "$val" == "off" ]] || die "$key 只能是 on/off" ;;
         DNS_PROVIDER)
             [[ "$val" =~ ^(cloudflare|quad9|dns-sb|system)$ ]] || die "DNS_PROVIDER 值不合法" ;;
@@ -196,6 +197,7 @@ cmd_config_menu() {
         printf '  6) DoH              %s\n' "$(state_get DNS_PROVIDER cloudflare)"
         printf '  7) 日志级别         %s\n' "$(state_get LOG_LEVEL warning)"
         printf '  8) 伪装站地区       %s\n' "$(target_region)"
+        printf '  9) 双栈监听         %s\n' "$(state_get DUAL_STACK off)"
         printf '  0) 返回\n'
         case "$(ask '选择' '0')" in
             1) cmd_config_set BLOCK_BT "$([[ "$(state_get BLOCK_BT on)" == on ]] && echo off || echo on)" ;;
@@ -206,6 +208,7 @@ cmd_config_menu() {
             6) cmd_config_set DNS_PROVIDER "$(ask 'cloudflare/quad9/dns-sb/system' 'cloudflare')" ;;
             7) cmd_config_set LOG_LEVEL "$(ask 'warning/info/debug/none' 'warning')" ;;
             8) target_menu ;;
+            9) cmd_config_set DUAL_STACK "$([[ "$(state_get DUAL_STACK off)" == on ]] && echo off || echo on)" ;;
             0) return 0 ;;
         esac
     done

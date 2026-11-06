@@ -17,9 +17,22 @@ xray_set_channel() {
         pinned|latest|v[0-9]*) state_set XRAY_CHANNEL "$1" ;;
         *) die "版本通道只能是 pinned / latest / vX.Y.Z，收到: $1" ;;
     esac
-    if [[ "$1" == v* ]] && version_lt "$1" "$XHY_MIN_SAFE_VERSION"; then
-        warn "警告: $1 低于安全版本 $XHY_MIN_SAFE_VERSION。"
-        warn "该版本受 XTLS#7291 / CVE-2026-98432 (MPTCP, CVSS 9.8) 影响，仅建议在有其它缓解措施时使用。"
+    local target mptcp
+    target="$(xray_resolve_version)"
+    [[ "$target" == v* ]] || { warn "无法确认目标版本，跳过兼容性检查"; return 0; }
+    if ! version_lt "$target" "$XHY_PQ_BREAK_VERSION"; then
+        warn "兼容性: $target >= $XHY_PQ_BREAK_VERSION，REALITY 服务端会要求 ClientHello 带 X25519MLKEM768。"
+        warn "sing-box / mihomo 客户端将报 reality verification failed (SagerNet/sing-box#4520)。"
+        warn "若使用这些客户端，请保持 pinned ($XHY_PINNED_VERSION)。"
+    fi
+    if version_lt "$target" "$XHY_MPTCP_FIXED_VERSION"; then
+        mptcp="$(sysctl -n net.mptcp.enabled 2>/dev/null || echo unknown)"
+        warn "安全: $target < $XHY_MPTCP_FIXED_VERSION，Xray 默认启用 MPTCP (CVE-2026-98432)。"
+        if [[ "$mptcp" == "0" ]]; then
+            ok "  已由内核 net.mptcp.enabled=0 缓解（xhy bbr on 可重新设置）。"
+        else
+            warn "  内核 MPTCP=$mptcp，请执行 xhy bbr on 关闭它。"
+        fi
     fi
 }
 

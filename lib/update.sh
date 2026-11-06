@@ -121,12 +121,21 @@ self_check() {
     core_status
     local inst mptcp v6rules
     inst="$(xray_installed_version)"
-    if [[ "$inst" == [0-9]* ]] && version_lt "v$inst" "$XHY_MIN_SAFE_VERSION"; then
-        warn "Xray $inst 低于安全版本 $XHY_MIN_SAFE_VERSION (MPTCP / CVE-2026-98432)，请执行 xhy core update"
+    if [[ "$inst" == [0-9]* ]]; then
+        if version_lt "v$inst" "$XHY_MPTCP_FIXED_VERSION"; then
+            printf 'MPTCP 修复: 未包含 (v%s < %s)，依赖内核缓解\n' "$inst" "$XHY_MPTCP_FIXED_VERSION"
+        else
+            printf 'MPTCP 修复: 已包含\n'
+        fi
+        if ! version_lt "v$inst" "$XHY_PQ_BREAK_VERSION"; then
+            warn "当前 v$inst >= $XHY_PQ_BREAK_VERSION：sing-box / mihomo 客户端可能无法连接 REALITY (#4520)"
+        else
+            printf '客户端兼容: OK (v%s < %s)\n' "$inst" "$XHY_PQ_BREAK_VERSION"
+        fi
     fi
     mptcp="$(sysctl -n net.mptcp.enabled 2>/dev/null || echo '内核未暴露')"
-    printf 'MPTCP    : %s (应为 0)\n' "$mptcp"
-    [[ "$mptcp" == "1" ]] && warn "MPTCP 已启用，建议 xhy bbr on 关闭它"
+    printf '内核 MPTCP: %s (应为 0)\n' "$mptcp"
+    [[ "$mptcp" == "1" ]] && warn "MPTCP 已启用，请执行 xhy bbr on 关闭它（钉死旧版时的关键缓解）"
     printf '%s\n' "--------------------------------------"
     bbr_status
     printf '%s\n' "--------------------------------------"
@@ -142,7 +151,7 @@ self_check() {
     target_show
     printf '节点数量 : %s\n' "$(node_count)"
     printf '配置快照 : %s 份 (xhy snapshots / xhy rollback)\n' \
-        "$(ls -1 "$XHY_SNAPSHOTS"/config.*.json 2>/dev/null | wc -l)"
+        "$(ls -1 "$XHY_SNAPSHOTS"/state.*.tar.gz 2>/dev/null | wc -l)"
     printf '%s\n' "--------------------------------------"
     if [[ -s "$XHY_ETC/config.json" ]] && [[ -x "$XRAY_BIN" ]]; then
         if xray_config_test >/dev/null 2>&1; then ok "配置语法: 通过"; else err "配置语法: 失败"; fi
