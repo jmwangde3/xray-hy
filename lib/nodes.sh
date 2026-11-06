@@ -14,7 +14,7 @@ port_used_by_node() {
     local p="$1" f v
     for f in "$XHY_NODES"/*.env; do
         [[ -f "$f" ]] || continue
-        v="$(grep -m1 '^PORT=' "$f" 2>/dev/null | cut -d= -f2-)"
+        v="$(grep -m1 '^PORT=' "$f" 2>/dev/null | cut -d= -f2- || true)"
         if [[ "$v" == "$p" ]]; then basename "$f" .env; return 0; fi
     done
     return 1
@@ -515,7 +515,7 @@ list_snapshots() {
     if ! ls "$XHY_SNAPSHOTS"/state.*.tar.gz >/dev/null 2>&1; then
         warn "暂无快照"; return 0
     fi
-    for f in $(ls -1t "$XHY_SNAPSHOTS"/state.*.tar.gz 2>/dev/null); do
+    for f in $(ls -1t "$XHY_SNAPSHOTS"/state.*.tar.gz 2>/dev/null || true); do
         printf '%s  (%s bytes)\n' "$f" "$(stat -c%s "$f" 2>/dev/null || echo '?')"
     done
 }
@@ -524,7 +524,7 @@ rollback_config() {
     local target="${1:-}" pre
     need_root
     if [[ -z "$target" ]]; then
-        target="$(ls -1t "$XHY_SNAPSHOTS"/state.*.tar.gz 2>/dev/null | head -1)"
+        target="$(ls -1t "$XHY_SNAPSHOTS"/state.*.tar.gz 2>/dev/null | head -1 || true)"
     fi
     [[ -s "$target" ]] || die "没有可用的状态快照（快照格式：state.*.tar.gz）"
     # Save the state we are about to replace, so the rollback itself is undoable.

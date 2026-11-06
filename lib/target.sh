@@ -23,7 +23,7 @@ target_rows() {
     # Strip any UTF-8 BOM *before* filtering: a BOM keeps the leading "#" from
     # matching the comment filter, and the header line would then be listed as a
     # region by `xhy target` and parsed as a data row.
-    tr -d '\357\273\277' <"$TARGETS_FILE" | grep -vE '^[[:space:]]*(#|$)'
+    tr -d '\357\273\277' <"$TARGETS_FILE" | grep -vE '^[[:space:]]*(#|$)' || true
 }
 
 target_list_regions() {
@@ -51,7 +51,7 @@ target_validate() {
         warn "  $host : 未确认 TLS 1.3"; rc=1
     fi
 
-    hdr="$(curl -sS -I --http2 -m 12 "https://${host}/" 2>/dev/null | tr -d '\r')"
+    hdr="$(curl -sS -I --http2 -m 12 "https://${host}/" 2>/dev/null | tr -d '\r' || true)"
     if [[ -z "$hdr" ]]; then
         warn "  $host : 无法建立 HTTPS 连接"; return 1
     fi

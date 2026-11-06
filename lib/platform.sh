@@ -58,12 +58,15 @@ detect_ssh_port() {
     local p="" f
     for f in /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf; do
         [[ -r "$f" ]] || continue
-        p="$(grep -iE '^[[:space:]]*Port[[:space:]]+[0-9]+' "$f" 2>/dev/null | head -1 | awk '{print $2}')"
+        # 每个 grep 都可能无匹配（Alpine 出厂 sshd_config 全是注释行）；
+        # 在 set -euo pipefail 下，管道里任何一个非零都会把整个脚本无声杀掉，
+        # 这正是「install 一行输出都没有」的根因，所以一律 || true 兜底。
+        p="$(grep -iE '^[[:space:]]*Port[[:space:]]+[0-9]+' "$f" 2>/dev/null | head -1 | awk '{print $2}' || true)"
         [[ -n "$p" ]] && break
     done
     if [[ -z "$p" ]] && have_cmd ss; then
         p="$(ss -H -ltnp 2>/dev/null | grep -iE 'sshd|dropbear' | head -1 \
-            | awk '{print $4}' | sed -E 's/.*[:.]//')"
+            | awk '{print $4}' | sed -E 's/.*[:.]//' || true)"
     fi
     [[ "$p" =~ ^[0-9]+$ ]] || p="22"
     XHY_SSH_PORT="$p"

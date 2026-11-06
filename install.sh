@@ -105,7 +105,7 @@ fi
 set -Eeuo pipefail
 
 XHY_VERSION="1.0.0"
-XHY_BUILD="5e2d7fa244ce"
+XHY_BUILD="55e4c3638b68"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -353,14 +353,14 @@ port_busy() {
 public_ip() {
     local ip=""
     ip="$(curl -fsS -m 8 -4 https://api.ipify.org 2>/dev/null || true)"
-    [[ -z "$ip" ]] && ip="$(curl -fsS -m 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n 's/^ip=//p' | head -1)"
+    [[ -z "$ip" ]] && ip="$(curl -fsS -m 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n 's/^ip=//p' | head -1 || true)"
     printf '%s' "${ip:-$(hostname -I 2>/dev/null | awk '{print $1}')}"
 }
 
 public_country() {
     local cc=""
-    cc="$(curl -fsS -m 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n 's/^loc=//p' | head -1)"
-    [[ -z "$cc" ]] && cc="$(curl -fsS -m 8 "https://ipapi.co/country" 2>/dev/null | tr -d '\r\n' | head -c 2)"
+    cc="$(curl -fsS -m 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n 's/^loc=//p' | head -1 || true)"
+    [[ -z "$cc" ]] && cc="$(curl -fsS -m 8 "https://ipapi.co/country" 2>/dev/null | tr -d '\r\n' | head -c 2 || true)"
     printf '%s' "${cc^^}"
 }
 
@@ -402,7 +402,7 @@ sha256_file() {
 verify_release_digest() {
     local dgst="$1" archive="$2" expected actual
     expected="$(grep -Eio 'SHA2?-?256[^A-Za-z0-9]*=?[[:space:]]*[0-9a-fA-F]{64}' "$dgst" 2>/dev/null \
-        | grep -Eio '[0-9a-fA-F]{64}' | head -1 | tr 'A-F' 'a-f')"
+        | grep -Eio '[0-9a-fA-F]{64}' | head -1 | tr 'A-F' 'a-f' || true)"
     [[ -n "$expected" ]] || { err "无法从 .dgst 解析 SHA-256，拒绝继续。"; return 1; }
     actual="$(sha256_file "$archive" | tr 'A-F' 'a-f')"
     if [[ "$expected" != "$actual" ]]; then
@@ -472,12 +472,15 @@ detect_ssh_port() {
     local p="" f
     for f in /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf; do
         [[ -r "$f" ]] || continue
-        p="$(grep -iE '^[[:space:]]*Port[[:space:]]+[0-9]+' "$f" 2>/dev/null | head -1 | awk '{print $2}')"
+        # 每个 grep 都可能无匹配（Alpine 出厂 sshd_config 全是注释行）；
+        # 在 set -euo pipefail 下，管道里任何一个非零都会把整个脚本无声杀掉，
+        # 这正是「install 一行输出都没有」的根因，所以一律 || true 兜底。
+        p="$(grep -iE '^[[:space:]]*Port[[:space:]]+[0-9]+' "$f" 2>/dev/null | head -1 | awk '{print $2}' || true)"
         [[ -n "$p" ]] && break
     done
     if [[ -z "$p" ]] && have_cmd ss; then
         p="$(ss -H -ltnp 2>/dev/null | grep -iE 'sshd|dropbear' | head -1 \
-            | awk '{print $4}' | sed -E 's/.*[:.]//')"
+            | awk '{print $4}' | sed -E 's/.*[:.]//' || true)"
     fi
     [[ "$p" =~ ^[0-9]+$ ]] || p="22"
     XHY_SSH_PORT="$p"
@@ -638,7 +641,7 @@ xray_resolve_version() {
 
 xray_installed_version() {
     [[ -x "$XRAY_BIN" ]] || { printf '未安装'; return; }
-    "$XRAY_BIN" version 2>/dev/null | head -1 | awk '{print $2}' | tr -d '\r'
+    "$XRAY_BIN" version 2>/dev/null | head -1 | awk '{print $2}' | tr -d '\r' || true
 }
 
 # Download a pinned-or-latest Xray release. The .dgst checksum is MANDATORY:
@@ -690,7 +693,7 @@ xray_install() {
     done
 
     local got
-    got="$(XRAY_LOCATION_ASSET="$XRAY_ASSET" "$XRAY_BIN" version 2>/dev/null | head -1 | awk '{print $2}' | tr -d '\r')"
+    got="$(XRAY_LOCATION_ASSET="$XRAY_ASSET" "$XRAY_BIN" version 2>/dev/null | head -1 | awk '{print $2}' | tr -d '\r' || true)"
     [[ -n "$got" ]] || die "下载的 Xray 无法运行（架构或依赖不匹配）"
     if [[ "v$got" != "$ver" ]]; then
         warn "版本校验: 请求 $ver，实际 v$got（预发布版或镜像差异时可能不同，请确认）"
@@ -704,9 +707,9 @@ x25519_keypair() {
         || { err "xray x25519 执行失败"; return 1; }
     # v26 changed "Password" to "Password (PublicKey)"; match both.
     priv="$(printf '%s\n' "$out" | grep -iE '^PrivateKey|^Private[ _]key' | head -1 \
-        | sed -E 's/^[^:]*:[[:space:]]*//' | tr -d ' \r\n')"
+        | sed -E 's/^[^:]*:[[:space:]]*//' | tr -d ' \r\n' || true)"
     pub="$(printf '%s\n' "$out" | grep -iE '^Password|^PublicKey|^Public[ _]key' | head -1 \
-        | sed -E 's/^[^:]*:[[:space:]]*//' | tr -d ' \r\n')"
+        | sed -E 's/^[^:]*:[[:space:]]*//' | tr -d ' \r\n' || true)"
     [[ -n "$priv" && -n "$pub" ]] || { err "无法解析 x25519 输出: $out"; return 1; }
     printf '%s %s\n' "$priv" "$pub"
 }
@@ -1121,11 +1124,11 @@ firewall_node_ports() {
     local f p public proto
     for f in "$XHY_NODES"/*.env; do
         [[ -f "$f" ]] || continue
-        public="$(grep -m1 '^PUBLIC=' "$f" 2>/dev/null | cut -d= -f2-)"
+        public="$(grep -m1 '^PUBLIC=' "$f" 2>/dev/null | cut -d= -f2- || true)"
         [[ "$public" == "0" ]] && continue
-        proto="$(grep -m1 '^PROTO=' "$f" 2>/dev/null | cut -d= -f2-)"
+        proto="$(grep -m1 '^PROTO=' "$f" 2>/dev/null | cut -d= -f2- || true)"
         [[ "$proto" == "udp" ]] && continue
-        p="$(grep -m1 '^PORT=' "$f" 2>/dev/null | cut -d= -f2-)"
+        p="$(grep -m1 '^PORT=' "$f" 2>/dev/null | cut -d= -f2- || true)"
         [[ -n "$p" ]] && printf '%s\n' "$p"
     done | sort -un
 }
@@ -1136,11 +1139,11 @@ firewall_udp_ports() {
     local f p public proto
     for f in "$XHY_NODES"/*.env; do
         [[ -f "$f" ]] || continue
-        public="$(grep -m1 '^PUBLIC=' "$f" 2>/dev/null | cut -d= -f2-)"
+        public="$(grep -m1 '^PUBLIC=' "$f" 2>/dev/null | cut -d= -f2- || true)"
         [[ "$public" == "0" ]] && continue
-        proto="$(grep -m1 '^PROTO=' "$f" 2>/dev/null | cut -d= -f2-)"
+        proto="$(grep -m1 '^PROTO=' "$f" 2>/dev/null | cut -d= -f2- || true)"
         [[ "$proto" == "udp" ]] || continue
-        p="$(grep -m1 '^PORT=' "$f" 2>/dev/null | cut -d= -f2-)"
+        p="$(grep -m1 '^PORT=' "$f" 2>/dev/null | cut -d= -f2- || true)"
         [[ -n "$p" ]] && printf '%s\n' "$p"
     done | sort -un
 }
@@ -1328,7 +1331,7 @@ target_rows() {
     # Strip any UTF-8 BOM *before* filtering: a BOM keeps the leading "#" from
     # matching the comment filter, and the header line would then be listed as a
     # region by `xhy target` and parsed as a data row.
-    tr -d '\357\273\277' <"$TARGETS_FILE" | grep -vE '^[[:space:]]*(#|$)'
+    tr -d '\357\273\277' <"$TARGETS_FILE" | grep -vE '^[[:space:]]*(#|$)' || true
 }
 
 target_list_regions() {
@@ -1356,7 +1359,7 @@ target_validate() {
         warn "  $host : 未确认 TLS 1.3"; rc=1
     fi
 
-    hdr="$(curl -sS -I --http2 -m 12 "https://${host}/" 2>/dev/null | tr -d '\r')"
+    hdr="$(curl -sS -I --http2 -m 12 "https://${host}/" 2>/dev/null | tr -d '\r' || true)"
     if [[ -z "$hdr" ]]; then
         warn "  $host : 无法建立 HTTPS 连接"; return 1
     fi
@@ -1501,7 +1504,7 @@ port_used_by_node() {
     local p="$1" f v
     for f in "$XHY_NODES"/*.env; do
         [[ -f "$f" ]] || continue
-        v="$(grep -m1 '^PORT=' "$f" 2>/dev/null | cut -d= -f2-)"
+        v="$(grep -m1 '^PORT=' "$f" 2>/dev/null | cut -d= -f2- || true)"
         if [[ "$v" == "$p" ]]; then basename "$f" .env; return 0; fi
     done
     return 1
@@ -2002,7 +2005,7 @@ list_snapshots() {
     if ! ls "$XHY_SNAPSHOTS"/state.*.tar.gz >/dev/null 2>&1; then
         warn "暂无快照"; return 0
     fi
-    for f in $(ls -1t "$XHY_SNAPSHOTS"/state.*.tar.gz 2>/dev/null); do
+    for f in $(ls -1t "$XHY_SNAPSHOTS"/state.*.tar.gz 2>/dev/null || true); do
         printf '%s  (%s bytes)\n' "$f" "$(stat -c%s "$f" 2>/dev/null || echo '?')"
     done
 }
@@ -2011,7 +2014,7 @@ rollback_config() {
     local target="${1:-}" pre
     need_root
     if [[ -z "$target" ]]; then
-        target="$(ls -1t "$XHY_SNAPSHOTS"/state.*.tar.gz 2>/dev/null | head -1)"
+        target="$(ls -1t "$XHY_SNAPSHOTS"/state.*.tar.gz 2>/dev/null | head -1 || true)"
     fi
     [[ -s "$target" ]] || die "没有可用的状态快照（快照格式：state.*.tar.gz）"
     # Save the state we are about to replace, so the rollback itself is undoable.
@@ -2292,7 +2295,7 @@ preflight_check() {
         "$XHY_DISTRO" "$XHY_DISTRO_VER" "$XHY_INIT" "$XHY_ARCH"
 
     mem_kb="$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)"
-    disk_kb="$(df -Pk / 2>/dev/null | awk 'NR==2{print $4}')"
+    disk_kb="$(df -Pk / 2>/dev/null | awk 'NR==2{print $4}' || true)"
     if (( mem_kb < 131072 )); then
         printf '  [注意] 内存 %s MB 偏小，安装时会设置 GOMEMLIMIT\n' "$((mem_kb / 1024))"
     else

@@ -174,7 +174,7 @@ preflight_check() {
         "$XHY_DISTRO" "$XHY_DISTRO_VER" "$XHY_INIT" "$XHY_ARCH"
 
     mem_kb="$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)"
-    disk_kb="$(df -Pk / 2>/dev/null | awk 'NR==2{print $4}')"
+    disk_kb="$(df -Pk / 2>/dev/null | awk 'NR==2{print $4}' || true)"
     if (( mem_kb < 131072 )); then
         printf '  [注意] 内存 %s MB 偏小，安装时会设置 GOMEMLIMIT\n' "$((mem_kb / 1024))"
     else

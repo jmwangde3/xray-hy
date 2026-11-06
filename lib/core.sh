@@ -56,7 +56,7 @@ xray_resolve_version() {
 
 xray_installed_version() {
     [[ -x "$XRAY_BIN" ]] || { printf '未安装'; return; }
-    "$XRAY_BIN" version 2>/dev/null | head -1 | awk '{print $2}' | tr -d '\r'
+    "$XRAY_BIN" version 2>/dev/null | head -1 | awk '{print $2}' | tr -d '\r' || true
 }
 
 # Download a pinned-or-latest Xray release. The .dgst checksum is MANDATORY:
@@ -108,7 +108,7 @@ xray_install() {
     done
 
     local got
-    got="$(XRAY_LOCATION_ASSET="$XRAY_ASSET" "$XRAY_BIN" version 2>/dev/null | head -1 | awk '{print $2}' | tr -d '\r')"
+    got="$(XRAY_LOCATION_ASSET="$XRAY_ASSET" "$XRAY_BIN" version 2>/dev/null | head -1 | awk '{print $2}' | tr -d '\r' || true)"
     [[ -n "$got" ]] || die "下载的 Xray 无法运行（架构或依赖不匹配）"
     if [[ "v$got" != "$ver" ]]; then
         warn "版本校验: 请求 $ver，实际 v$got（预发布版或镜像差异时可能不同，请确认）"
@@ -122,9 +122,9 @@ x25519_keypair() {
         || { err "xray x25519 执行失败"; return 1; }
     # v26 changed "Password" to "Password (PublicKey)"; match both.
     priv="$(printf '%s\n' "$out" | grep -iE '^PrivateKey|^Private[ _]key' | head -1 \
-        | sed -E 's/^[^:]*:[[:space:]]*//' | tr -d ' \r\n')"
+        | sed -E 's/^[^:]*:[[:space:]]*//' | tr -d ' \r\n' || true)"
     pub="$(printf '%s\n' "$out" | grep -iE '^Password|^PublicKey|^Public[ _]key' | head -1 \
-        | sed -E 's/^[^:]*:[[:space:]]*//' | tr -d ' \r\n')"
+        | sed -E 's/^[^:]*:[[:space:]]*//' | tr -d ' \r\n' || true)"
     [[ -n "$priv" && -n "$pub" ]] || { err "无法解析 x25519 输出: $out"; return 1; }
     printf '%s %s\n' "$priv" "$pub"
 }

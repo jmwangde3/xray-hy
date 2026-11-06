@@ -87,11 +87,11 @@ firewall_node_ports() {
     local f p public proto
     for f in "$XHY_NODES"/*.env; do
         [[ -f "$f" ]] || continue
-        public="$(grep -m1 '^PUBLIC=' "$f" 2>/dev/null | cut -d= -f2-)"
+        public="$(grep -m1 '^PUBLIC=' "$f" 2>/dev/null | cut -d= -f2- || true)"
         [[ "$public" == "0" ]] && continue
-        proto="$(grep -m1 '^PROTO=' "$f" 2>/dev/null | cut -d= -f2-)"
+        proto="$(grep -m1 '^PROTO=' "$f" 2>/dev/null | cut -d= -f2- || true)"
         [[ "$proto" == "udp" ]] && continue
-        p="$(grep -m1 '^PORT=' "$f" 2>/dev/null | cut -d= -f2-)"
+        p="$(grep -m1 '^PORT=' "$f" 2>/dev/null | cut -d= -f2- || true)"
         [[ -n "$p" ]] && printf '%s\n' "$p"
     done | sort -un
 }
@@ -102,11 +102,11 @@ firewall_udp_ports() {
     local f p public proto
     for f in "$XHY_NODES"/*.env; do
         [[ -f "$f" ]] || continue
-        public="$(grep -m1 '^PUBLIC=' "$f" 2>/dev/null | cut -d= -f2-)"
+        public="$(grep -m1 '^PUBLIC=' "$f" 2>/dev/null | cut -d= -f2- || true)"
         [[ "$public" == "0" ]] && continue
-        proto="$(grep -m1 '^PROTO=' "$f" 2>/dev/null | cut -d= -f2-)"
+        proto="$(grep -m1 '^PROTO=' "$f" 2>/dev/null | cut -d= -f2- || true)"
         [[ "$proto" == "udp" ]] || continue
-        p="$(grep -m1 '^PORT=' "$f" 2>/dev/null | cut -d= -f2-)"
+        p="$(grep -m1 '^PORT=' "$f" 2>/dev/null | cut -d= -f2- || true)"
         [[ -n "$p" ]] && printf '%s\n' "$p"
     done | sort -un
 }

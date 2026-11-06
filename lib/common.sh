@@ -231,14 +231,14 @@ port_busy() {
 public_ip() {
     local ip=""
     ip="$(curl -fsS -m 8 -4 https://api.ipify.org 2>/dev/null || true)"
-    [[ -z "$ip" ]] && ip="$(curl -fsS -m 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n 's/^ip=//p' | head -1)"
+    [[ -z "$ip" ]] && ip="$(curl -fsS -m 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n 's/^ip=//p' | head -1 || true)"
     printf '%s' "${ip:-$(hostname -I 2>/dev/null | awk '{print $1}')}"
 }
 
 public_country() {
     local cc=""
-    cc="$(curl -fsS -m 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n 's/^loc=//p' | head -1)"
-    [[ -z "$cc" ]] && cc="$(curl -fsS -m 8 "https://ipapi.co/country" 2>/dev/null | tr -d '\r\n' | head -c 2)"
+    cc="$(curl -fsS -m 8 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n 's/^loc=//p' | head -1 || true)"
+    [[ -z "$cc" ]] && cc="$(curl -fsS -m 8 "https://ipapi.co/country" 2>/dev/null | tr -d '\r\n' | head -c 2 || true)"
     printf '%s' "${cc^^}"
 }
 
@@ -280,7 +280,7 @@ sha256_file() {
 verify_release_digest() {
     local dgst="$1" archive="$2" expected actual
     expected="$(grep -Eio 'SHA2?-?256[^A-Za-z0-9]*=?[[:space:]]*[0-9a-fA-F]{64}' "$dgst" 2>/dev/null \
-        | grep -Eio '[0-9a-fA-F]{64}' | head -1 | tr 'A-F' 'a-f')"
+        | grep -Eio '[0-9a-fA-F]{64}' | head -1 | tr 'A-F' 'a-f' || true)"
     [[ -n "$expected" ]] || { err "无法从 .dgst 解析 SHA-256，拒绝继续。"; return 1; }
     actual="$(sha256_file "$archive" | tr 'A-F' 'a-f')"
     if [[ "$expected" != "$actual" ]]; then
