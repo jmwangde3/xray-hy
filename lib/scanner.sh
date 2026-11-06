@@ -178,6 +178,16 @@ scanner_domain_ok() {
 
 # scanner_score <appconnect_ms> <http_code> <size> <wildcard 0|1> <www 0|1>
 # 分数只用于排序，不做合格判定（合格与否由 scanner_probe 决定）。
+#
+# 不把 TFO 能力纳入打分（它是 --require-tfo 的硬过滤项，但不加权）：
+#   - TFO 只是我们服务端 listen socket 的行为，跟随目标即可（见 sockopt.sh
+#     的 target_tfo_detect / tfo_decide），不需要目标「优先支持」；
+#   - 支持被动 TFO 的 HTTPS 站点在公网上是少数，加权会把候选池往冷门站带，
+#     削弱抗探测可信度；
+#   - 伪装站不承载正常代理流量（REALITY 只把未认证探测转发过去），它的带宽和
+#     延迟不影响代理上网速度，凑 TFO 换来的只是首连省 1 RTT。
+# 顺序：先按质量打分 → 展示短名单时现场探测 TFO → 需要则硬过滤 → 用户选。
+# 是否强制由用户在 xhy scan / xhy target 里选，默认不强制。
 scanner_score() {
     local ms="${1:-9999}" code="${2:-0}" size="${3:-0}" wild="${4:-0}" www="${5:-0}" s=100
     [[ "$ms" =~ ^[0-9]+$ ]] || ms=9999
@@ -431,6 +441,97 @@ scanner_cache_pick_valid() {
 }
 
 # ---------------------------------------------------------------------------
+# 候选短名单与 TFO 选项
+# ---------------------------------------------------------------------------
+#
+# TFO 能力不写进缓存：它是站点当前配置，7 天 TTL 的缓存反而可能过期。
+# 展示短名单时现场探测（同机房约 0.1s），并用关联数组在同一次调用内去重。
+# 打分不因 TFO 加权（scanner_score 注释），但 --require-tfo 会做硬过滤。
+
+SCANNER_SHORTLIST="${SCANNER_SHORTLIST:-5}"   # 最终展示给用户挑的候选数
+SCANNER_TFO_POOL="${SCANNER_TFO_POOL:-12}"    # require-tfo 时最多探多少个
+# 不能用 declare -A：本文件是被 load_libs() 在函数内 source 的，declare
+# 会创建局部变量，函数返回后它退化成普通索引数组、字符串下标触发算术错误。
+# 用空格分隔的 "ip|sni=0/1" 字符串做去重，无作用域问题。
+XHY_TFO_CACHE=""
+
+# scanner_tfo_of <ip> <sni> -> 1（支持）/ 0（不支持或判不了）
+scanner_tfo_of() {
+    local k="${1}|${2}" r
+    case " $XHY_TFO_CACHE " in
+        *" $k=1 "*) printf '1'; return 0 ;;
+        *" $k=0 "*) printf '0'; return 0 ;;
+    esac
+    if target_tfo_detect "$1" 443 "$2"; then r=1; else r=0; fi
+    XHY_TFO_CACHE="$XHY_TFO_CACHE $k=$r"
+    printf '%s' "$r"
+}
+
+# 从缓存挑 3–5 个候选展示给用户选。
+# stdout 只输出最终 "<target> <sni> scan"；列表与提示一律走 stderr，
+# 因为调用方是 `best="$(scanner_pick)"`。
+# 非交互（读不到 /dev/tty）时自动取第 1 个，脚本化调用不会被卡住。
+scanner_shortlist() {
+    local require="${1:-0}" want="${2:-$SCANNER_SHORTLIST}" pool
+    local -a tgts=() snis=() scs=() mss=() codes=() tfos=()
+    local sc ip sni tgt ms code size iss tls at tfo n=0 ans="" pick=0 i
+    if (( require == 1 )); then
+        pool="$SCANNER_TFO_POOL"
+    else
+        pool=$(( want * 3 ))
+    fi
+    XHY_TFO_CACHE=""
+    while IFS=$'\t' read -r sc ip sni tgt ms code size iss tls at; do
+        [[ -n "$tgt" ]] || continue
+        (( n >= pool )) && break
+        n=$(( n + 1 ))
+        target_validate "$tgt" "$sni" >&2 || continue
+        tfo="$(scanner_tfo_of "$ip" "$sni")"
+        if (( require == 1 )) && [[ "$tfo" != "1" ]]; then continue; fi
+        tgts+=("$tgt"); snis+=("$sni"); scs+=("$sc")
+        mss+=("$ms"); codes+=("$code"); tfos+=("$tfo")
+        (( ${#tgts[@]} >= want )) && break
+    done < <(scanner_cache_best)
+
+    if (( ${#tgts[@]} == 0 )); then
+        if (( require == 1 )); then
+            warn "前 $pool 个候选里没有支持被动 TFO 的站点。可去掉 --require-tfo、换网段，或 xhy scan --refresh 重扫。"
+        else
+            warn "缓存里没有通过校验的候选，请 xhy scan --refresh 重扫。"
+        fi
+        return 1
+    fi
+
+    {
+        printf '\n  候选伪装站（按质量排序；TFO=目标是否支持被动 TFO）\n'
+        printf '  %-3s %-5s %-16s %-34s %8s %6s  %s\n' "#" "分数" "IP" "SNI" "握手" "HTTP" "TFO"
+        printf '  %s\n' "--------------------------------------------------------------------------------------------"
+        for (( i=0; i<${#tgts[@]}; i++ )); do
+            if [[ "${tfos[$i]}" == "1" ]]; then tfo="支持"; else tfo="—"; fi
+            printf '  %-3s %-5s %-16s %-34s %6sms %6s  %s\n' \
+                "$(( i + 1 ))" "${scs[$i]}" "${tgts[$i]%%:*}" "${snis[$i]}" \
+                "${mss[$i]}" "${codes[$i]}" "$tfo"
+        done
+        if (( require == 1 )); then
+            printf '  （已按「必须支持 TFO」过滤）\n'
+        else
+            printf '  （未强制 TFO；列表里也可能含支持 TFO 的站点）\n'
+        fi
+        printf '\n'
+    } >&2
+
+    printf '  选哪个 [1-%d]（回车=1，0=自动取最高分）: ' "${#tgts[@]}" >&2
+    if read -r ans </dev/tty 2>/dev/null; then :; else ans=""; fi
+    printf '\n' >&2
+    if [[ "$ans" =~ ^[0-9]+$ ]] && (( ans >= 1 && ans <= ${#tgts[@]} )); then
+        pick=$(( ans - 1 ))
+    fi
+    printf '%s %s scan\n' "${tgts[$pick]}" "${snis[$pick]}"
+    sc_ok "已选: target=${tgts[$pick]} SNI=${snis[$pick]}（TFO=${tfos[$pick]}）"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # 扫描与选择
 # ---------------------------------------------------------------------------
 
@@ -477,21 +578,23 @@ scanner_prune_work() {
 }
 
 # 输出 "<target> <sni> <label>"：优先用有效缓存，否则扫本机 /24（不够再扩 /21）。
-#   scanner_pick [--refresh] [--cidr 1.2.3.0/24]
+#   scanner_pick [--refresh] [--cidr 1.2.3.0/24] [--require-tfo]
+# --require-tfo：只展示支持被动 TFO 的候选；默认不强制（按质量选，可能含 TFO 站）。
 scanner_pick() {
-    local refresh=0 cidr="" best wide
+    local refresh=0 cidr="" best wide require_tfo=0
     while (( $# > 0 )); do
         case "$1" in
             --refresh) refresh=1; shift ;;
             --cidr)    cidr="${2:?--cidr 需要网段}"; shift 2 ;;
-            -*)        die "未知参数: $1（可用 --refresh / --cidr）" ;;
+            --require-tfo) require_tfo=1; shift ;;
+            -*)        die "未知参数: $1（可用 --refresh / --cidr / --require-tfo）" ;;
             *)         cidr="$1"; shift ;;
         esac
     done
 
     if (( refresh == 0 )) && scanner_cache_valid; then
         sc_info "使用扫描缓存（$(scanner_cache_age_h) 小时前，$(scanner_cache_count) 个候选；--refresh 可强制重扫）"
-        if best="$(scanner_cache_pick_valid)"; then
+        if best="$(scanner_shortlist "$require_tfo")"; then
             printf '%s\n' "$best"
             return 0
         fi
@@ -519,7 +622,7 @@ scanner_pick() {
         esac
     fi
 
-    if best="$(scanner_cache_pick_valid)"; then
+    if best="$(scanner_shortlist "$require_tfo")"; then
         printf '%s\n' "$best"
         return 0
     fi

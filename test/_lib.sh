@@ -50,6 +50,13 @@ stub_system() {
     firewall_apply() { :; }
     install_cf_service() { :; }
     target_validate() { return 0; }
+    # 内核调优必须离线：bbr_ensure / tune_bbr 会写 /etc/sysctl.d 并 modprobe。
+    # bbr-test.sh 不调 stub_system，自己注入 sysctl 来测决策逻辑。
+    bbr_ensure() { return 0; }
+    tune_bbr() { return 0; }
+    # TFO 探测会真的打外网；离线默认「目标不支持」，auto 因此判定为关。
+    # tfo-test.sh 自己注入 curl/nstat 来测决策逻辑。
+    target_tfo_detect() { return 1; }
 }
 
 # Minimal stand-in for the real binary: only the subcommands the script calls.

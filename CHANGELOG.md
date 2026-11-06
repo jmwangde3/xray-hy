@@ -2,6 +2,51 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.4.3 — 2026-11-07
+
+按三条口径重定 BBR / TFO / MPTCP：**只考虑服务端最优，默认客户端会配合**（我们开 TFO 客户端也开、我们关它也关）。
+
+### BBR：默认开、可显式不开、选开必须真开好
+
+- 安装时 `confirm "启用 BBR 与内核网络优化？"` **保留**，默认值仍是 `y`；选 `n` 时写 `BBR_ENABLED=off`，后续不会被强行打开
+- `tune_bbr` 加**实证校验**：`sysctl -p` 返回 0 不等于生效（容器 / 只读 /proc / 被覆盖都会假成功）。按实测 `tcp_congestion_control=bbr` 且 `default_qdisc=fq` 才写 `BBR_STATUS=on`，否则 `apply-failed` 并返回非 0
+- 新增 `bbr_ensure()`：幂等兜底，实测没生效才重新下发，接入 `cmd_install` / `xhy bbr on` / `xhy update config`；已生效时不重写 sysctl 文件、不堆备份
+- `xhy bbr status` 加「实际生效 yes/NO」行；`xhy check` 里 `BBR_ENABLED=off` 时不干预
+
+### TFO：默认跟随伪装站，用户可显式覆盖
+
+**补测翻案**：Xray 的 `tcpFastOpen` 在 26.10.31 上是**生效的**（早期判「不生效」的判据不成立）：
+
+| 场景 | 实测 |
+|---|---|
+| 入站 true + 带有效 cookie 的 SYN（1542 B early data） | SYN-ACK 的 ack 跳过 1542 字节、`TCPFastOpenPassive` 每次 +1、`curl http=200` |
+| 入站 true + 首次 `cookiereq`（换目标 IP 绕开 cookie 缓存） | SYN-ACK 回 `tfo cookie 88c5d6bf…`（option 34）、`CookieReqd` +1 |
+| 入站 false | `Passive` 不变、SYN-ACK ack 只 +1（early data 被丢） |
+| `tcpFastOpenQueueLength` 写不写 | 不影响上述结果 |
+
+早期用「客户端只发 cookiereq 时 SYN-ACK 无 option 34」判「不生效」是错的 —— 那条路径下服务端本来就不该回 34。
+
+因此改成**跟随伪装站**（这正是伪装一致性的正确实现）：目标支持 → 默认开，白拿首连 1 RTT；目标不支持 → 默认关，否则探测者发一个带 `cookiereq` 的 SYN，我们回 option 34、真实站点不回，一眼可区分。现网 easeus 源站不支持，`auto` 判定为关，**现网行为零变化**。
+
+- 恢复 `--tfo auto|on|off`（`auto` 默认，`on/off` 强制覆盖）；判定结果写进节点 env 的 `TFO`，重建配置不重复探测
+- 新增 `target_tfo_detect()`：`curl --tcp-fastopen` 连打 3 次，看内核 `TcpExtTCPFastOpenActive` 是否增长。实测不支持的 easeus delta=0、启用 TFO 的 Xray delta=3。**不需要 tcpdump** —— v1.3.0 那个恒 false 的探测用普通 connect 发 SYN（不带 option 34），判据本身不成立
+- `sockopt_json` 重新读 `TFO`：`1 → tcpFastOpen:true`，`0/未设置 → false`
+
+### 扫描：可选「必须 TFO」+ 3-5 个候选让用户选
+
+- `xhy scan --require-tfo` / `xhy target → 7)` / 交互提问：只列出支持被动 TFO 的候选；默认不强制，按质量选（结果也可能含支持 TFO 的站）
+- 扫描完列出**前 3-5 个候选**（分数、IP、SNI、握手、HTTP、TFO 标记）由用户选编号；脚本化调用（无 tty）自动取最高分
+- TFO **不参与打分**，只做可选硬过滤。理由：伪装站不承载正常代理流量（REALITY 只把未认证探测转发过去），它的带宽/延迟**不影响代理上网速度**；支持被动 TFO 的站点在公网上是少数，加权或强制会把候选池往冷门站带、削弱抗探测可信度，换来的只是 1 RTT。先按质量选最优站，再读它的 TFO 能力决定我们开不开
+- TFO 能力不写进 7 天缓存：它是站点当前配置，缓存反而可能过期；展示短名单时现场探测，同一次调用内去重
+
+### MPTCP
+
+保持 v1.4.2 的三层全关（sockopt `false` + `GODEBUG=multipathtcp=0` + `net.mptcp.enabled=0` / `tcp_migrate_req=0`），未改动。
+
+### 测试
+
+新增 `test/bbr-test.sh`（15 项：决策表 + 状态判定 + 接线）、`test/tfo-test.sh`（17 项：探测判据 + --resolve + 失败保守关闭）、`test/shortlist-test.sh`（17 项：短名单 + 强制过滤 + 交互降级）；`sockopt-test.sh` 重写为 54 项、`render-test.sh` 改断言。全套 **263 项**通过。
+
 ## v1.4.2 — 2026-11-07
 
 **口径修正：从「Xray 不支持」改成「运行时不生效」。** 这两者的行动后果完全相反 —— 说不生效只砍一个字段，说不支持会把整个 sockopt 连 `tcpKeepAliveIdle:45` 一起砍掉。

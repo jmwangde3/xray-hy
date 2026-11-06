@@ -104,7 +104,7 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.4.2"
+XHY_VERSION="1.4.3"
 XHY_BUILD="__XHY_BUILD__"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。

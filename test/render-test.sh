@@ -88,11 +88,11 @@ add_kv() { # add_kv <file> <KEY> <VALUE> —— 覆盖式追加，重复调用�
     printf '%s=%s\n' "$k" "$v" >>"$f"
 }
 
-echo "=== sockopt（v1.4.0 起 TFO 恒关，节点 env 里的 TFO 不参与渲染）==="
+echo "=== sockopt（v1.4.3 起 TFO 跟随节点 env；auto 判定写进 env）==="
 add_kv "$XHY_NODES/reality_443.env" TFO 1
 write_fragment "$XHY_NODES/reality_443.env"
 chk "reality 片段含 sockopt"        "grep -q '\"sockopt\"' '$XHY_CONFDIR/reality_443.json'"
-chk "TFO=1 被忽略 -> false"         "grep -q '\"tcpFastOpen\":false' '$XHY_CONFDIR/reality_443.json'"
+chk "TFO=1 -> tcpFastOpen true"     "grep -q '\"tcpFastOpen\":true' '$XHY_CONFDIR/reality_443.json'"
 add_kv "$XHY_NODES/reality_443.env" TFO 0
 write_fragment "$XHY_NODES/reality_443.env"
 chk "TFO=0 -> tcpFastOpen false"    "grep -q '\"tcpFastOpen\":false' '$XHY_CONFDIR/reality_443.json'"

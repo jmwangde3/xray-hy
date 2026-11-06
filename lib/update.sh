@@ -131,6 +131,9 @@ update_geodata() {
 
 update_config() {
     need_root
+    # 服务端本来就该开 BBR：每次重建配置顺手兜底，实测没生效就重新下发。
+    # 安装时显式选了「不开」(BBR_ENABLED=off) 的不会被强行打开。
+    bbr_ensure || warn "BBR 未生效，可执行 xhy bbr on 复查。"
     node_rebuild_all
     [[ "$(state_get FIREWALL_MODE off)" != "off" ]] && firewall_apply "$(state_get FIREWALL_MODE safe)" --quiet
     ok "配置已按当前设置重建"

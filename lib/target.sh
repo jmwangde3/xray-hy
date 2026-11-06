@@ -55,6 +55,14 @@ target_help() {
   握手特征与真实站点一致。例：
       target=47.88.102.65:443   SNI=www.easeus.com
   校验会带 --resolve 打这个 IP，验证证书确实覆盖该域名、且没有 CDN 头。
+
+  ---- TFO 与伪装站 ----
+  TFO（TCP Fast Open）是 TCP 层的 0-RTT 特性。Xray 的 tcpFastOpen 实测确实
+  生效，但我们只在伪装站也支持时才开（xhy add reality 默认 --tfo auto）：
+  目标不支持却开，探测者发一个带 cookiereq 的 SYN 就会看到我们回了
+  tfo cookie、真实站点没回，一眼可区分。--tfo on / off 可强制覆盖。
+  伪装站不承载正常代理流量，它的带宽和延迟不影响代理上网速度，所以 scan
+  不把 TFO 纳入打分 —— 先按质量选最优站，再读它的能力。
 EOF
 }
 
@@ -286,6 +294,9 @@ EOF
                if [[ -s "$SCANNER_CACHE" ]] && scanner_cache_valid; then
                    confirm "已有 $(scanner_cache_age_h) 小时前的扫描缓存，重新扫描？" "n" \
                        && extra+=(--refresh)
+               fi
+               if confirm "是否只选支持 TFO 的伪装站？（不强制则按质量选）" "n"; then
+                   extra+=(--require-tfo)
                fi
                if sp="$(scanner_pick ${extra[@]+"${extra[@]}"})"; then
                    read -r st ss _ <<<"$sp"

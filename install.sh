@@ -104,8 +104,8 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.4.2"
-XHY_BUILD="d86c71dab51f"
+XHY_VERSION="1.4.3"
+XHY_BUILD="56ca3d182c00"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -123,7 +123,7 @@ fi
 # ===================== lib/common.sh =====================
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.4.2}"
+XHY_VERSION="${XHY_VERSION:-1.4.3}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -425,69 +425,75 @@ verify_release_digest() {
 }
 
 # ===================== lib/sockopt.sh =====================
-# xray-hy / per-inbound sockopt.
+# xray-hy / per-inbound sockopt + TFO 决策。
 #
 # ============================================================================
-# 一条必须先分清的口径：**字段被接受 ≠ 运行时生效**（2026-11-07 定）
+# 口径：**字段被接受 ≠ 运行时生效**（2026-11-07 定）
 # ============================================================================
 #
-# Xray 26.3.27（本项目的 XHY_PINNED_VERSION）与 26.10.31 都接受下面这套完整
-# 的七字段写法，`xray run -test` 输出 Configuration OK、EXIT=0，无 unknown
-# field：
+# Xray 26.3.27（XHY_PINNED_VERSION）与 26.10.31 都接受七字段完整写法
+# （tcpFastOpen / tcpNoDelay / tcpKeepAliveIdle / tcpUserTimeout /
+#  tcpcongestion / tcpMptcp / tcpFastOpenQueueLength），`xray run -test`
+# 输出 Configuration OK、EXIT=0、无 unknown field。任何「Xray 不支持某字段」
+# 的说法都不成立。要判断的是运行时：setsockopt 失败时 Xray 静默忽略。
 #
-#   tcpFastOpen / tcpNoDelay / tcpKeepAliveIdle / tcpUserTimeout /
-#   tcpcongestion / tcpMptcp / tcpFastOpenQueueLength
+# ---- 一、TFO：默认跟随伪装站，用户可显式覆盖（v1.4.3 起）----
 #
-# 所以任何"Xray 不支持某个字段"的说法都是错的。真正要判断的是**运行时**：
-# 配置能过 `-test`，但 setsockopt 在内核侧返回 EINVAL / EOPNOTSUPP 时，Xray
-# 只打一条 warning 或干脆静默忽略，服务照常启动，那一项零效果。下面三段
-# 结论都是按"运行时有没有可观测行为"得出的，不是按"字段能不能解析"。
+# 先纠正早期误判：**Xray 的 tcpFastOpen 是生效的**。2026-11-07 在
+# 47.88.102.45 / 26.10.31 / 内核 tcp_fastopen=3 上实测：
 #
-# ---- 一、TFO 一律关闭（服务端不开，脚本也不留开关）----
+#   入站 true + 客户端带有效 cookie 的 SYN（1542 B early data）
+#     → SYN-ACK 的 ack 跳过 1542 字节、TcpExtTCPFastOpenPassive 每次 +1、
+#       curl http=200（REALITY 转发正常，early data 没破坏功能）
+#   入站 true + 首次 cookiereq（换新目标 IP 绕开内核 cookie 缓存）
+#     → SYN-ACK 回 `tfo cookie 88c5d6bf…`（option 34）、CookieReqd +1
+#   入站 false
+#     → Passive 不变、SYN-ACK 的 ack 只 +1（early data 被丢）
+#   tcpFastOpenQueueLength 写不写都不影响上述结果
 #
-# 1) 被动 TFO 要两端同时成立：client 的 SYN 带 option 34（cookie request）
-#    **且** server 的 listener 显式 setsockopt(TCP_FASTOPEN, qlen)。
-#    net.ipv4.tcp_fastopen 只是"允许"：bit0=client，bit1=server。
-#    本机路由器（arm64）实测该值为 1 —— 只有客户端位，做监听会 EOPNOTSUPP；
-#    服务器（47.88.102.45）是 3，允许，但 Xray 侧仍未真正启用（见下条）。
-# 2) 目标不支持。用 curl --tcp-fastopen 打出带 `exp-tfo cookiereq` 的 SYN，
-#    打 www.easeus.com 源站 47.88.102.65:443 与两个高分候选，SYN-ACK 全部
-#    只有 mss/sackOK/TS/nop/wscale，没有 option 34。
-# 3) Xray 侧运行时未生效。入站 tcpFastOpen=true 时 SYN-ACK 无 34、
-#    TcpExtTCPFastOpenPassive=0（一次都没成立）；出站 freedom tcpFastOpen=true
-#    的 SYN 与 false 逐字节相同。cookie 由内核生成、Xray 只负责打开监听队列，
-#    这是设计如此 —— 但"设计上支持"不等于"实测有行为"，计数为 0 就是没发生。
-# 4) 与伪装无关。TCP options 不进 TLS 指纹，客户端不拿 SYN-ACK 的 options
-#    判断真伪；REALITY 首包要精确模仿浏览器，0-RTT 带数据反而是额外风险面。
+# 早期判「不生效」用的是「客户端只发 cookiereq 时 SYN-ACK 无 option 34」——
+# 那条路径下服务端本来就不该回 34，判据不成立。要看 ack 是否跳过 early data、
+# Passive / CookieReqd 计数、以及 cookiereq 路径回不回 cookie。
 #
-# 所以 v1.4.0 起不再有 `--tfo` 选项，tcpFastOpen 恒为 false，
-# tcpFastOpenQueueLength 也随之不写（队列长度在 TFO 关闭时无意义）。
-# 要重新评估 TFO 就改这里一处，不要再把它做成 CLI 开关 —— 这个开关存在过
-# 两个版本，两次都回到 0。
+# 既然它真的生效，就不能一刀切关掉或无条件打开，而要**跟伪装站保持一致**：
 #
-# ---- 二、tcpcongestion 必须按内核能力决定写不写（v1.4.2 起）----
+#   真实伪装站支持被动 TFO  → 我们开，探测者看到的 SYN-ACK 一致，且白拿 1 RTT
+#   真实伪装站不支持         → 我们关，否则同样是探测者一个 SYN 就能区分开
 #
-# `tcpcongestion:"bbr"` 是 per-socket 设置，算法没编译进内核时
-# setsockopt(TCP_CONGESTION) 返回 EINVAL，Xray 静默忽略，那一项纯装饰。
-# 实测两台机器的差别：
+# 现网 www.easeus.com 源站 47.88.102.65:443 不支持（带 cookiereq 的 SYN 打过去，
+# SYN-ACK 只有 mss/sackOK/TS/nop/wscale，无 option 34），所以 auto 判定为关，
+# 现网行为与 v1.4.2 一致。客户端默认配合：我们开它开、我们关它关。
 #
-#   47.88.102.45 (x86_64)  available = reno cubic bbr  → 写 bbr 真生效
-#   AX3600 路由器 (arm64)  available = reno cubic      → 写 bbr 是装饰
+# 探测方法：`curl --tcp-fastopen` 连打 3 次，看内核
+# `TcpExtTCPFastOpenActive` 是否增长（远端回 cookie 后本机才能成功用 TFO）。
+# 实测：不支持的 easeus delta=0，启用 TFO 的 Xray delta=3。
+# **不需要 tcpdump** —— v1.3.0 那个探测之所以恒 false，是因为用普通 connect
+# 发 SYN（不带 option 34），任何服务端都不会回 34；这一版判据是成立的。
 #
-# 判定用 **tcp_available_congestion_control**（算法是否编译进内核），不用
-# tcp_congestion_control（当前默认算法）：per-socket 只需要算法可用，不要求
-# 内核默认就是 bbr。这也和 hardening.sh 里 `xhy bbr on` 的判定依据一致，
-# 不会出现"bbr on 报 unavailable、sockopt 却写着 bbr"的自相矛盾。
+# --tfo auto|on|off：auto 跟随伪装站（默认），on/off 由用户强制覆盖。
+# 判定结果写进节点 env 的 TFO 字段并随节点持久保存，重建配置不会重复探测。
 #
-# 不可用时**省略整个字段**而不是写 cubic：省略 = 继承内核默认，写死 cubic
-# 反而可能把内核默认的更优算法顶掉。
+# ⚠️ **扫描不把 TFO 纳入打分或筛选**（见 lib/scanner.sh 的 scanner_score 注释）：
+# 伪装站不承载正常代理流量（REALITY 只把未认证探测转发过去），它的带宽/延迟
+# 不影响代理上网速度；为凑 TFO 去缩小候选池，反而会削弱抗探测可信度，
+# 换来的只是首连省 1 RTT。先按质量选最优站，再读它的 TFO 能力决定我们开不开。
+#
+# ---- 二、tcpcongestion 按内核能力决定写不写（v1.4.2 起）----
+#
+# setsockopt(TCP_CONGESTION) 在内核没编译 bbr 时返回 EINVAL 被静默忽略。
+#  47.88.102.45  available = reno cubic bbr  → 写 bbr 真生效
+#  AX3600 路由器  available = reno cubic      → 写 bbr 是装饰
+# 判定用 tcp_available_congestion_control（算法是否可用），不用 current
+# （当前默认算法）：per-socket 只要算法可用就生效，也与 `xhy bbr on` 的
+# 判定依据一致。不可用时省略整个字段（继承内核默认，不写死 cubic）。
 #
 # ---- 三、其余四字段无条件写 ----
 #
 # tcpNoDelay / tcpKeepAliveIdle=45 / tcpUserTimeout=10000 / tcpMptcp=false
 # 与 TFO、拥塞控制都无关，任何内核上都成立，砍 sockopt 时不得连带删掉。
-# tcpMptcp 显式写 false 而非省略：GODEBUG 已在进程级关掉 MPTCP，写出来让
-# 读代码的人一眼看到结论（字段存在性已在 26.3.27 + 26.10.31 上实测通过）。
+# tcpMptcp 显式写 false：GODEBUG 已在进程级关掉 MPTCP，写出来让读代码的人
+# 一眼看到结论（字段存在性已在 26.3.27 + 26.10.31 上实测通过）。
+# tcpFastOpenQueueLength 不写：Xray 用默认队列长度即可，实测不影响启用。
 
 # 内核是否编译了 bbr（决定 tcpcongestion 写不写）。
 # 缓存一次，避免每个 inbound 都 fork 一个 sysctl。
@@ -512,12 +518,60 @@ sockopt_cc_available() {
     return 1
 }
 
+# 判定伪装站 target 是否启用被动 TFO。
+# 返回 0 = 支持（应开 TFO）；1 = 不支持或判不了（应关，失败时保守关闭）。
+# 判据：curl --tcp-fastopen 连打 3 次，TcpExtTCPFastOpenActive 是否增长。
+target_tfo_detect() {
+    local dest="$1" port="${2:-443}" sni="${3:-}" b a i resolve=()
+    have_cmd curl || return 1
+    have_cmd nstat || return 1
+    [[ -n "$sni" ]] || sni="$dest"
+    if is_ip_literal "$dest"; then
+        resolve=(--resolve "${sni}:${port}:${dest}")
+    fi
+    b="$(nstat -az 2>/dev/null | awk '$1=="TcpExtTCPFastOpenActive"{print $2}')"
+    [[ "$b" =~ ^[0-9]+$ ]] || return 1
+    i=0
+    while (( i < 3 )); do
+        curl -sk -m 4 --tcp-fastopen "${resolve[@]}" \
+            "https://${sni}:${port}/" -o /dev/null 2>/dev/null || true
+        i=$((i + 1))
+    done
+    a="$(nstat -az 2>/dev/null | awk '$1=="TcpExtTCPFastOpenActive"{print $2}')"
+    [[ "$a" =~ ^[0-9]+$ ]] || return 1
+    if (( a > b )); then
+        return 0
+    fi
+    return 1
+}
+
+# tfo_decide <auto|on|off> <dest> <port> <sni> -> 打印 1（开）或 0（关）
+tfo_decide() {
+    local mode="${1:-auto}" dest="${2:-}" port="${3:-443}" sni="${4:-}"
+    case "$mode" in
+        on)  printf '1'; return 0 ;;
+        off) printf '0'; return 0 ;;
+        auto)
+            if [[ -z "$dest" ]]; then printf '0'; return 0; fi
+            if target_tfo_detect "$dest" "$port" "$sni"; then
+                printf '1'
+            else
+                printf '0'
+            fi
+            return 0 ;;
+        *)   printf '0'; return 0 ;;
+    esac
+}
+
 sockopt_json() {
-    local cc=""
+    local tfo="false" cc=""
+    if [[ "${TFO:-0}" == "1" ]]; then
+        tfo="true"
+    fi
     if sockopt_cc_available; then
         cc=',"tcpcongestion":"bbr"'
     fi
-    printf '"sockopt":{"tcpFastOpen":false,"tcpNoDelay":true,"tcpKeepAliveIdle":45,"tcpUserTimeout":10000,"tcpMptcp":false%s}' "$cc"
+    printf '"sockopt":{"tcpFastOpen":%s,"tcpNoDelay":true,"tcpKeepAliveIdle":45,"tcpUserTimeout":10000,"tcpMptcp":false%s}' "$tfo" "$cc"
 }
 
 # ===================== lib/platform.sh =====================
@@ -1251,6 +1305,9 @@ tune_bbr() {
 
     install -d -m 0755 /etc/sysctl.d
     backup_file "$sysctl_file"
+    # net.ipv4.tcp_fastopen = 3 只是内核「允许」位（bit0 client + bit1 server），
+    # 不代表服务端启用被动 TFO。真正的开关是 sockopt.tcpFastOpen=false
+    # （lib/sockopt.sh）：伪装站不支持 TFO，开了会被主动探测区分出来。
     cat >"$sysctl_file" <<'EOF'
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
@@ -1285,18 +1342,59 @@ EOF
         printf '\n# CVE-2026-98432 secondary path\nnet.ipv4.tcp_migrate_req = 0\n' >>"$sysctl_file"
         sysctl -w net.ipv4.tcp_migrate_req=0 >/dev/null 2>&1 || true
     fi
-    if sysctl -p "$sysctl_file" >/dev/null 2>&1 || sysctl --system >/dev/null 2>&1; then
-        state_set BBR_STATUS "on"
-        ok "BBR 已启用 ($(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null))"
-    else
+    if ! sysctl -p "$sysctl_file" >/dev/null 2>&1 && ! sysctl --system >/dev/null 2>&1; then
         warn "内核参数写入成功但即时应用失败，重启后通常会生效。请执行 xhy check 复查。"
         state_set BBR_STATUS "pending-reboot"
+        return 1
     fi
+    # 「选了开就要真开好」：sysctl -p 返回 0 不代表值真的变了 —— 容器、
+    # 只读 /proc、被别的工具覆盖都会造成假成功。这里按实测值判定。
+    local applied_cc applied_qd
+    applied_cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
+    applied_qd="$(sysctl -n net.core.default_qdisc 2>/dev/null || true)"
+    if [[ "$applied_cc" != "bbr" || "$applied_qd" != "fq" ]]; then
+        warn "sysctl 已下发但实测未生效 (congestion=${applied_cc:-?} qdisc=${applied_qd:-?})；常见于容器 / 只读 /proc / 被覆盖。开机自启已写好，重启后跑 xhy check 复查。"
+        state_set BBR_STATUS "apply-failed"
+        return 1
+    fi
+    state_set BBR_STATUS "on"
+    ok "BBR 已启用并验证 (congestion=bbr qdisc=fq)"
+    return 0
+}
+
+# 幂等兜底：服务端本来就该开 BBR，发现没生效就重新下发。
+# BBR_ENABLED=off 是用户在安装时显式选的「不开」，此时完全不干预；
+# 未设置（老部署 / 默认）视为 on。只在实测未生效时才调 tune_bbr，
+# 避免每次 update config 都重写 sysctl 文件、堆备份。
+bbr_ensure() {
+    local cur qd
+    if [[ "$(state_get BBR_ENABLED on)" == "off" ]]; then
+        return 0
+    fi
+    cur="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
+    qd="$(sysctl -n net.core.default_qdisc 2>/dev/null || true)"
+    if [[ "$cur" == "bbr" && "$qd" == "fq" ]]; then
+        state_set BBR_STATUS "on"
+        return 0
+    fi
+    info "BBR 未生效 (congestion=${cur:-?} qdisc=${qd:-?})，正在启用…"
+    if tune_bbr; then
+        return 0
+    fi
+    return 1
 }
 
 bbr_status() {
-    printf '拥塞控制 : %s\n' "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo '?')"
-    printf 'qdisc    : %s\n' "$(sysctl -n net.core.default_qdisc 2>/dev/null || echo '?')"
+    local cc qd
+    cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
+    qd="$(sysctl -n net.core.default_qdisc 2>/dev/null || true)"
+    printf '拥塞控制 : %s\n' "${cc:-?}"
+    printf 'qdisc    : %s\n' "${qd:-?}"
+    if [[ "$cc" == "bbr" && "$qd" == "fq" ]]; then
+        printf '实际生效 : yes (congestion=bbr + qdisc=fq)\n'
+    else
+        printf '实际生效 : NO (congestion=%s qdisc=%s) → 执行 xhy bbr on\n' "${cc:-?}" "${qd:-?}"
+    fi
     printf '可用算法 : %s\n' "$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || echo '?')"
     printf 'MPTCP    : %s (应为 0)\n' "$(sysctl -n net.mptcp.enabled 2>/dev/null || echo '内核未暴露')"
     printf 'migrate_req: %s (应为 0)\n' "$(sysctl -n net.ipv4.tcp_migrate_req 2>/dev/null || echo '内核未暴露')"
@@ -1560,6 +1658,14 @@ target_help() {
   握手特征与真实站点一致。例：
       target=47.88.102.65:443   SNI=www.easeus.com
   校验会带 --resolve 打这个 IP，验证证书确实覆盖该域名、且没有 CDN 头。
+
+  ---- TFO 与伪装站 ----
+  TFO（TCP Fast Open）是 TCP 层的 0-RTT 特性。Xray 的 tcpFastOpen 实测确实
+  生效，但我们只在伪装站也支持时才开（xhy add reality 默认 --tfo auto）：
+  目标不支持却开，探测者发一个带 cookiereq 的 SYN 就会看到我们回了
+  tfo cookie、真实站点没回，一眼可区分。--tfo on / off 可强制覆盖。
+  伪装站不承载正常代理流量，它的带宽和延迟不影响代理上网速度，所以 scan
+  不把 TFO 纳入打分 —— 先按质量选最优站，再读它的能力。
 EOF
 }
 
@@ -1792,6 +1898,9 @@ EOF
                    confirm "已有 $(scanner_cache_age_h) 小时前的扫描缓存，重新扫描？" "n" \
                        && extra+=(--refresh)
                fi
+               if confirm "是否只选支持 TFO 的伪装站？（不强制则按质量选）" "n"; then
+                   extra+=(--require-tfo)
+               fi
                if sp="$(scanner_pick ${extra[@]+"${extra[@]}"})"; then
                    read -r st ss _ <<<"$sp"
                    ok "最优站点: target=$st SNI=$ss"
@@ -2004,6 +2113,16 @@ scanner_domain_ok() {
 
 # scanner_score <appconnect_ms> <http_code> <size> <wildcard 0|1> <www 0|1>
 # 分数只用于排序，不做合格判定（合格与否由 scanner_probe 决定）。
+#
+# 不把 TFO 能力纳入打分（它是 --require-tfo 的硬过滤项，但不加权）：
+#   - TFO 只是我们服务端 listen socket 的行为，跟随目标即可（见 sockopt.sh
+#     的 target_tfo_detect / tfo_decide），不需要目标「优先支持」；
+#   - 支持被动 TFO 的 HTTPS 站点在公网上是少数，加权会把候选池往冷门站带，
+#     削弱抗探测可信度；
+#   - 伪装站不承载正常代理流量（REALITY 只把未认证探测转发过去），它的带宽和
+#     延迟不影响代理上网速度，凑 TFO 换来的只是首连省 1 RTT。
+# 顺序：先按质量打分 → 展示短名单时现场探测 TFO → 需要则硬过滤 → 用户选。
+# 是否强制由用户在 xhy scan / xhy target 里选，默认不强制。
 scanner_score() {
     local ms="${1:-9999}" code="${2:-0}" size="${3:-0}" wild="${4:-0}" www="${5:-0}" s=100
     [[ "$ms" =~ ^[0-9]+$ ]] || ms=9999
@@ -2257,6 +2376,97 @@ scanner_cache_pick_valid() {
 }
 
 # ---------------------------------------------------------------------------
+# 候选短名单与 TFO 选项
+# ---------------------------------------------------------------------------
+#
+# TFO 能力不写进缓存：它是站点当前配置，7 天 TTL 的缓存反而可能过期。
+# 展示短名单时现场探测（同机房约 0.1s），并用关联数组在同一次调用内去重。
+# 打分不因 TFO 加权（scanner_score 注释），但 --require-tfo 会做硬过滤。
+
+SCANNER_SHORTLIST="${SCANNER_SHORTLIST:-5}"   # 最终展示给用户挑的候选数
+SCANNER_TFO_POOL="${SCANNER_TFO_POOL:-12}"    # require-tfo 时最多探多少个
+# 不能用 declare -A：本文件是被 load_libs() 在函数内 source 的，declare
+# 会创建局部变量，函数返回后它退化成普通索引数组、字符串下标触发算术错误。
+# 用空格分隔的 "ip|sni=0/1" 字符串做去重，无作用域问题。
+XHY_TFO_CACHE=""
+
+# scanner_tfo_of <ip> <sni> -> 1（支持）/ 0（不支持或判不了）
+scanner_tfo_of() {
+    local k="${1}|${2}" r
+    case " $XHY_TFO_CACHE " in
+        *" $k=1 "*) printf '1'; return 0 ;;
+        *" $k=0 "*) printf '0'; return 0 ;;
+    esac
+    if target_tfo_detect "$1" 443 "$2"; then r=1; else r=0; fi
+    XHY_TFO_CACHE="$XHY_TFO_CACHE $k=$r"
+    printf '%s' "$r"
+}
+
+# 从缓存挑 3–5 个候选展示给用户选。
+# stdout 只输出最终 "<target> <sni> scan"；列表与提示一律走 stderr，
+# 因为调用方是 `best="$(scanner_pick)"`。
+# 非交互（读不到 /dev/tty）时自动取第 1 个，脚本化调用不会被卡住。
+scanner_shortlist() {
+    local require="${1:-0}" want="${2:-$SCANNER_SHORTLIST}" pool
+    local -a tgts=() snis=() scs=() mss=() codes=() tfos=()
+    local sc ip sni tgt ms code size iss tls at tfo n=0 ans="" pick=0 i
+    if (( require == 1 )); then
+        pool="$SCANNER_TFO_POOL"
+    else
+        pool=$(( want * 3 ))
+    fi
+    XHY_TFO_CACHE=""
+    while IFS=$'\t' read -r sc ip sni tgt ms code size iss tls at; do
+        [[ -n "$tgt" ]] || continue
+        (( n >= pool )) && break
+        n=$(( n + 1 ))
+        target_validate "$tgt" "$sni" >&2 || continue
+        tfo="$(scanner_tfo_of "$ip" "$sni")"
+        if (( require == 1 )) && [[ "$tfo" != "1" ]]; then continue; fi
+        tgts+=("$tgt"); snis+=("$sni"); scs+=("$sc")
+        mss+=("$ms"); codes+=("$code"); tfos+=("$tfo")
+        (( ${#tgts[@]} >= want )) && break
+    done < <(scanner_cache_best)
+
+    if (( ${#tgts[@]} == 0 )); then
+        if (( require == 1 )); then
+            warn "前 $pool 个候选里没有支持被动 TFO 的站点。可去掉 --require-tfo、换网段，或 xhy scan --refresh 重扫。"
+        else
+            warn "缓存里没有通过校验的候选，请 xhy scan --refresh 重扫。"
+        fi
+        return 1
+    fi
+
+    {
+        printf '\n  候选伪装站（按质量排序；TFO=目标是否支持被动 TFO）\n'
+        printf '  %-3s %-5s %-16s %-34s %8s %6s  %s\n' "#" "分数" "IP" "SNI" "握手" "HTTP" "TFO"
+        printf '  %s\n' "--------------------------------------------------------------------------------------------"
+        for (( i=0; i<${#tgts[@]}; i++ )); do
+            if [[ "${tfos[$i]}" == "1" ]]; then tfo="支持"; else tfo="—"; fi
+            printf '  %-3s %-5s %-16s %-34s %6sms %6s  %s\n' \
+                "$(( i + 1 ))" "${scs[$i]}" "${tgts[$i]%%:*}" "${snis[$i]}" \
+                "${mss[$i]}" "${codes[$i]}" "$tfo"
+        done
+        if (( require == 1 )); then
+            printf '  （已按「必须支持 TFO」过滤）\n'
+        else
+            printf '  （未强制 TFO；列表里也可能含支持 TFO 的站点）\n'
+        fi
+        printf '\n'
+    } >&2
+
+    printf '  选哪个 [1-%d]（回车=1，0=自动取最高分）: ' "${#tgts[@]}" >&2
+    if read -r ans </dev/tty 2>/dev/null; then :; else ans=""; fi
+    printf '\n' >&2
+    if [[ "$ans" =~ ^[0-9]+$ ]] && (( ans >= 1 && ans <= ${#tgts[@]} )); then
+        pick=$(( ans - 1 ))
+    fi
+    printf '%s %s scan\n' "${tgts[$pick]}" "${snis[$pick]}"
+    sc_ok "已选: target=${tgts[$pick]} SNI=${snis[$pick]}（TFO=${tfos[$pick]}）"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # 扫描与选择
 # ---------------------------------------------------------------------------
 
@@ -2303,21 +2513,23 @@ scanner_prune_work() {
 }
 
 # 输出 "<target> <sni> <label>"：优先用有效缓存，否则扫本机 /24（不够再扩 /21）。
-#   scanner_pick [--refresh] [--cidr 1.2.3.0/24]
+#   scanner_pick [--refresh] [--cidr 1.2.3.0/24] [--require-tfo]
+# --require-tfo：只展示支持被动 TFO 的候选；默认不强制（按质量选，可能含 TFO 站）。
 scanner_pick() {
-    local refresh=0 cidr="" best wide
+    local refresh=0 cidr="" best wide require_tfo=0
     while (( $# > 0 )); do
         case "$1" in
             --refresh) refresh=1; shift ;;
             --cidr)    cidr="${2:?--cidr 需要网段}"; shift 2 ;;
-            -*)        die "未知参数: $1（可用 --refresh / --cidr）" ;;
+            --require-tfo) require_tfo=1; shift ;;
+            -*)        die "未知参数: $1（可用 --refresh / --cidr / --require-tfo）" ;;
             *)         cidr="$1"; shift ;;
         esac
     done
 
     if (( refresh == 0 )) && scanner_cache_valid; then
         sc_info "使用扫描缓存（$(scanner_cache_age_h) 小时前，$(scanner_cache_count) 个候选；--refresh 可强制重扫）"
-        if best="$(scanner_cache_pick_valid)"; then
+        if best="$(scanner_shortlist "$require_tfo")"; then
             printf '%s\n' "$best"
             return 0
         fi
@@ -2345,7 +2557,7 @@ scanner_pick() {
         esac
     fi
 
-    if best="$(scanner_cache_pick_valid)"; then
+    if best="$(scanner_shortlist "$require_tfo")"; then
         printf '%s\n' "$best"
         return 0
     fi
@@ -2693,13 +2905,13 @@ write_fragment() {
 # node_add MODE PORT [--host H] [--path P] [--sni S] [--target T]
 #                    [--token TOKEN] [--domain D] [--reality] [--uuid U]
 #                    [--scan] [--scan-cidr CIDR] [--scan-refresh]
-#                    [--masq-proxy]
+#                    [--masq-proxy] [--tfo auto|on|off]
 node_add() {
     local mode="$1" port="$2"; shift 2
     local host="" path="" sni="" target="" token="" domain="" uuid="" with_reality="0"
     local masq="" up="" down=""
     local use_scan="0" scan_cidr="" scan_refresh="0"
-    local masq_mode="string"
+    local masq_mode="string" tfo_opt="auto" tfo_val="0"
     while (( $# > 0 )); do
         case "$1" in
             --host)   host="$2"; shift 2 ;;
@@ -2712,9 +2924,7 @@ node_add() {
             --masq)   masq="$2"; shift 2 ;;
             --up)     up="$2"; shift 2 ;;
             --down)   down="$2"; shift 2 ;;
-            --tfo)
-                die "--tfo 已在 v1.4.0 移除：TFO 固定关闭（目标不支持 + Xray 侧不生效 + 与 REALITY 伪装无关）。
-    理由与实测见 CHANGELOG v1.3.1/v1.4.0；确需重估请改 lib/sockopt.sh 一处。" ;;
+            --tfo)    tfo_opt="$2"; shift 2 ;;
             --masq-proxy) masq_mode="proxy"; shift ;;
             --reality) with_reality="1"; shift ;;
             --scan)        use_scan="1"; shift ;;
@@ -2789,11 +2999,17 @@ node_add() {
             read -r priv pub <<<"$kp"
             [[ -n "$priv" && -n "$pub" ]] || { err "x25519 密钥生成失败"; return 1; }
             sid="$(rand_hex 8)"
+            tfo_val="$(tfo_decide "$tfo_opt" "${tgt%%:*}" "${tgt##*:}" "$t_sni")"
+            if [[ "$tfo_val" == "1" ]]; then
+                info "伪装站支持 TFO → 本节点 tcpFastOpen=true（--tfo off 可覆盖）"
+            else
+                info "伪装站不支持 TFO → 本节点 tcpFastOpen=false（--tfo on 可覆盖）"
+            fi
             pairs=(
                 "MODE=reality" "PORT=$port" "PUBLIC=1" "UUID=$uuid" "NODE_PATH=$path"
                 "NODE_HOST=$host" "SNI=$t_sni" "TARGET=$tgt"
                 "PRIVATE_KEY=$priv" "PUBLIC_KEY=$pub" "SHORT_ID=$sid"
-                "FP=chrome" "SECURITY=reality" "TFO=0" "CREATED=$(date -Is)"
+                "FP=chrome" "SECURITY=reality" "TFO=$tfo_val" "CREATED=$(date -Is)"
             ) ;;
         xhttp)
             if [[ "$with_reality" == "1" || -n "$target" ]]; then
@@ -2815,11 +3031,12 @@ node_add() {
                 [[ -n "$priv" && -n "$pub" ]] || { err "x25519 密钥生成失败"; return 1; }
                 sid="$(rand_hex 8)"
             fi
+            tfo_val="$(tfo_decide "$tfo_opt" "${tgt:-}" "${tgt##*:}" "${t_sni:-$host}")"
             pairs=(
                 "MODE=xhttp" "PORT=$port" "PUBLIC=1" "UUID=$uuid" "NODE_PATH=$path"
                 "NODE_HOST=$host" "SNI=${t_sni:-$host}" "TARGET=${tgt:-}"
                 "PRIVATE_KEY=${priv:-}" "PUBLIC_KEY=${pub:-}" "SHORT_ID=${sid:-}"
-                "FP=chrome" "SECURITY=$security" "TFO=0" "CREATED=$(date -Is)"
+                "FP=chrome" "SECURITY=$security" "TFO=$tfo_val" "CREATED=$(date -Is)"
             ) ;;
         direct)
             pairs=(
@@ -3554,6 +3771,9 @@ update_geodata() {
 
 update_config() {
     need_root
+    # 服务端本来就该开 BBR：每次重建配置顺手兜底，实测没生效就重新下发。
+    # 安装时显式选了「不开」(BBR_ENABLED=off) 的不会被强行打开。
+    bbr_ensure || warn "BBR 未生效，可执行 xhy bbr on 复查。"
     node_rebuild_all
     [[ "$(state_get FIREWALL_MODE off)" != "off" ]] && firewall_apply "$(state_get FIREWALL_MODE safe)" --quiet
     ok "配置已按当前设置重建"
@@ -3824,19 +4044,23 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
     add 选项: --host --path --uuid --sni --target --domain --token --reality
               --masq --masq-proxy --up --down   (hy2 专用)
               --scan [--scan-cidr CIDR] [--scan-refresh]   (reality 专用)
+              --tfo auto|on|off            (reality/xhttp；auto=跟随伪装站，默认)
     默认端口: direct 8080 / tunnel 10086 / reality 443 / xhttp 8081 / hy2 8443(UDP)
     hy2 用 Xray 内置 Hysteria2 入站(v26.3.27+)，自签证书 + pinSHA256 链接
     hy2 默认 masquerade type=string（静态页）；--masq-proxy 改为反代真站，
       伪装性更好，但未认证流量会走本机带宽
 
   伪装站自动扫描
-    scan [网段]                 扫本机机房网段，挑最优伪装站（结果缓存复用）
+    scan [网段]                 扫本机机房网段，列出 3-5 个候选让你挑（结果缓存复用）
+    scan --require-tfo          只列出支持被动 TFO 的候选；不给则交互询问一次
     scan --list                 查看缓存里的候选与打分
     scan --verify               复核缓存候选，剔除已失效的
     scan --refresh              忽略缓存重新扫描
     scan --clear                清除缓存
     原理: 用 RealiTLScanner 在 /24 里枚举 TLS 1.3 + h2 站点，再逐个用真实 SNI
-    做证书/跳转/CDN 校验，取分数最高的那个作为「dest=源站 IP + SNI=域名」。
+    做证书/跳转/CDN 校验并打分，最后列出前 3-5 个候选由你选（脚本化调用
+    自动取最高分）。TFO 只是展示/过滤项，不参与打分：不强制时按质量选，
+    结果里也可能带支持 TFO 的站点；强制时只留支持 TFO 的。
     结果记在 /etc/xray-hy/scan-cache.tsv（默认 7 天），此后再建 REALITY 节点
     直接复用，不会重复扫描。仅 amd64 / arm64 支持，其它架构回退内置地区库。
 
@@ -3850,6 +4074,18 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
     交互菜单 8) 伪装站 → 3) 手动指定 支持同一写法（1.2.3.4:443,sni=www.example.com），
     校验会用 --resolve 打该 IP，测证书是否真的覆盖这个域名。
     不想手挑就用 xhy scan：自动扫本机机房网段并选最优站点（结果缓存复用）。
+
+  TFO（TCP Fast Open）— 默认跟随伪装站，可强制覆盖
+    Xray 的 tcpFastOpen 实测确实生效（服务端能收 SYN 里的 early data、能给
+    cookiereq 回 cookie）。但开不开要看伪装站：
+      伪装站支持被动 TFO → auto 默认开，探测者看到的 SYN-ACK 一致，白拿 1 RTT
+      伪装站不支持        → auto 默认关；否则探测者发一个带 cookiereq 的 SYN，
+                            我们会回 tfo cookie、真实站点不回，一眼就能区分开
+    auto 用 curl --tcp-fastopen 连打 3 次看内核 TcpExtTCPFastOpenActive 是否
+    增长，判定结果写进节点配置，重建配置不会重复探测。--tfo on / off 强制覆盖。
+    客户端默认跟随服务端：我们开它开、我们关它关。
+    注：伪装站不承载正常代理流量（REALITY 只把未认证探测转发过去），它的带宽
+    和延迟不影响代理上网速度；扫描不为凑 TFO 缩小候选池，先按质量选最优站。
 
   配置
     config                      路由/DNS/日志开关菜单（也可直接 set）
@@ -3921,7 +4157,11 @@ cmd_install() {
 
     stage 6 7 "内核网络优化与防火墙"
     if confirm "启用 BBR 与内核网络优化？" "y"; then
-        tune_bbr || warn "BBR 未启用，可执行 xhy check 复查。"
+        state_set BBR_ENABLED on
+        bbr_ensure || warn "BBR 未启用，可执行 xhy bbr on / xhy check 复查。"
+    else
+        state_set BBR_ENABLED off
+        warn "已跳过 BBR（要启用请执行 xhy bbr on）"
     fi
     if confirm "配置防火墙（safe 模式：SSH 防爆破 + 放行节点端口，不改动现有规则）？" "y"; then
         state_set FIREWALL_MODE safe
@@ -4042,10 +4282,9 @@ cmd_add() {
     while (( $# > 0 )); do
         case "$1" in
             --port)   port="$2"; shift 2 ;;
-            --host|--path|--uuid|--sni|--target|--domain|--token|--masq|--up|--down|--scan-cidr)
+            --host|--path|--uuid|--sni|--target|--domain|--token|--masq|--up|--down|--scan-cidr|--tfo)
                 opts+=("$1" "$2"); shift 2 ;;
             --reality|--scan|--scan-refresh|--masq-proxy) opts+=("$1"); shift ;;
-            --tfo) die "--tfo 已在 v1.4.0 移除：TFO 固定关闭（实测目标不支持、Xray 侧也不生效）" ;;
             *) die "未知参数: $1（见 xhy --help）" ;;
         esac
     done
@@ -4055,15 +4294,16 @@ cmd_add() {
 
 # xhy scan [网段] [--refresh|--list|--verify|--clear]
 cmd_scan() {
-    local cidr="" refresh=0 mode="run" best st ss sl
+    local cidr="" refresh=0 mode="run" best st ss sl require=0
     while (( $# > 0 )); do
         case "$1" in
             --refresh) refresh=1; shift ;;
             --list)    mode="list"; shift ;;
             --clear)   mode="clear"; shift ;;
             --verify)  mode="verify"; shift ;;
+            --require-tfo) require=1; shift ;;
             --cidr)    cidr="${2:?--cidr 需要网段}"; shift 2 ;;
-            -*)        die "未知参数: $1（用法: xhy scan [网段] [--refresh|--list|--verify|--clear]）" ;;
+            -*)        die "未知参数: $1（用法: xhy scan [网段] [--refresh|--list|--verify|--clear|--require-tfo]）" ;;
             *)         cidr="$1"; shift ;;
         esac
     done
@@ -4075,6 +4315,15 @@ cmd_scan() {
             local -a args=()
             if (( refresh == 1 )); then args+=(--refresh); fi
             if [[ -n "$cidr" ]]; then args+=(--cidr "$cidr"); fi
+            # 交互式问一次「是否必须 TFO」；显式给了 flag 或非 tty 时跳过。
+            if (( require == 0 )) && [[ -r /dev/tty ]]; then
+                printf '是否只选支持 TFO 的伪装站？(y/N，回车=不强制): ' >&2
+                local ans=""
+                if read -r ans </dev/tty 2>/dev/null; then :; else ans=""; fi
+                printf '\n' >&2
+                if [[ "$ans" == "y" || "$ans" == "Y" ]]; then require=1; fi
+            fi
+            if (( require == 1 )); then args+=(--require-tfo); fi
             if best="$(scanner_pick ${args[@]+"${args[@]}"})"; then
                 read -r st ss sl <<<"$best"
                 printf '\n最优伪装站: target=%s  SNI=%s（来源 %s）\n\n' "$st" "$ss" "$sl"
@@ -4305,7 +4554,10 @@ main() {
                         off)    firewall_off ;;
                         *)      firewall_status ;;
                     esac ;;
-        bbr)        case "${1:-status}" in on) tune_bbr ;; *) bbr_status ;; esac ;;
+        bbr)        case "${1:-status}" in
+                        on) state_set BBR_ENABLED on; bbr_ensure || warn "BBR 未启用，可执行 xhy check 复查。" ;;
+                        *)  bbr_status ;;
+                    esac ;;
         core)       case "${1:-status}" in
                         status)  core_status ;;
                         channel) xray_set_channel "${2:?需要 pinned/latest/vX.Y.Z}"; core_status ;;

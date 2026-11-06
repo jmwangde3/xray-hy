@@ -53,6 +53,9 @@ tune_bbr() {
 
     install -d -m 0755 /etc/sysctl.d
     backup_file "$sysctl_file"
+    # net.ipv4.tcp_fastopen = 3 只是内核「允许」位（bit0 client + bit1 server），
+    # 不代表服务端启用被动 TFO。真正的开关是 sockopt.tcpFastOpen=false
+    # （lib/sockopt.sh）：伪装站不支持 TFO，开了会被主动探测区分出来。
     cat >"$sysctl_file" <<'EOF'
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
@@ -87,18 +90,59 @@ EOF
         printf '\n# CVE-2026-98432 secondary path\nnet.ipv4.tcp_migrate_req = 0\n' >>"$sysctl_file"
         sysctl -w net.ipv4.tcp_migrate_req=0 >/dev/null 2>&1 || true
     fi
-    if sysctl -p "$sysctl_file" >/dev/null 2>&1 || sysctl --system >/dev/null 2>&1; then
-        state_set BBR_STATUS "on"
-        ok "BBR 已启用 ($(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null))"
-    else
+    if ! sysctl -p "$sysctl_file" >/dev/null 2>&1 && ! sysctl --system >/dev/null 2>&1; then
         warn "内核参数写入成功但即时应用失败，重启后通常会生效。请执行 xhy check 复查。"
         state_set BBR_STATUS "pending-reboot"
+        return 1
     fi
+    # 「选了开就要真开好」：sysctl -p 返回 0 不代表值真的变了 —— 容器、
+    # 只读 /proc、被别的工具覆盖都会造成假成功。这里按实测值判定。
+    local applied_cc applied_qd
+    applied_cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
+    applied_qd="$(sysctl -n net.core.default_qdisc 2>/dev/null || true)"
+    if [[ "$applied_cc" != "bbr" || "$applied_qd" != "fq" ]]; then
+        warn "sysctl 已下发但实测未生效 (congestion=${applied_cc:-?} qdisc=${applied_qd:-?})；常见于容器 / 只读 /proc / 被覆盖。开机自启已写好，重启后跑 xhy check 复查。"
+        state_set BBR_STATUS "apply-failed"
+        return 1
+    fi
+    state_set BBR_STATUS "on"
+    ok "BBR 已启用并验证 (congestion=bbr qdisc=fq)"
+    return 0
+}
+
+# 幂等兜底：服务端本来就该开 BBR，发现没生效就重新下发。
+# BBR_ENABLED=off 是用户在安装时显式选的「不开」，此时完全不干预；
+# 未设置（老部署 / 默认）视为 on。只在实测未生效时才调 tune_bbr，
+# 避免每次 update config 都重写 sysctl 文件、堆备份。
+bbr_ensure() {
+    local cur qd
+    if [[ "$(state_get BBR_ENABLED on)" == "off" ]]; then
+        return 0
+    fi
+    cur="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
+    qd="$(sysctl -n net.core.default_qdisc 2>/dev/null || true)"
+    if [[ "$cur" == "bbr" && "$qd" == "fq" ]]; then
+        state_set BBR_STATUS "on"
+        return 0
+    fi
+    info "BBR 未生效 (congestion=${cur:-?} qdisc=${qd:-?})，正在启用…"
+    if tune_bbr; then
+        return 0
+    fi
+    return 1
 }
 
 bbr_status() {
-    printf '拥塞控制 : %s\n' "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo '?')"
-    printf 'qdisc    : %s\n' "$(sysctl -n net.core.default_qdisc 2>/dev/null || echo '?')"
+    local cc qd
+    cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
+    qd="$(sysctl -n net.core.default_qdisc 2>/dev/null || true)"
+    printf '拥塞控制 : %s\n' "${cc:-?}"
+    printf 'qdisc    : %s\n' "${qd:-?}"
+    if [[ "$cc" == "bbr" && "$qd" == "fq" ]]; then
+        printf '实际生效 : yes (congestion=bbr + qdisc=fq)\n'
+    else
+        printf '实际生效 : NO (congestion=%s qdisc=%s) → 执行 xhy bbr on\n' "${cc:-?}" "${qd:-?}"
+    fi
     printf '可用算法 : %s\n' "$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || echo '?')"
     printf 'MPTCP    : %s (应为 0)\n' "$(sysctl -n net.mptcp.enabled 2>/dev/null || echo '内核未暴露')"
     printf 'migrate_req: %s (应为 0)\n' "$(sysctl -n net.ipv4.tcp_migrate_req 2>/dev/null || echo '内核未暴露')"

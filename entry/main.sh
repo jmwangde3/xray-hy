@@ -62,19 +62,23 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
     add 选项: --host --path --uuid --sni --target --domain --token --reality
               --masq --masq-proxy --up --down   (hy2 专用)
               --scan [--scan-cidr CIDR] [--scan-refresh]   (reality 专用)
+              --tfo auto|on|off            (reality/xhttp；auto=跟随伪装站，默认)
     默认端口: direct 8080 / tunnel 10086 / reality 443 / xhttp 8081 / hy2 8443(UDP)
     hy2 用 Xray 内置 Hysteria2 入站(v26.3.27+)，自签证书 + pinSHA256 链接
     hy2 默认 masquerade type=string（静态页）；--masq-proxy 改为反代真站，
       伪装性更好，但未认证流量会走本机带宽
 
   伪装站自动扫描
-    scan [网段]                 扫本机机房网段，挑最优伪装站（结果缓存复用）
+    scan [网段]                 扫本机机房网段，列出 3-5 个候选让你挑（结果缓存复用）
+    scan --require-tfo          只列出支持被动 TFO 的候选；不给则交互询问一次
     scan --list                 查看缓存里的候选与打分
     scan --verify               复核缓存候选，剔除已失效的
     scan --refresh              忽略缓存重新扫描
     scan --clear                清除缓存
     原理: 用 RealiTLScanner 在 /24 里枚举 TLS 1.3 + h2 站点，再逐个用真实 SNI
-    做证书/跳转/CDN 校验，取分数最高的那个作为「dest=源站 IP + SNI=域名」。
+    做证书/跳转/CDN 校验并打分，最后列出前 3-5 个候选由你选（脚本化调用
+    自动取最高分）。TFO 只是展示/过滤项，不参与打分：不强制时按质量选，
+    结果里也可能带支持 TFO 的站点；强制时只留支持 TFO 的。
     结果记在 /etc/xray-hy/scan-cache.tsv（默认 7 天），此后再建 REALITY 节点
     直接复用，不会重复扫描。仅 amd64 / arm64 支持，其它架构回退内置地区库。
 
@@ -88,6 +92,18 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
     交互菜单 8) 伪装站 → 3) 手动指定 支持同一写法（1.2.3.4:443,sni=www.example.com），
     校验会用 --resolve 打该 IP，测证书是否真的覆盖这个域名。
     不想手挑就用 xhy scan：自动扫本机机房网段并选最优站点（结果缓存复用）。
+
+  TFO（TCP Fast Open）— 默认跟随伪装站，可强制覆盖
+    Xray 的 tcpFastOpen 实测确实生效（服务端能收 SYN 里的 early data、能给
+    cookiereq 回 cookie）。但开不开要看伪装站：
+      伪装站支持被动 TFO → auto 默认开，探测者看到的 SYN-ACK 一致，白拿 1 RTT
+      伪装站不支持        → auto 默认关；否则探测者发一个带 cookiereq 的 SYN，
+                            我们会回 tfo cookie、真实站点不回，一眼就能区分开
+    auto 用 curl --tcp-fastopen 连打 3 次看内核 TcpExtTCPFastOpenActive 是否
+    增长，判定结果写进节点配置，重建配置不会重复探测。--tfo on / off 强制覆盖。
+    客户端默认跟随服务端：我们开它开、我们关它关。
+    注：伪装站不承载正常代理流量（REALITY 只把未认证探测转发过去），它的带宽
+    和延迟不影响代理上网速度；扫描不为凑 TFO 缩小候选池，先按质量选最优站。
 
   配置
     config                      路由/DNS/日志开关菜单（也可直接 set）
@@ -159,7 +175,11 @@ cmd_install() {
 
     stage 6 7 "内核网络优化与防火墙"
     if confirm "启用 BBR 与内核网络优化？" "y"; then
-        tune_bbr || warn "BBR 未启用，可执行 xhy check 复查。"
+        state_set BBR_ENABLED on
+        bbr_ensure || warn "BBR 未启用，可执行 xhy bbr on / xhy check 复查。"
+    else
+        state_set BBR_ENABLED off
+        warn "已跳过 BBR（要启用请执行 xhy bbr on）"
     fi
     if confirm "配置防火墙（safe 模式：SSH 防爆破 + 放行节点端口，不改动现有规则）？" "y"; then
         state_set FIREWALL_MODE safe
@@ -280,10 +300,9 @@ cmd_add() {
     while (( $# > 0 )); do
         case "$1" in
             --port)   port="$2"; shift 2 ;;
-            --host|--path|--uuid|--sni|--target|--domain|--token|--masq|--up|--down|--scan-cidr)
+            --host|--path|--uuid|--sni|--target|--domain|--token|--masq|--up|--down|--scan-cidr|--tfo)
                 opts+=("$1" "$2"); shift 2 ;;
             --reality|--scan|--scan-refresh|--masq-proxy) opts+=("$1"); shift ;;
-            --tfo) die "--tfo 已在 v1.4.0 移除：TFO 固定关闭（实测目标不支持、Xray 侧也不生效）" ;;
             *) die "未知参数: $1（见 xhy --help）" ;;
         esac
     done
@@ -293,15 +312,16 @@ cmd_add() {
 
 # xhy scan [网段] [--refresh|--list|--verify|--clear]
 cmd_scan() {
-    local cidr="" refresh=0 mode="run" best st ss sl
+    local cidr="" refresh=0 mode="run" best st ss sl require=0
     while (( $# > 0 )); do
         case "$1" in
             --refresh) refresh=1; shift ;;
             --list)    mode="list"; shift ;;
             --clear)   mode="clear"; shift ;;
             --verify)  mode="verify"; shift ;;
+            --require-tfo) require=1; shift ;;
             --cidr)    cidr="${2:?--cidr 需要网段}"; shift 2 ;;
-            -*)        die "未知参数: $1（用法: xhy scan [网段] [--refresh|--list|--verify|--clear]）" ;;
+            -*)        die "未知参数: $1（用法: xhy scan [网段] [--refresh|--list|--verify|--clear|--require-tfo]）" ;;
             *)         cidr="$1"; shift ;;
         esac
     done
@@ -313,6 +333,15 @@ cmd_scan() {
             local -a args=()
             if (( refresh == 1 )); then args+=(--refresh); fi
             if [[ -n "$cidr" ]]; then args+=(--cidr "$cidr"); fi
+            # 交互式问一次「是否必须 TFO」；显式给了 flag 或非 tty 时跳过。
+            if (( require == 0 )) && [[ -r /dev/tty ]]; then
+                printf '是否只选支持 TFO 的伪装站？(y/N，回车=不强制): ' >&2
+                local ans=""
+                if read -r ans </dev/tty 2>/dev/null; then :; else ans=""; fi
+                printf '\n' >&2
+                if [[ "$ans" == "y" || "$ans" == "Y" ]]; then require=1; fi
+            fi
+            if (( require == 1 )); then args+=(--require-tfo); fi
             if best="$(scanner_pick ${args[@]+"${args[@]}"})"; then
                 read -r st ss sl <<<"$best"
                 printf '\n最优伪装站: target=%s  SNI=%s（来源 %s）\n\n' "$st" "$ss" "$sl"
@@ -543,7 +572,10 @@ main() {
                         off)    firewall_off ;;
                         *)      firewall_status ;;
                     esac ;;
-        bbr)        case "${1:-status}" in on) tune_bbr ;; *) bbr_status ;; esac ;;
+        bbr)        case "${1:-status}" in
+                        on) state_set BBR_ENABLED on; bbr_ensure || warn "BBR 未启用，可执行 xhy check 复查。" ;;
+                        *)  bbr_status ;;
+                    esac ;;
         core)       case "${1:-status}" in
                         status)  core_status ;;
                         channel) xray_set_channel "${2:?需要 pinned/latest/vX.Y.Z}"; core_status ;;
