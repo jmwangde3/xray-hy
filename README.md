@@ -2,6 +2,8 @@
 
 模块化 Xray 部署管理脚本。一个仓库同时覆盖 **Debian/Ubuntu (systemd)** 与 **Alpine (OpenRC)**，支持四种节点模式并存、多节点管理、系统加固、版本钉死与后续更新。
 
+> 仓库：`https://github.com/jmwangde3/xray-hy`（当前为私有仓库，推送与自更新依赖已配置的 git 凭据）
+>
 > **合规声明**：本项目是通用网络软件的配置自动化工具，仅供学习、研究及在**符合所在地法律法规与服务商条款**的前提下使用。在中国境内，未经主管部门批准自行建立或使用非法定信道进行国际联网属于违规行为；请勿将本脚本用于任何违法用途。使用者需自行承担合规责任。
 
 ---
@@ -28,7 +30,8 @@
 
 ```sh
 # 以 root 执行
-git clone <你的仓库地址> /opt/xray-hy
+gh repo clone jmwangde3/xray-hy /opt/xray-hy      # 私有仓库，需先 gh auth login
+# 或：git clone https://github.com/jmwangde3/xray-hy.git /opt/xray-hy
 cd /opt/xray-hy
 bash xhy install        # 依赖 -> Xray -> 服务 -> BBR -> 防火墙 -> 空配置自检
 xhy                     # 打开交互菜单（install 已创建 /usr/local/bin/xhy 软链）
