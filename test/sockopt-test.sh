@@ -122,6 +122,9 @@ ck "scanner 注释说明不纳入打分" "grep -q '不把 TFO 能力纳入打分
 ck "nodes.sh 用 tfo_decide"    "grep -q 'tfo_decide' lib/nodes.sh"
 ck "nodes.sh 不写死 reality TFO=0" \
    "! grep -q '\"SECURITY=reality\" \"TFO=0\"' lib/nodes.sh"
+ck "check 不再写『固定，无开关』"   "! grep -q '固定，无开关' lib/update.sh"
+ck "check 显示跟随伪装站"           "grep -q '跟随伪装站' lib/update.sh"
+ck "check 统计节点 TFO 开/关"       "grep -q '_tfo_on' lib/update.sh"
 
 echo ""
 echo "sockopt-test: $pass passed, $fail failed"

@@ -187,9 +187,18 @@ self_check() {
     printf 'access日志: %s\n' "$(state_get ACCESS_LOG 'off')"
     printf 'bufferSize: %s KB\n' "$(state_get BUFFER_SIZE 512)"
     printf '端口范围  : %s\n' "$(sysctl -n net.ipv4.ip_local_port_range 2>/dev/null || echo '?')"
-    # v1.4.0 起 TFO 固定关闭，不再统计命中数 —— 那个数字永远是 0，
-    # 摆出来只会让人以为"开了但没命中"。要确认真的没启用，看这里就够了。
-    printf 'TFO       : off（固定，无开关；详见 lib/sockopt.sh 文件头）\n'
+    # v1.4.3 起 TFO 跟随伪装站（--tfo auto|on|off）；显示现网节点的实际判定，
+    # 不再摆一个永远为 0 的「命中数」，也不再写「固定、无开关」那种过时文案。
+    local _f _tfo_on=0 _tfo_off=0
+    for _f in "$XHY_NODES"/*.env; do
+        [[ -f "$_f" ]] || continue
+        if grep -q '^TFO=1$' "$_f" 2>/dev/null; then
+            _tfo_on=$(( _tfo_on + 1 ))
+        else
+            _tfo_off=$(( _tfo_off + 1 ))
+        fi
+    done
+    printf 'TFO       : 跟随伪装站（开 %d / 关 %d；--tfo auto|on|off 可覆盖）\n' "$_tfo_on" "$_tfo_off"
     # v1.4.2：tcpcongestion 按内核能力决定写不写，无 bbr 时该字段根本不出现。
     # 这里显示的是**实际渲染结果**而不是"应该是什么"，排查时少一层猜测。
     if sockopt_cc_available; then
