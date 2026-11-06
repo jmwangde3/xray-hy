@@ -60,7 +60,7 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
 
     mode: direct | tunnel | reality | xhttp | hy2
     add 选项: --host --path --uuid --sni --target --domain --token --reality
-              --tfo auto|on|off             (TCP 节点；auto 跟随伪装站 SYN-ACK)
+              --tfo auto|on|off             (TCP 节点；auto=默认关，实测 TFO 无收益、见 handoff)
               --masq --masq-proxy --up --down   (hy2 专用)
               --scan [--scan-cidr CIDR] [--scan-refresh]   (reality 专用)
     默认端口: direct 8080 / tunnel 10086 / reality 443 / xhttp 8081 / hy2 8443(UDP)

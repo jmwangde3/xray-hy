@@ -1,69 +1,29 @@
 #!/usr/bin/env bash
-# xray-hy / per-inbound sockopt + TCP Fast Open probing.
+# xray-hy / per-inbound sockopt.
 #
-# TFO 不是吞吐参数：它最多省掉 TCP 握手最后半程，且只有 CLIENT 也发 TFO
-# option 时才生效。Xray / sing-box / mihomo 客户端默认 tcpFastOpen=false，
-# 所以服务端单方面打开等于零收益。这里不做"一律开"，而是让 REALITY 节点
-# 跟着被伪装站自己的 SYN-ACK 走 —— 与伪装目标不一致才是特征，一致不是。
-
-# target_tfo_probe <连接地址> [端口] [TLS SNI]
-#   0 = target 的 SYN-ACK 带 TFO option
-#   1 = SYN-ACK 抓到了，但不带 TFO option
-#   2 = 无法判定（缺 tcpdump/openssl/timeout，或两次都没抓到 SYN-ACK）
-# 连接地址用 dest（可能是源站 IP），SNI 单独给 —— 域名解析到 CDN 时两者不同，
-# 要跟的是源站的 SYN-ACK，不是 Cloudflare 边缘的。
-target_tfo_probe() {
-    local host="$1" port="${2:-443}" sni="${3:-$1}" out pid rc=2 attempt rhost filt
-    have_cmd tcpdump  || return 2
-    have_cmd openssl  || return 2
-    have_cmd timeout  || return 2
-    out="$(mktemp "${TMPDIR:-/tmp}/xhy-tfo.XXXXXX" 2>/dev/null)" || return 2
-
-    # 必须按源 IP 收窄：只写 `src port 443` 会把本机 443 入站发出的 SYN-ACK
-    # 一起抓进来（REALITY 自己就监听 443），那样测到的是自己不是目标。
-    filt="tcp and src port $port and tcp[tcpflags] & (tcp-syn|tcp-ack) == (tcp-syn|tcp-ack)"
-    rhost="$host"
-    if [[ ! "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        if have_cmd getent; then
-            rhost="$(getent ahostsv4 "$host" 2>/dev/null | awk 'NR==1{print $1}')"
-        elif have_cmd nslookup; then
-            rhost="$(nslookup "$host" 2>/dev/null \
-                | awk '/^Address: /{print $2}' | grep -E '^[0-9]+\.' | head -1)"
-        else
-            rhost=""
-        fi
-    fi
-    if [[ -n "$rhost" ]]; then
-        filt="tcp and src host $rhost and src port $port and tcp[tcpflags] & (tcp-syn|tcp-ack) == (tcp-syn|tcp-ack)"
-    fi
-
-    # 直接吃 tcpdump 的文本输出，不写 pcap：`-w` 有输出缓冲，杀进程那一刻
-    # 可能还是空文件（实测过），文本管道 + `grep -m1` 命中第一条 SYN-ACK 就
-    # 退出，既快也不依赖缓冲行为。
-    for attempt in 1 2; do
-        : >"$out"
-        { timeout 3 tcpdump -i any -nn -vv "$filt" 2>/dev/null || true; } \
-            | grep -m1 -E 'Flags \[S\.\]' >"$out" &
-        pid=$!
-        # tcpdump 挂上过滤器要几百毫秒，太短会让握手抢在监听之前过去。
-        if (( attempt == 1 )); then sleep 0.7; else sleep 1.0; fi
-        timeout 4 openssl s_client -connect "${host}:${port}" -servername "$sni" \
-            -tls1_3 -brief </dev/null >/dev/null 2>&1 || true
-        wait "$pid" 2>/dev/null || true
-        if [[ -s "$out" ]]; then
-            # tcpdump 对 option 34 打印 "unknown-34"（老版本）/"fast open"（新版本），
-            # 部分发行版补丁写成 "tfo"，三个都认。
-            if grep -qiE 'unknown-34|fast.?open|\btfo\b' "$out"; then
-                rc=0
-            else
-                rc=1
-            fi
-            break
-        fi
-    done
-    rm -f "$out"
-    return $rc
-}
+# ---- TFO 的四条实测结论（2026-11-07，47.88.102.45 真机，详见 HANDOFF §12.6.4）----
+#
+# 1) 「探测伪装站是否支持 TFO」这个思路本身不成立。
+#    被动 TFO 要成立，必须 client 的 SYN 带 option 34（cookie request）**且**
+#    server 的 listener 显式 setsockopt(TCP_FASTOPEN, qlen)。用普通 connect 去
+#    探测时 SYN 根本不含 34，任何服务端都不会在 SYN-ACK 里回 34 —— 探测恒为
+#    「不支持」。旧实现（v1.3.0）因此是个恒定返回 false 的死逻辑，白等 1.4s，
+#    还拖了一个 tcpdump 依赖。
+#
+# 2) 目标确实不支持。用 curl --tcp-fastopen 打出带 `exp-tfo cookiereq` 的 SYN，
+#    打 www.easeus.com 源站 47.88.102.65:443 与两个高分候选，SYN-ACK 全部只有
+#    mss/sackOK/TS/nop/wscale，没有 option 34。
+#
+# 3) Xray 侧也不生效。26.10.31 上：
+#    - 入站 sockopt.tcpFastOpen=true：SYN-ACK 无 34，TcpExtTCPFastOpenPassive=0
+#    - 出站 freedom sockopt.tcpFastOpen=true：SYN 与 false 逐字节相同，无 34
+#    也就是说这个字段在当前核心上是装饰，写了也不产生可观测行为。
+#
+# 4) 与伪装无关。TCP options 不进 TLS 指纹，客户端不会拿 SYN-ACK 的 options
+#    判断真伪。「与伪装站保持一致」这个理由在 REALITY 上不成立。
+#
+# 结论：默认写 false。`--tfo on` 只保留成手动阀门 —— 将来换到真正支持 TFO 的
+# 链路、且核心版本真的 setsockopt 时，用户自己决定打开。
 
 sockopt_json() {
     local tfo="false"
@@ -73,21 +33,19 @@ sockopt_json() {
     printf '"sockopt":{"tcpFastOpen":%s,"tcpNoDelay":true,"tcpKeepAliveIdle":45,"tcpUserTimeout":10000,"tcpcongestion":"bbr"}' "$tfo"
 }
 
-# tfo_decide auto|on|off <dest> [port] [sni] -> 打印 0 或 1。
-# auto 走真实探测：只有伪装站的 SYN-ACK 自己带 TFO option 时才跟着开。
-# 客户端不请求 TFO 时服务端开与不开的握手完全一样，所以「跟随目标」既没有
-# 收益损失，也避开了「节点与伪装站 TCP 行为不一致」这个指纹。
+# tfo_decide auto|on|off -> 打印 0 或 1。
+#   auto（默认）= 0，不探测。理由见文件头四条；探测不可达真值且恒为 0。
+#   on          = 1，手动强制（仅在确认链路支持 TFO 时使用）。
+#   off         = 0。
 tfo_decide() {
-    local opt="${1:-auto}" dest="$2" port="${3:-443}" sni="${4:-$2}" trc=0
+    local opt="${1:-auto}"
     case "$opt" in
-        on)       printf '1'; return 0 ;;
-        off)      printf '0'; return 0 ;;
-        auto|"")  ;;
-        *)        warn "未知 --tfo 取值: $opt（应为 auto / on / off），按 auto 处理" >&2 ;;
+        on)  printf '1'; return 0 ;;
+        off) printf '0'; return 0 ;;
+        auto|"") printf '0'; return 0 ;;
+        *)
+            warn "未知 --tfo 取值: $opt（应为 auto / on / off），按 auto 处理" >&2
+            printf '0'; return 0
+            ;;
     esac
-    target_tfo_probe "$dest" "$port" "$sni" || trc=$?
-    if (( trc == 2 )); then
-        info "无法探测 $dest 的 TFO（缺 tcpdump/openssl 或抓不到 SYN-ACK），按关闭处理" >&2
-    fi
-    if (( trc == 0 )); then printf '1'; else printf '0'; fi
 }
