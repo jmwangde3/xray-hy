@@ -2,6 +2,11 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.4.1 — 2026-11-07
+
+- `xhy check` 不再统计 `TcpExtTCPFastOpenPassive` 命中数（TFO 固定关闭后它永远是 0，摆出来只会让人以为"开了但没命中"），改为明确显示 `TFO : off（固定，无开关）`
+- 清掉 `node_add` 顶部注释里残留的 `[--tfo auto|on|off]`
+
 ## v1.4.0 — 2026-11-07
 
 - **TFO 定为永久关闭**：`sockopt.tcpFastOpen` 恒写 `false`，脚本不再提供开启路径。`--tfo auto|on|off` 选项整体移除，传入时明确报错并说明理由（不是静默忽略）

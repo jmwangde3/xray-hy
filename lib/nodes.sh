@@ -338,7 +338,7 @@ write_fragment() {
 # node_add MODE PORT [--host H] [--path P] [--sni S] [--target T]
 #                    [--token TOKEN] [--domain D] [--reality] [--uuid U]
 #                    [--scan] [--scan-cidr CIDR] [--scan-refresh]
-#                    [--tfo auto|on|off] [--masq-proxy]
+#                    [--masq-proxy]
 node_add() {
     local mode="$1" port="$2"; shift 2
     local host="" path="" sni="" target="" token="" domain="" uuid="" with_reality="0"

@@ -104,8 +104,8 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.4.0"
-XHY_BUILD="26e58a30aa62"
+XHY_VERSION="1.4.1"
+XHY_BUILD="c257be2158be"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -123,7 +123,7 @@ fi
 # ===================== lib/common.sh =====================
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.4.0}"
+XHY_VERSION="${XHY_VERSION:-1.4.1}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -2627,7 +2627,7 @@ write_fragment() {
 # node_add MODE PORT [--host H] [--path P] [--sni S] [--target T]
 #                    [--token TOKEN] [--domain D] [--reality] [--uuid U]
 #                    [--scan] [--scan-cidr CIDR] [--scan-refresh]
-#                    [--tfo auto|on|off] [--masq-proxy]
+#                    [--masq-proxy]
 node_add() {
     local mode="$1" port="$2"; shift 2
     local host="" path="" sni="" target="" token="" domain="" uuid="" with_reality="0"
@@ -3516,7 +3516,7 @@ self_check() {
     fi
     printf '%s\n' "--------------------------------------"
     core_status
-    local inst mptcp v6rules tfo_hits
+    local inst mptcp v6rules
     inst="$(xray_installed_version)"
     if [[ "$inst" == [0-9]* ]]; then
         if version_lt "v$inst" "$XHY_MPTCP_FIXED_VERSION"; then
@@ -3541,13 +3541,9 @@ self_check() {
     printf 'access日志: %s\n' "$(state_get ACCESS_LOG 'off')"
     printf 'bufferSize: %s KB\n' "$(state_get BUFFER_SIZE 512)"
     printf '端口范围  : %s\n' "$(sysctl -n net.ipv4.ip_local_port_range 2>/dev/null || echo '?')"
-    # TFO 只在客户端也请求时才有意义，统计为 0 说明一次都没命中
-    tfo_hits="不可用"
-    if have_cmd nstat; then
-        tfo_hits="$(nstat -az TcpExtTCPFastOpenPassive 2>/dev/null | awk 'NR==2{print $2}')"
-        [[ -n "$tfo_hits" ]] || tfo_hits="0"
-    fi
-    printf 'TFO 命中  : %s\n' "$tfo_hits"
+    # v1.4.0 起 TFO 固定关闭，不再统计命中数 —— 那个数字永远是 0，
+    # 摆出来只会让人以为"开了但没命中"。要确认真的没启用，看这里就够了。
+    printf 'TFO       : off（固定，无开关；详见 lib/sockopt.sh 文件头）\n'
     printf '%s\n' "--------------------------------------"
     firewall_status --brief
     if have_cmd ip6tables; then
