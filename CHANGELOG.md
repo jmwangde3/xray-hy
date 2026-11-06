@@ -2,6 +2,15 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.4.0 — 2026-11-07
+
+- **TFO 定为永久关闭**：`sockopt.tcpFastOpen` 恒写 `false`，脚本不再提供开启路径。`--tfo auto|on|off` 选项整体移除，传入时明确报错并说明理由（不是静默忽略）
+- 节点 env 里的 `TFO` 字段不再参与渲染：老节点写的 `TFO=1` 也不会让产物出现 `tcpFastOpen:true`；新建节点的 `TFO` 一律写 `0`
+- 删 `tfo_decide`（v1.3.1 起已无探测逻辑，只剩一个恒返回 0 的壳）
+- 依据：v1.3.0 的探测恒为 false（普通 connect 的 SYN 不带 option 34）；目标伪装站全部不支持；Xray 26.10.31 上该字段入站/出站都不产生可观测行为；TCP options 不进 TLS 指纹，与 REALITY 伪装无关
+- `test/sockopt-test.sh` 重写为 12 项：锁定「TFO=1 也渲染成 false」「tfo_decide 已删除」「CLI 拒绝 --tfo」；`render-test.sh` 同步改断言
+- 破坏性：脚本化调用里写了 `--tfo auto` 的会失败。这是有意的 —— 该参数已无任何有效取值
+
 ## v1.3.1 — 2026-11-07
 
 - 删掉 `--tfo auto` 的伪装站探测：实测证明它是个恒定返回 false 的死逻辑。被动 TFO 要求 client 的 SYN 带 option 34 **且** server listener 显式 `setsockopt(TCP_FASTOPEN)`；用普通 connect 探测时 SYN 根本不含 34，任何服务端都不会在 SYN-ACK 里回 34

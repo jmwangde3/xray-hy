@@ -344,7 +344,7 @@ node_add() {
     local host="" path="" sni="" target="" token="" domain="" uuid="" with_reality="0"
     local masq="" up="" down=""
     local use_scan="0" scan_cidr="" scan_refresh="0"
-    local tfo_opt="auto" masq_mode="string"
+    local masq_mode="string"
     while (( $# > 0 )); do
         case "$1" in
             --host)   host="$2"; shift 2 ;;
@@ -357,7 +357,9 @@ node_add() {
             --masq)   masq="$2"; shift 2 ;;
             --up)     up="$2"; shift 2 ;;
             --down)   down="$2"; shift 2 ;;
-            --tfo)    tfo_opt="$2"; shift 2 ;;
+            --tfo)
+                die "--tfo 已在 v1.4.0 移除：TFO 固定关闭（目标不支持 + Xray 侧不生效 + 与 REALITY 伪装无关）。
+    理由与实测见 CHANGELOG v1.3.1/v1.4.0；确需重估请改 lib/sockopt.sh 一处。" ;;
             --masq-proxy) masq_mode="proxy"; shift ;;
             --reality) with_reality="1"; shift ;;
             --scan)        use_scan="1"; shift ;;
@@ -411,7 +413,7 @@ node_add() {
     fi
 
     local public=1 priv="" pub="" sid="" tgt="" t_sni="" label="" security="none"
-    local pairs=() picked="" kp="" tfo_val="0"
+    local pairs=() picked="" kp=""
     if [[ -n "$target" && "$target" != *:* ]]; then target="${target}:443"; fi
 
     case "$mode" in
@@ -432,12 +434,11 @@ node_add() {
             read -r priv pub <<<"$kp"
             [[ -n "$priv" && -n "$pub" ]] || { err "x25519 密钥生成失败"; return 1; }
             sid="$(rand_hex 8)"
-            tfo_val="$(tfo_decide "$tfo_opt" "${tgt%%:*}" "${tgt##*:}" "$t_sni")"
             pairs=(
                 "MODE=reality" "PORT=$port" "PUBLIC=1" "UUID=$uuid" "NODE_PATH=$path"
                 "NODE_HOST=$host" "SNI=$t_sni" "TARGET=$tgt"
                 "PRIVATE_KEY=$priv" "PUBLIC_KEY=$pub" "SHORT_ID=$sid"
-                "FP=chrome" "SECURITY=reality" "TFO=$tfo_val" "CREATED=$(date -Is)"
+                "FP=chrome" "SECURITY=reality" "TFO=0" "CREATED=$(date -Is)"
             ) ;;
         xhttp)
             if [[ "$with_reality" == "1" || -n "$target" ]]; then
@@ -458,13 +459,12 @@ node_add() {
                 read -r priv pub <<<"$kp"
                 [[ -n "$priv" && -n "$pub" ]] || { err "x25519 密钥生成失败"; return 1; }
                 sid="$(rand_hex 8)"
-                tfo_val="$(tfo_decide "$tfo_opt" "${tgt%%:*}" "${tgt##*:}" "$t_sni")"
             fi
             pairs=(
                 "MODE=xhttp" "PORT=$port" "PUBLIC=1" "UUID=$uuid" "NODE_PATH=$path"
                 "NODE_HOST=$host" "SNI=${t_sni:-$host}" "TARGET=${tgt:-}"
                 "PRIVATE_KEY=${priv:-}" "PUBLIC_KEY=${pub:-}" "SHORT_ID=${sid:-}"
-                "FP=chrome" "SECURITY=$security" "TFO=$tfo_val" "CREATED=$(date -Is)"
+                "FP=chrome" "SECURITY=$security" "TFO=0" "CREATED=$(date -Is)"
             ) ;;
         direct)
             pairs=(

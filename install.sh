@@ -104,8 +104,8 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.3.1"
-XHY_BUILD="3dc4fe1e69f7"
+XHY_VERSION="1.4.0"
+XHY_BUILD="26e58a30aa62"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -123,7 +123,7 @@ fi
 # ===================== lib/common.sh =====================
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.3.1}"
+XHY_VERSION="${XHY_VERSION:-1.4.0}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -427,53 +427,31 @@ verify_release_digest() {
 # ===================== lib/sockopt.sh =====================
 # xray-hy / per-inbound sockopt.
 #
-# ---- TFO 的四条实测结论（2026-11-07，47.88.102.45 真机，详见 HANDOFF §12.6.4）----
+# ---- TFO 一律关闭（2026-11-07 定稿：服务端不开，脚本也不再留开关）----
 #
-# 1) 「探测伪装站是否支持 TFO」这个思路本身不成立。
-#    被动 TFO 要成立，必须 client 的 SYN 带 option 34（cookie request）**且**
-#    server 的 listener 显式 setsockopt(TCP_FASTOPEN, qlen)。用普通 connect 去
-#    探测时 SYN 根本不含 34，任何服务端都不会在 SYN-ACK 里回 34 —— 探测恒为
-#    「不支持」。旧实现（v1.3.0）因此是个恒定返回 false 的死逻辑，白等 1.4s，
-#    还拖了一个 tcpdump 依赖。
+# 四条实测结论（47.88.102.45，Xray 26.10.31，详见 HANDOFF §12.6.4 / §12.7.2）：
 #
-# 2) 目标确实不支持。用 curl --tcp-fastopen 打出带 `exp-tfo cookiereq` 的 SYN，
-#    打 www.easeus.com 源站 47.88.102.65:443 与两个高分候选，SYN-ACK 全部只有
-#    mss/sackOK/TS/nop/wscale，没有 option 34。
+# 1) 被动 TFO 要两端同时成立：client 的 SYN 带 option 34（cookie request）
+#    **且** server 的 listener 显式 setsockopt(TCP_FASTOPEN, qlen)。
+#    net.ipv4.tcp_fastopen=3 只是"允许"，不会让普通 listener 启用被动 TFO。
+# 2) 目标不支持。用 curl --tcp-fastopen 打出带 `exp-tfo cookiereq` 的 SYN，
+#    打 www.easeus.com 源站 47.88.102.65:443 与两个高分候选，SYN-ACK 全部
+#    只有 mss/sackOK/TS/nop/wscale，没有 option 34。
+# 3) Xray 侧不生效。入站 tcpFastOpen=true 时 SYN-ACK 无 34、
+#    TcpExtTCPFastOpenPassive=0；出站 freedom tcpFastOpen=true 的 SYN 与
+#    false 逐字节相同。这个字段在当前核心上是装饰。
+# 4) 与伪装无关。TCP options 不进 TLS 指纹，客户端不拿 SYN-ACK 的 options
+#    判断真伪；REALITY 首包要精确模仿浏览器，0-RTT 带数据反而是额外风险面。
 #
-# 3) Xray 侧也不生效。26.10.31 上：
-#    - 入站 sockopt.tcpFastOpen=true：SYN-ACK 无 34，TcpExtTCPFastOpenPassive=0
-#    - 出站 freedom sockopt.tcpFastOpen=true：SYN 与 false 逐字节相同，无 34
-#    也就是说这个字段在当前核心上是装饰，写了也不产生可观测行为。
-#
-# 4) 与伪装无关。TCP options 不进 TLS 指纹，客户端不会拿 SYN-ACK 的 options
-#    判断真伪。「与伪装站保持一致」这个理由在 REALITY 上不成立。
-#
-# 结论：默认写 false。`--tfo on` 只保留成手动阀门 —— 将来换到真正支持 TFO 的
-# 链路、且核心版本真的 setsockopt 时，用户自己决定打开。
+# 所以 v1.4.0 起不再有 `--tfo` 选项，字段恒为 false。要重新评估 TFO 就改这里
+# 一处，不要再把它做成 CLI 开关 —— 这个开关存在过两个版本，两次都回到 0。
 
 sockopt_json() {
-    local tfo="false"
-    if [[ "${TFO:-0}" == "1" ]]; then tfo="true"; fi
+    # 显式写 false 而不是省略字段：v1.3.0 已实测 26.10.31 接受该字段，
+    # 写出来读代码的人一眼能看到结论，省得再去翻 handoff。
     # tcpMptcp 不写：GODEBUG 已经在进程级关掉，字段存在性未在 v26.3.27 上验证，
     # 少一个 unknown field 风险点。
-    printf '"sockopt":{"tcpFastOpen":%s,"tcpNoDelay":true,"tcpKeepAliveIdle":45,"tcpUserTimeout":10000,"tcpcongestion":"bbr"}' "$tfo"
-}
-
-# tfo_decide auto|on|off -> 打印 0 或 1。
-#   auto（默认）= 0，不探测。理由见文件头四条；探测不可达真值且恒为 0。
-#   on          = 1，手动强制（仅在确认链路支持 TFO 时使用）。
-#   off         = 0。
-tfo_decide() {
-    local opt="${1:-auto}"
-    case "$opt" in
-        on)  printf '1'; return 0 ;;
-        off) printf '0'; return 0 ;;
-        auto|"") printf '0'; return 0 ;;
-        *)
-            warn "未知 --tfo 取值: $opt（应为 auto / on / off），按 auto 处理" >&2
-            printf '0'; return 0
-            ;;
-    esac
+    printf '"sockopt":{"tcpFastOpen":false,"tcpNoDelay":true,"tcpKeepAliveIdle":45,"tcpUserTimeout":10000,"tcpcongestion":"bbr"}'
 }
 
 # ===================== lib/platform.sh =====================
@@ -2655,7 +2633,7 @@ node_add() {
     local host="" path="" sni="" target="" token="" domain="" uuid="" with_reality="0"
     local masq="" up="" down=""
     local use_scan="0" scan_cidr="" scan_refresh="0"
-    local tfo_opt="auto" masq_mode="string"
+    local masq_mode="string"
     while (( $# > 0 )); do
         case "$1" in
             --host)   host="$2"; shift 2 ;;
@@ -2668,7 +2646,9 @@ node_add() {
             --masq)   masq="$2"; shift 2 ;;
             --up)     up="$2"; shift 2 ;;
             --down)   down="$2"; shift 2 ;;
-            --tfo)    tfo_opt="$2"; shift 2 ;;
+            --tfo)
+                die "--tfo 已在 v1.4.0 移除：TFO 固定关闭（目标不支持 + Xray 侧不生效 + 与 REALITY 伪装无关）。
+    理由与实测见 CHANGELOG v1.3.1/v1.4.0；确需重估请改 lib/sockopt.sh 一处。" ;;
             --masq-proxy) masq_mode="proxy"; shift ;;
             --reality) with_reality="1"; shift ;;
             --scan)        use_scan="1"; shift ;;
@@ -2722,7 +2702,7 @@ node_add() {
     fi
 
     local public=1 priv="" pub="" sid="" tgt="" t_sni="" label="" security="none"
-    local pairs=() picked="" kp="" tfo_val="0"
+    local pairs=() picked="" kp=""
     if [[ -n "$target" && "$target" != *:* ]]; then target="${target}:443"; fi
 
     case "$mode" in
@@ -2743,12 +2723,11 @@ node_add() {
             read -r priv pub <<<"$kp"
             [[ -n "$priv" && -n "$pub" ]] || { err "x25519 密钥生成失败"; return 1; }
             sid="$(rand_hex 8)"
-            tfo_val="$(tfo_decide "$tfo_opt" "${tgt%%:*}" "${tgt##*:}" "$t_sni")"
             pairs=(
                 "MODE=reality" "PORT=$port" "PUBLIC=1" "UUID=$uuid" "NODE_PATH=$path"
                 "NODE_HOST=$host" "SNI=$t_sni" "TARGET=$tgt"
                 "PRIVATE_KEY=$priv" "PUBLIC_KEY=$pub" "SHORT_ID=$sid"
-                "FP=chrome" "SECURITY=reality" "TFO=$tfo_val" "CREATED=$(date -Is)"
+                "FP=chrome" "SECURITY=reality" "TFO=0" "CREATED=$(date -Is)"
             ) ;;
         xhttp)
             if [[ "$with_reality" == "1" || -n "$target" ]]; then
@@ -2769,13 +2748,12 @@ node_add() {
                 read -r priv pub <<<"$kp"
                 [[ -n "$priv" && -n "$pub" ]] || { err "x25519 密钥生成失败"; return 1; }
                 sid="$(rand_hex 8)"
-                tfo_val="$(tfo_decide "$tfo_opt" "${tgt%%:*}" "${tgt##*:}" "$t_sni")"
             fi
             pairs=(
                 "MODE=xhttp" "PORT=$port" "PUBLIC=1" "UUID=$uuid" "NODE_PATH=$path"
                 "NODE_HOST=$host" "SNI=${t_sni:-$host}" "TARGET=${tgt:-}"
                 "PRIVATE_KEY=${priv:-}" "PUBLIC_KEY=${pub:-}" "SHORT_ID=${sid:-}"
-                "FP=chrome" "SECURITY=$security" "TFO=$tfo_val" "CREATED=$(date -Is)"
+                "FP=chrome" "SECURITY=$security" "TFO=0" "CREATED=$(date -Is)"
             ) ;;
         direct)
             pairs=(
@@ -3775,7 +3753,6 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
 
     mode: direct | tunnel | reality | xhttp | hy2
     add 选项: --host --path --uuid --sni --target --domain --token --reality
-              --tfo auto|on|off             (TCP 节点；auto=默认关，实测 TFO 无收益、见 handoff)
               --masq --masq-proxy --up --down   (hy2 专用)
               --scan [--scan-cidr CIDR] [--scan-refresh]   (reality 专用)
     默认端口: direct 8080 / tunnel 10086 / reality 443 / xhttp 8081 / hy2 8443(UDP)
@@ -3996,9 +3973,10 @@ cmd_add() {
     while (( $# > 0 )); do
         case "$1" in
             --port)   port="$2"; shift 2 ;;
-            --host|--path|--uuid|--sni|--target|--domain|--token|--masq|--up|--down|--scan-cidr|--tfo)
+            --host|--path|--uuid|--sni|--target|--domain|--token|--masq|--up|--down|--scan-cidr)
                 opts+=("$1" "$2"); shift 2 ;;
             --reality|--scan|--scan-refresh|--masq-proxy) opts+=("$1"); shift ;;
+            --tfo) die "--tfo 已在 v1.4.0 移除：TFO 固定关闭（实测目标不支持、Xray 侧也不生效）" ;;
             *) die "未知参数: $1（见 xhy --help）" ;;
         esac
     done

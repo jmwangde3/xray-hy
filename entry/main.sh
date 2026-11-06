@@ -60,7 +60,6 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
 
     mode: direct | tunnel | reality | xhttp | hy2
     add 选项: --host --path --uuid --sni --target --domain --token --reality
-              --tfo auto|on|off             (TCP 节点；auto=默认关，实测 TFO 无收益、见 handoff)
               --masq --masq-proxy --up --down   (hy2 专用)
               --scan [--scan-cidr CIDR] [--scan-refresh]   (reality 专用)
     默认端口: direct 8080 / tunnel 10086 / reality 443 / xhttp 8081 / hy2 8443(UDP)
@@ -281,9 +280,10 @@ cmd_add() {
     while (( $# > 0 )); do
         case "$1" in
             --port)   port="$2"; shift 2 ;;
-            --host|--path|--uuid|--sni|--target|--domain|--token|--masq|--up|--down|--scan-cidr|--tfo)
+            --host|--path|--uuid|--sni|--target|--domain|--token|--masq|--up|--down|--scan-cidr)
                 opts+=("$1" "$2"); shift 2 ;;
             --reality|--scan|--scan-refresh|--masq-proxy) opts+=("$1"); shift ;;
+            --tfo) die "--tfo 已在 v1.4.0 移除：TFO 固定关闭（实测目标不支持、Xray 侧也不生效）" ;;
             *) die "未知参数: $1（见 xhy --help）" ;;
         esac
     done
