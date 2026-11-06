@@ -1,0 +1,31 @@
+﻿# xray-hy REALITY target candidates
+# Format: region|country-code|label|target|SNI
+# These are starting points, NOT guarantees. Sites change, move behind CDNs or
+# drop TLS 1.3. Always run `xhy target check` from the VPS before deploying.
+# Rule of thumb: a target must answer TLS 1.3 + HTTP/2, must not redirect, and
+# must NOT sit behind a CDN (otherwise your server becomes an open forwarder).
+# Add your own lines freely; the first line matching a region is preferred.
+auto|XX|amazon|www.amazon.com:443|www.amazon.com
+us|US|t-mobile|www.t-mobile.com:443|business.t-mobile.com
+us|US|cloudflare-free-alt|www.microsoft.com:443|www.microsoft.com
+uk|GB|arm|www.arm.com:443|learn.arm.com
+uk|GB|bbc|www.bbc.co.uk:443|www.bbc.co.uk
+jp|JP|tsukuba|www.tsukuba.ac.jp:443|www.tsukuba.ac.jp
+jp|JP|rakuten|www.rakuten.co.jp:443|www.rakuten.co.jp
+hk|HK|disneyland|www.hongkongdisneyland.com:443|entitlement.hongkongdisneyland.com
+hk|HK|hku|www.hku.hk:443|www.hku.hk
+tw|TW|china-airlines|www.china-airlines.com:443|book.china-airlines.com
+tw|TW|ntu|www.ntu.edu.tw:443|www.ntu.edu.tw
+sg|SG|sigtel|sigtelinc.com:443|www.sigtelinc.com
+sg|SG|nus|www.nus.edu.sg:443|www.nus.edu.sg
+fr|FR|bouygues|www.bouyguestelecom.fr:443|www.bouygtel.fr
+fr|FR|orange|www.orange.fr:443|www.orange.fr
+de|DE|mercedes|www.mercedes-benz.de:443|pro.mercedes-benz.com
+de|DE|siemens|www.siemens.com:443|www.siemens.com
+in|IN|incredibleindia|www.incredibleindia.gov.in:443|www.incredibleindia.org
+in|IN|iitb|www.iitb.ac.in:443|www.iitb.ac.in
+ca|CA|shopify|www.shopify.ca:443|www.shopify.ca
+au|AU|abc|www.abc.net.au:443|www.abc.net.au
+nl|NL|tudelft|www.tudelft.nl:443|www.tudelft.nl
+other|XX|amazon-corp|www.amazon.com:443|corporate.amazon.com
+other|XX|microsoft|www.microsoft.com:443|www.microsoft.com

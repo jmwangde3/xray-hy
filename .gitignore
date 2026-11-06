@@ -1,0 +1,25 @@
+# Runtime state and credentials must never be committed
+*.env
+state.env
+tunnel.token
+config.json
+*.log
+*.err
+backups/
+nodes/
+confs/
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+.claude/
+.serena/
+
+# Temporary downloads
+*.zip
+*.dgst
+*.tmp.*
