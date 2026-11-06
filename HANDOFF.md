@@ -318,3 +318,13 @@ gh release create v<版本> install.sh --title "..." --notes "..."
 - 管道方式（`| sh`）下 stdin 是管道，脚本会 `</dev/tty` 接回终端；无 tty 的自动化环境 `ask`/`confirm` 走默认值（既有约定）。
 - `install_self` 在管道运行时需要**再下载一次**同一 URL（BASH_SOURCE 是管道读不回来），约 115 KB，可接受。
 - 仓库若改名/转移，`entry/prelude.sh` 里的默认 `XHY_INSTALL_URL` 要同步改（也可用环境变量 `XHY_INSTALL_URL` 覆盖）。
+
+### 12.1 2026-11-06 16:08 · 「install 零输出」的真正根因（pipefail 无声死亡）
+
+单文件发布当天就在真实 Alpine 上撞到：`bash xhy install` / 一行命令都在打印第一行后无声退出，`bash xhy --version` 却正常。
+
+**根因**：`set -euo pipefail` 下，命令替换里的管道只要有任何一环非零，赋值语句就失败，`set -e` 直接终止脚本 —— 而 `detect_ssh_port()` 用 `grep` 找 sshd_config 的 Port 行，**Alpine 出厂配置整份都是注释（#Port 22）**，grep 无匹配退出码 1 → 整个脚本在 `cmd_install` 打印第一行之前就死了。`--version` 在 `main()` 里于 `detect_platform` 之前就 return，所以看起来"只有 install 坏"。
+
+**修复**（commit `b495f2d`，build `55e4c3638b68`）：凡是"合法地可能失败"的管道（grep 无匹配、curl/ss/df/ls 出错）所在的所有命令替换，一律在管道尾部兜 `|| true`，共 16 处，覆盖 platform/common/core/hardening/nodes/target/update 七个文件。教训：**`set -euo pipefail` + `x="$(a | b | grep ...)"` 是无声死亡的经典组合，新增代码必须逐条自查。**
+
+**真机验证（8.222.223.248，全新 Alpine 3.23 / 内核 6.18.60）**：release 资产更新后，`bash /tmp/install.sh install </dev/null` 七步全过；`xhy add reality --port 443` 自动匹配到同区域伪装站 `www.nus.edu.sg`，vless 链接生成，`rc-service xray-hy` started。待验证：客户端实连、重启后自启。
