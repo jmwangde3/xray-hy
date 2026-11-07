@@ -121,9 +121,9 @@ chk "还原前快照保留（最新）"   '[[ -f "$XHY_BACKUP/pre-restore-202601
 chk "最旧的已被删"             '[[ ! -f "$XHY_BACKUP/xhy-backup-20260100.tar.gz" ]]'
 chk "tarballs 不动二进制备份"  '[[ -z "$(ls -1 "$XHY_BACKUP"/xray-* 2>/dev/null)" ]]'
 
-echo "=== 大体积 .bak（geoip/geosite）：每类只留最新 2 份 ==="
+echo "=== 大体积 .bak：geoip/geosite 历史副本一律清掉 ==="
 # 真实病例：47.88.102.45 的 backups 目录 63.8 MB 里 29.5 MB 是 geoip.dat（19 MB）
-# 与 geosite.dat（10 MB）的旧副本，它们掉进「.bak 留 20 份」就永远清不掉。
+# 与 geosite.dat（10 MB）的旧副本。v1.7 起 geodata 不再进备份，这些就是纯垃圾。
 rm -rf "$XHY_BACKUP"; mkdir -p "$XHY_BACKUP"
 i=1
 while (( i <= 3 )); do
@@ -135,10 +135,9 @@ while (( i <= 3 )); do
 done
 printf 'tiny' >"$XHY_BACKUP/config.json.20260101000000.bak"
 out="$(cmd_clean all 2>&1)"
-chk "geoip 旧副本收到 2 份"   '[[ $(ls -1 "$XHY_BACKUP"/geoip.dat.*.bak 2>/dev/null | wc -l | tr -d " ") -eq 2 ]]'
-chk "geosite 旧副本收到 2 份" '[[ $(ls -1 "$XHY_BACKUP"/geosite.dat.*.bak 2>/dev/null | wc -l | tr -d " ") -eq 2 ]]'
-chk "留下的都是最新两份"      '[[ -f "$XHY_BACKUP/geoip.dat.20260103000000.bak" && ! -f "$XHY_BACKUP/geoip.dat.20260101000000.bak" ]]'
-chk "小 .bak 不受大文件规则影响" '[[ -f "$XHY_BACKUP/config.json.20260101000000.bak" ]]'
+chk "geoip 旧副本全清"        '[[ -z "$(ls -1 "$XHY_BACKUP"/geoip.dat.*.bak 2>/dev/null)" ]]'
+chk "geosite 旧副本全清"      '[[ -z "$(ls -1 "$XHY_BACKUP"/geosite.dat.*.bak 2>/dev/null)" ]]'
+chk "小 .bak 不受影响"        '[[ -f "$XHY_BACKUP/config.json.20260101000000.bak" ]]'
 chk "报告里报出 MB 级释放量"  'grep -qE "[0-9]+\.[0-9] MB" <<<"$out"'
 
 echo "=== cmd_clean：未知参数拒绝执行 ==="

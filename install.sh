@@ -135,8 +135,8 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.7.0"
-XHY_BUILD="a3276267871b"
+XHY_VERSION="1.7.1"
+XHY_BUILD="0be59fd4d572"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -154,7 +154,7 @@ fi
 # ===================== lib/common.sh =====================
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.7.0}"
+XHY_VERSION="${XHY_VERSION:-1.7.1}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -4733,22 +4733,24 @@ cmd_clean() {
         fi
     fi
 
-    # ---- 大体积 .bak：同名（去掉时间戳）留最新 keep_big 份 ----
+    # ---- 大体积 .bak：可重下的直接删，其余同名留最新 keep_big 份 ----
     # 47.88.102.45 上 63.8 MB 的备份目录里，29.5 MB 是 geoip.dat / geosite.dat 的旧
-    # 副本；它们掉进「.bak 留 20 份」就永远清不掉。
+    # 副本；它们掉进「.bak 留 20 份」就永远清不掉。既然 v1.7 起 geodata 不再进备份，
+    # 这些历史残留就是纯垃圾 —— 现用的 dat 在 /usr/local/share/xray，随时可重下。
     if [[ "$what" == "backups" || "$what" == "all" ]]; then
         drop=()
         for f in "${bigs[@]}"; do
             k="$(basename "$f")"
             k="${k%.bak}"; k="${k%.*}"      # geoip.dat.20261107092534 -> geoip.dat
+            if backup_is_redownloadable "$k"; then
+                drop+=("$f")                # 可重下的历史副本：一律清掉
+                continue
+            fi
             fbseen[$k]=$(( ${fbseen[$k]:-0} + 1 ))
             (( ${fbseen[$k]} > keep_big )) && drop+=("$f")
         done
         if (( ${#drop[@]} > 0 )); then
-            _clean_drop "旧大体积数据备份" "${drop[@]}"
-        fi
-        if (( ${#bigs[@]} > 0 )); then
-            info "大体积 .bak 每类保留最新 $keep_big 份（geoip/geosite 可重新下载）"
+            _clean_drop "大体积数据备份（可重新下载）" "${drop[@]}"
         fi
     fi
 
