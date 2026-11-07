@@ -231,6 +231,15 @@ Usage: xhy <command> [options]
                                 tarballs = xhy backup output, tmp = xray-rollback.*
     export clash|singbox [--out F]  Export mihomo/Clash or sing-box configs
 
+  Relay (entry -> landing)
+    relay land --allow IP [--port N] [--uuid U] [--tls [--tls-cert F --tls-key F]] [--sni NAME]
+                                Landing side: vless/tcp inbound, only that source IP
+    relay entry --to IP:PORT [--uuid U] [--categories a,b,c|ai|media|none] [--no-geoip-us]
+                 [--tls] [--sni NAME] [--pin B64]   Entry side: AI/US traffic -> landing
+    relay status|test|export|reapply|del         Inspect / self-check / peer cmd / remove
+    Also open the cloud security group (inbound TCP <port>, source = entry IP only).
+    The relay survives xhy add/edit/del; reapply is only a fallback after a rollback.
+
   Service & uninstall
     service [start|stop|restart|status]
     uninstall                   Uninstall (optionally keep config)
@@ -341,6 +350,15 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
                                      xhy check 里有「磁盘余量」一行
                                      tarballs = xhy backup 产物，tmp = xray-rollback.* 残留
     export clash|singbox [--out F]   导出 mihomo/Clash 或 sing-box 节点配置
+
+  中继 / relay（入口机 → 落地机）
+    relay land --allow IP [--port N] [--uuid U] [--tls [--tls-cert F --tls-key F]] [--sni NAME]
+                                落地端：开 vless/tcp 入站，只放行这一个源 IP
+    relay entry --to IP:端口 [--uuid U] [--categories a,b,c|ai|media|none] [--no-geoip-us]
+                [--tls] [--sni NAME] [--pin B64]   入口端：AI/美区流量 → 落地端
+    relay status|test|export|reapply|del        查状态 / 自检 / 对端命令 / 移除
+    云安全组要单独放行（入方向 TCP <端口>，源只填入口机 IP）。
+    改造后 relay 不会被 xhy add/edit/del 覆盖；reapply 只在从快照回滚后兜底用。
 
   服务与卸载
     service [start|stop|restart|status]

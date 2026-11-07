@@ -143,16 +143,42 @@ rebuild_config() {
         joined+="$sep$(cat "$f")"
         sep=","
     done
+    # 扩展钩子（默认空实现，见下方 extra_* 定义）。relay 覆盖它们注入自己的
+    # 出站与前置路由，这样 add/edit/del 触发的基础重建不会再把 relay 冲掉。
+    local ob ob_extra rt rt_head rules rules_extra inner
+    ob="$(outbounds_json)"
+    ob_extra="$(extra_outbounds_json)"
+    if [[ -n "$ob_extra" ]]; then
+        inner="${ob#\[}"; inner="${inner%\]}"
+        ob="[${inner},${ob_extra}]"
+    fi
+    rt="$(routing_json)"
+    rt_head="${rt%%\"rules\":\[*}"
+    # 兜底：万一 routing_json 以后改了字段顺序/换了 key 名，退回一个合法骨架，
+    # 而不是把整段 JSON 拼坏（拼坏了 xray 直接起不来）。
+    [[ "$rt_head" == "$rt" ]] && rt_head='{"domainStrategy":"IPIfNonMatch",'
+    rules="${rt#*\"rules\":\[}"; rules="${rules%\]*}"
+    rules_extra="$(extra_routing_rules_json)"
+    if [[ -n "$rules_extra" ]]; then
+        if [[ -n "$rules" ]]; then rules="${rules_extra},${rules}"; else rules="$rules_extra"; fi
+    fi
     {
         printf '{\n  "log": %s,\n' "$(log_json)"
         printf '  "inbounds": [%s],\n' "$joined"
         printf '  "dns": %s,\n' "$(dns_json)"
-        printf '  "routing": %s,\n' "$(routing_json)"
-        printf '  "outbounds": %s,\n' "$(outbounds_json)"
+        printf '  "routing": %s"rules":[%s]},\n' "$rt_head" "$rules"
+        printf '  "outbounds": %s,\n' "$ob"
         printf '  "policy": %s\n}\n' "$(policy_json)"
     } | atomic_write "$XHY_ETC/config.json" 0600
     ok "配置已重建: $XHY_ETC/config.json ($(node_count) 个节点)"
 }
+
+# 钩子：outbound 追加项（输出形如 {"protocol":...}，多个用逗号分隔；空 = 不追加）
+#       前置路由规则（输出形如 {....},{....}，无外层方括号；空 = 不插）
+# 由 relay.sh 覆盖。放在这里而不是让模块各抄一份 rebuild_config —— 抄一份就会
+# 随着基础管线改动慢慢漂移（relay 第一版正是如此，还漏了 config_reload）。
+extra_outbounds_json() { :; }
+extra_routing_rules_json() { :; }
 
 sniffing_json() {
     local override='["tls"]'

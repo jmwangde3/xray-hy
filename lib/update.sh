@@ -278,6 +278,10 @@ self_check() {
     else
         printf 'sockopt   : keepAliveIdle=45 uto=10000 cc=继承（内核无 bbr，字段省略）\n'
     fi
+    # 中继（relay）只在配置过时才占一行，避免每台机器都多一行噪音
+    if [[ -f "$XHY_NODES/relay.env" ]] && declare -F relay_status >/dev/null 2>&1; then
+        relay_status --brief
+    fi
     printf '%s\n' "--------------------------------------"
     firewall_status --brief
     if have_cmd ip6tables; then

@@ -2,6 +2,14 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.10.0 — 2026-11-07
+
+- feat(relay): 收编进基础管线 —— nodes.sh 新增 extra_outbounds_json / extra_routing_rules_json 两个空钩子，relay 覆盖它们；xhy add/edit/del/config set 触发的基础 rebuild 不再冲掉 relay 出站与前置路由（v1.9.3 的「已知限制 1」消除）
+- fix(relay): 激活后从不 config_reload —— 配置写进 config.json 但运行中的 xray 没生效；改用共享 xray_config_test（带 XRAY_LOCATION_ASSET，geosite 引用不再误判）+ config_reload
+- feat(relay): 新增 --tls（自签证书自动生成 + 证书链 pin）/ --no-geoip-us / --categories 预设 ai|media|none / IPv6 上游 [v6]:port / relay export / 同机 land↔entry 角色互清 / land 重复执行幂等 / 防火墙按注释精确增删
+- fix(relay): 自带中英双语句对，XHY_LANG=en 机器上不再整句被词表吞成空白；xhy check 增一行 relay 状态；usage 中英同步
+- test(relay): 55 项离线断言（配置 JSON 合法性、relay 规则前置顺序、假 iptables 记账、角色切换、参数注入拒绝、TLS 片段）
+
 ## v1.9.3 — 2026-11-07
 
 - fix(update): `xhy update script` 在 pipefail+errexit 下被 `sed | head -1` 的 SIGPIPE 打死（退出码 141），升级在下载前静默中止；改为 `|| true` 兜住。scanner 缓存时间读取同样处理

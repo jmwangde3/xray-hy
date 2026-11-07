@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
-# relay 子命令离线回归：entry 注入 us-relay 出站 + 路由规则，land 生成入站片段，
-# del 干净移除；全程不碰真实系统（iptables/xray 桩、XHY_SKIP_SNAPSHOT）。
+# relay 子命令离线回归。
+#
+# 全程不碰真实系统：iptables/ip6tables 换成「会记账的假表」，xray 是桩，
+# public_ip / TCP 探测都不出网。redis 之类的外部依赖一律没有。
+#
+# 覆盖点（对应 v1.9.4 的改动）：
+#   * entry 注入的 outbound / 路由规则形状正确，且**基础 rebuild 不再覆盖它**
+#   * 基础规则仍在、顺序是「relay 前置、基础在后」
+#   * --no-geoip-us / --categories 预设 / 非法分类被拒 / IPv6 上游解析
+#   * land 入站片段、防火墙注释规则、重复执行幂等、--tls 走证书文件
+#   * 同机换角色（land↔entry）互清、del 后配置干净且仍是合法 JSON
 set -u
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 # shellcheck disable=SC1091
@@ -9,10 +18,38 @@ load_libs
 stub_system
 make_stub_xray
 export XHY_SKIP_SNAPSHOT=1
-# relay_fw_add/del 直接调 iptables，离线桩成 no-op
-iptables()  { :; }
-ip6tables() { :; }
+export XHY_RELAY_NO_TCP=1      # 不要真去 /dev/tcp 打 203.0.113.10
 init_dirs
+
+# --- 假 iptables：记录「链 + 端口 + 源 + 注释」，-C 查表、-A 追加、-D 删除 -----
+FAKE_FW="$TEST_TMP/fw.rules"
+: >"$FAKE_FW"
+fake_ipt() {
+    local a="" port="" src="" comment=""
+    while (( $# > 0 )); do
+        case "$1" in
+            -w) shift ;;
+            -L) [[ "${2:-}" == "${FW_CHAIN:-XHY-IN}" ]] && return 0; return 1 ;;
+            -C|-A|-D) a="$1"; shift ;;
+            -p|-j|-m) shift 2 ;;
+            --dport)  port="$2"; shift 2 ;;
+            -s)       src="$2"; shift 2 ;;
+            --comment) comment="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    local key="port=$port src=$src comment=$comment"
+    case "$a" in
+        -C) grep -qxF "$key" "$FAKE_FW" ;;
+        -A) printf '%s\n' "$key" >>"$FAKE_FW" ;;
+        -D) grep -vxF "$key" "$FAKE_FW" >"$FAKE_FW.tmp" 2>/dev/null || true
+            mv -f "$FAKE_FW.tmp" "$FAKE_FW" 2>/dev/null || true ;;
+        *)  return 0 ;;
+    esac
+}
+iptables()  { fake_ipt "$@"; }
+ip6tables() { fake_ipt "$@"; }
+public_ip() { printf '198.51.100.9'; }
 
 # 放一个最小合法入站片段，让 confs/ 非空（贴近真实环境）
 cat >"$XHY_CONFDIR/reality_443.json" <<'EOF'
@@ -24,32 +61,114 @@ cat >"$XHY_CONFDIR/reality_443.json" <<'EOF'
 }
 EOF
 
-echo "===== relay entry ====="
+json_ok() { "$PY" -c "import json,sys;json.load(open(sys.argv[1]))" "$1" >/dev/null 2>&1; }
+# 断言 config 里 relay 规则排在基础 block 规则之前（前置优先级）
+rules_order_ok() {
+    "$PY" - "$XHY_ETC/config.json" <<'PY' >/dev/null 2>&1
+import json,sys
+cfg=json.load(open(sys.argv[1]))
+rules=cfg["routing"]["rules"]
+relay=[i for i,r in enumerate(rules) if r.get("outboundTag")=="us-relay"]
+block=[i for i,r in enumerate(rules) if r.get("outboundTag")=="block"]
+assert relay, "no relay rule"
+assert block, "no base block rule"
+assert min(relay) < min(block), "relay rules are not in front"
+PY
+}
+
+echo "===== relay entry（基础注入） ====="
 relay_entry --to 203.0.113.10:14430 --uuid test-uuid-0000 --categories openai,anthropic
-chk "entry 写入 relay.env"        '[ -f "$XHY_NODES/relay.env" ]'
-chk "config 含 us-relay 出站"     'grep -q "us-relay" "$XHY_ETC/config.json"'
-chk "config 含 geoip:us 路由"     'grep -q "geoip:us" "$XHY_ETC/config.json"'
-chk "config 含 geosite:openai"    'grep -q "geosite:openai" "$XHY_ETC/config.json"'
-chk "config 不含 geosite:tiktok"  '! grep -q "geosite:tiktok" "$XHY_ETC/config.json"'
+chk "entry 写入 relay.env"            '[ -f "$XHY_NODES/relay.env" ]'
+chk "relay.env 角色=entry"            'grep -q "^RELAY_ROLE=entry$" "$XHY_NODES/relay.env"'
+chk "config 是合法 JSON"              'json_ok "$XHY_ETC/config.json"'
+chk "config 含 us-relay 出站"         'grep -q "\"tag\":\"us-relay\"" "$XHY_ETC/config.json"'
+chk "config 含 geoip:us 路由"         'grep -q "geoip:us" "$XHY_ETC/config.json"'
+chk "config 含 geosite:openai"        'grep -q "geosite:openai" "$XHY_ETC/config.json"'
+chk "未指定的分类不出现"              '! grep -q "geosite:tiktok" "$XHY_ETC/config.json"'
+chk "基础 block 规则仍在"             'grep -q "geoip:private" "$XHY_ETC/config.json"'
+chk "relay 规则排在基础规则之前"      'rules_order_ok'
+chk "上游地址/端口正确"               'grep -q "\"address\":\"203.0.113.10\",\"port\":14430" "$XHY_ETC/config.json"'
+chk "status 报角色"                   'relay_status | grep -q "入口"'
+chk "export 给出落地端命令"           'relay_export | grep -q "xhy relay land --allow"'
 
-echo "===== relay status (entry) ====="
-relay_status
+echo "===== 基础 rebuild 不再覆盖 relay（本轮核心修复） ====="
+XHY_SKIP_SNAPSHOT=1 rebuild_config >/dev/null 2>&1
+chk "rebuild 后 us-relay 仍在"        'grep -q "us-relay" "$XHY_ETC/config.json"'
+chk "rebuild 后仍是合法 JSON"         'json_ok "$XHY_ETC/config.json"'
+chk "rebuild 后顺序仍正确"            'rules_order_ok'
 
-echo "===== relay del (entry) ====="
-relay_del
-chk "entry 删除后无 relay.env"    '! [ -f "$XHY_NODES/relay.env" ]'
-chk "config 回收 us-relay"        '! grep -q "us-relay" "$XHY_ETC/config.json"'
+echo "===== --no-geoip-us ====="
+relay_entry --to 203.0.113.10:14430 --uuid test-uuid-0000 --categories ai --no-geoip-us >/dev/null
+chk "关掉 geoip:us 后不再出现"        '! grep -q "geoip:us" "$XHY_ETC/config.json"'
+chk "域名分类仍在"                    'grep -q "geosite:openai" "$XHY_ETC/config.json"'
+chk "出站仍在"                        'grep -q "us-relay" "$XHY_ETC/config.json"'
+chk "仍是合法 JSON"                   'json_ok "$XHY_ETC/config.json"'
+
+echo "===== 参数校验 ====="
+chk "非法端口被拒"                    '! ( relay_entry --to 203.0.113.10:99999 --uuid u ) >/dev/null 2>&1'
+chk "分类注入被拒"                    '! ( relay_entry --categories "a\"b" --uuid u ) >/dev/null 2>&1'
+chk "非法上游被拒"                    '! ( relay_entry --to 203.0.113.10 --uuid u ) >/dev/null 2>&1'
+
+echo "===== IPv6 上游 ====="
+relay_entry --to '[2001:db8::1]:14430' --uuid test-uuid-0000 --categories openai >/dev/null
+chk "IPv6 地址写进 vnext"             'grep -q "\"address\":\"2001:db8::1\",\"port\":14430" "$XHY_ETC/config.json"'
+chk "IPv6 上游仍是合法 JSON"          'json_ok "$XHY_ETC/config.json"'
+
+echo "===== relay del（entry） ====="
+relay_del >/dev/null
+chk "del 后无 relay.env"              '! [ -f "$XHY_NODES/relay.env" ]'
+chk "del 后 config 无 us-relay"       '! grep -q "us-relay" "$XHY_ETC/config.json"'
+chk "del 后 config 仍合法"            'json_ok "$XHY_ETC/config.json"'
+chk "del 后基础节点还在"              'grep -q "in-reality-443" "$XHY_ETC/config.json"'
 
 echo "===== relay land ====="
-relay_land --allow 198.51.100.20 --uuid land-uuid-0000
-chk "land 生成入站片段"           '[ -f "$XHY_CONFDIR/relay_in_14430.json" ]'
-chk "config 含 in-relay-14430"    'grep -q "in-relay-14430" "$XHY_ETC/config.json"'
-chk "land 写入 relay.env"         '[ -f "$XHY_NODES/relay.env" ]'
-chk "relay.env 角色=land"         'grep -q "^RELAY_ROLE=land$" "$XHY_NODES/relay.env"'
+relay_land --allow 198.51.100.20 --uuid land-uuid-0000 >/dev/null
+chk "land 生成入站片段"               '[ -f "$XHY_CONFDIR/relay_in_14430.json" ]'
+chk "片段是合法 JSON"                 'json_ok "$XHY_CONFDIR/relay_in_14430.json"'
+chk "config 含 in-relay-14430"        'grep -q "in-relay-14430" "$XHY_ETC/config.json"'
+chk "config 仍是合法 JSON"            'json_ok "$XHY_ETC/config.json"'
+chk "relay.env 角色=land"             'grep -q "^RELAY_ROLE=land$" "$XHY_NODES/relay.env"'
+chk "防火墙规则带注释写入"            'grep -q "comment=xhy-relay-14430" "$FAKE_FW"'
+chk "只放行入口 IP"                   'grep -q "src=198.51.100.20" "$FAKE_FW"'
+chk "land 不含 relay 出站"            '! grep -q "us-relay" "$XHY_ETC/config.json"'
+chk "land status 报角色"              'relay_status | grep -q "落地"'
 
-echo "===== relay del (land) ====="
-relay_del
-chk "land 删除入站片段"           '! [ -f "$XHY_CONFDIR/relay_in_14430.json" ]'
-chk "land 删除后无 relay.env"     '! [ -f "$XHY_NODES/relay.env" ]'
+echo "===== land 重复执行（幂等，不因端口自占用而失败） ====="
+relay_land --allow 198.51.100.20 --uuid land-uuid-0000 >/dev/null
+chk "重复执行后片段只有一个"          '[ "$(ls "$XHY_CONFDIR"/relay_in_*.json | wc -l)" = "1" ]'
+chk "重复执行后配置仍合法"            'json_ok "$XHY_ETC/config.json"'
+
+echo "===== land --tls（指定证书文件） ====="
+printf 'dummy-cert\n' >"$TEST_TMP/relay.crt"
+printf 'dummy-key\n'  >"$TEST_TMP/relay.key"
+relay_land --allow 198.51.100.20 --uuid land-uuid-0000 \
+    --tls-cert "$TEST_TMP/relay.crt" --tls-key "$TEST_TMP/relay.key" --sni relay.example.com >/dev/null
+chk "片段启用 tls"                    'grep -q "\"security\":\"tls\"" "$XHY_CONFDIR/relay_in_14430.json"'
+chk "片段带证书路径"                  "grep -q 'relay.crt' \"\$XHY_CONFDIR/relay_in_14430.json\""
+chk "relay.env 记 tls"                'grep -q "^RELAY_SECURITY=tls$" "$XHY_NODES/relay.env"'
+chk "relay.env 记 sni"                'grep -q "^RELAY_SNI=relay.example.com$" "$XHY_NODES/relay.env"'
+chk "tls 片段仍是合法 JSON"           'json_ok "$XHY_CONFDIR/relay_in_14430.json"'
+
+echo "===== 同机换角色：land → entry ====="
+relay_entry --to 203.0.113.10:14430 --uuid switch-uuid-0000 --categories openai >/dev/null
+chk "换角色后入站片段被摘掉"          '! ls "$XHY_CONFDIR"/relay_in_*.json >/dev/null 2>&1'
+chk "换角色后防火墙规则被摘掉"        '! grep -q "xhy-relay-14430" "$FAKE_FW"'
+chk "换角色后 config 无 in-relay"     '! grep -q "in-relay" "$XHY_ETC/config.json"'
+chk "换角色后 config 有 us-relay"     'grep -q "us-relay" "$XHY_ETC/config.json"'
+chk "换角色后仍是合法 JSON"           'json_ok "$XHY_ETC/config.json"'
+
+echo "===== reapply（快照回滚后兜底） ====="
+relay_entry --to 203.0.113.10:14430 --uuid switch-uuid-0000 --categories openai >/dev/null
+XHY_SKIP_SNAPSHOT=1 rebuild_config >/dev/null 2>&1
+relay_reapply >/dev/null
+chk "reapply 后 relay 在"             'grep -q "us-relay" "$XHY_ETC/config.json"'
+chk "reapply 后 JSON 合法"            'json_ok "$XHY_ETC/config.json"'
+
+echo "===== relay del（收尾） ====="
+relay_del >/dev/null
+chk "最终无 relay.env"                '! [ -f "$XHY_NODES/relay.env" ]'
+chk "最终无入站片段"                  '! ls "$XHY_CONFDIR"/relay_in_*.json >/dev/null 2>&1'
+chk "最终无 relay 出站"               '! grep -q "us-relay" "$XHY_ETC/config.json"'
+chk "最终 config 合法"                'json_ok "$XHY_ETC/config.json"'
 
 summary
