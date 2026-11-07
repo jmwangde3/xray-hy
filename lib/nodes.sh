@@ -162,13 +162,23 @@ rebuild_config() {
     if [[ -n "$rules_extra" ]]; then
         if [[ -n "$rules" ]]; then rules="${rules_extra},${rules}"; else rules="$rules_extra"; fi
     fi
+    # 另两个钩子：balancer 必须落在 routing 对象内、rules 之前；observatory
+    # 是顶层字段。两者位置不同，只能分开给（硬塞进 rules 里 xray 会直接报错）。
+    local rh_extra top_extra
+    rh_extra="$(extra_routing_head_json)"
+    if [[ -n "$rh_extra" ]]; then rh_extra="${rh_extra},"; fi
+    top_extra="$(extra_top_json)"
     {
         printf '{\n  "log": %s,\n' "$(log_json)"
         printf '  "inbounds": [%s],\n' "$joined"
         printf '  "dns": %s,\n' "$(dns_json)"
-        printf '  "routing": %s"rules":[%s]},\n' "$rt_head" "$rules"
+        printf '  "routing": %s%s"rules":[%s]},\n' "$rt_head" "$rh_extra" "$rules"
         printf '  "outbounds": %s,\n' "$ob"
-        printf '  "policy": %s\n}\n' "$(policy_json)"
+        if [[ -n "$top_extra" ]]; then
+            printf '  "policy": %s,\n  %s\n}\n' "$(policy_json)" "$top_extra"
+        else
+            printf '  "policy": %s\n}\n' "$(policy_json)"
+        fi
     } | atomic_write "$XHY_ETC/config.json" 0600
     ok "配置已重建: $XHY_ETC/config.json ($(node_count) 个节点)"
 }
@@ -179,6 +189,10 @@ rebuild_config() {
 # 随着基础管线改动慢慢漂移（relay 第一版正是如此，还漏了 config_reload）。
 extra_outbounds_json() { :; }
 extra_routing_rules_json() { :; }
+#        routing 对象内、"rules" 之前的字段（输出形如 "balancers":[...]；空 = 不插）
+#        顶层 JSON 追加字段（输出形如 "burstObservatory":{...}；空 = 不插）
+extra_routing_head_json() { :; }
+extra_top_json() { :; }
 
 sniffing_json() {
     local override='["tls"]'

@@ -25,17 +25,28 @@ RELAY_DEFAULT_PORT=14430
 RELAY_DEFAULT_CATEGORIES="openai,anthropic,google,tiktok,netflix"
 RELAY_DEFAULT_TAG="us-relay"
 
+# 落地失联自动回落（v1.11.0）：balancer 由 burstObservatory 探活，落地机不可达
+# 时把命中中继规则的连接交给 direct 出站，而不是黑洞掉。宁可拿到东京 IP，
+# 也别让家里的 AI 流量静默全断。
+RELAY_FALLBACK_DEFAULT="on"
+RELAY_PROBE_URL_DEFAULT="https://www.gstatic.com/generate_204"
+RELAY_PROBE_INTERVAL_DEFAULT="1m"
+RELAY_PROBE_SAMPLING_DEFAULT="3"
+RELAY_PROBE_TIMEOUT_DEFAULT="5s"
+
 # 全局状态（relay_env_save 之前由各子命令赋值；relay_env_load 从文件读回）
 RELAY_ROLE=""; RELAY_PORT=""; RELAY_ALLOW=""; RELAY_UUID=""
 RELAY_UPSTREAM=""; RELAY_CATEGORIES=""; RELAY_FW_CHAIN=""
 RELAY_SECURITY=""; RELAY_SNI=""; RELAY_PIN=""
 RELAY_CERT=""; RELAY_KEY=""; RELAY_GEOIP_US=""; RELAY_TAG=""
+RELAY_FALLBACK=""; RELAY_TFO=""
 
 relay_reset_vars() {
     RELAY_ROLE=""; RELAY_PORT=""; RELAY_ALLOW=""; RELAY_UUID=""
     RELAY_UPSTREAM=""; RELAY_CATEGORIES=""; RELAY_FW_CHAIN=""
     RELAY_SECURITY=""; RELAY_SNI=""; RELAY_PIN=""
     RELAY_CERT=""; RELAY_KEY=""; RELAY_GEOIP_US=""; RELAY_TAG=""
+    RELAY_FALLBACK=""; RELAY_TFO=""
 }
 
 # ---------------------------------------------------------------------------
@@ -47,7 +58,7 @@ relay_reset_vars() {
 # 旧词条互相吞），改为每条消息就地给中英两份，按当前语言选一份。
 # ---------------------------------------------------------------------------
 relay_say() {
-    local lvl="$1" zh="$2" en="$3" s
+    local lvl="$1" zh="$2" en="${3:-$2}" s
     if [[ "${XHY_LANG_EFFECTIVE:-zh}" == "en" ]]; then s="$en"; else s="$zh"; fi
     case "$lvl" in
         ok)   ok "$s" ;;
@@ -69,6 +80,7 @@ Usage: xhy relay <command> [options]
            xhy relay entry --to <land-ip>:<port> [--uuid UUID]
                           [--categories a,b,c|ai|media|none] [--no-geoip-us]
                           [--tls] [--sni NAME] [--pin HEX] [--tag TAG]
+                          [--no-fallback] [--no-tfo]
   reapply  Re-inject after the config was rebuilt / restored from a snapshot.
   status   Show this host's role, port, upstream and live checks.
   test     Self-check: config shape, listening port, firewall rule, TCP reachability.
@@ -76,6 +88,12 @@ Usage: xhy relay <command> [options]
   del      Remove this host's relay config, firewall rule and fragment.
 
 Defaults: port 14430, categories openai,anthropic,google,tiktok,netflix, tag us-relay.
+Transport: security=none, always. Both ends are yours and this hop runs on the cloud
+           backbone; client-to-site TLS is already end-to-end, so a second TLS layer
+           only costs a handshake per connection and one AES pass per byte on the land.
+           --tls/--sni/--pin are retired no-ops, kept only for script compatibility.
+Fallback: on by default. A balancer probes the landing host every 60s and switches
+          to direct when it is unreachable. --no-fallback restores the old hard pin.
 Cloud security group: allow TCP <port> from the entry IP only (iptables is not enough).
 EOF
         return 0
@@ -90,6 +108,7 @@ EOF
            xhy relay entry --to <落地机IP>:<端口> [--uuid UUID]
                           [--categories a,b,c|ai|media|none] [--no-geoip-us]
                           [--tls] [--sni NAME] [--pin HEX] [--tag TAG]
+                          [--no-fallback] [--no-tfo]
   reapply  配置被重建 / 从快照还原后重新注入（改造后一般用不到了，留作兜底）
   status   看本机角色、端口、上游与实时检查
   test     自检：配置形状、端口监听、防火墙规则、TCP 连通性与往返耗时
@@ -97,6 +116,11 @@ EOF
   del      移除本机 relay 配置、防火墙规则、入站片段
 
 默认值：端口 14430、分类 openai,anthropic,google,tiktok,netflix、出站标签 us-relay。
+传输：security=none，恒明文。两端自有、走云内网，客户端到目标站的 TLS 已端到端，
+      再套一层只多一次握手 + 落地机每字节一遍 AES，还多四个故障面。
+      --tls / --sni / --pin 已停用，只保留参数位以免老脚本报错。
+回落：默认开。balancer 每 60s 探活落地机，不可达时切 direct 出站，
+      不会让 AI 分类流量静默黑洞。--no-fallback 回到 v1.10.x 的死指行为。
 云安全组要单独放行：入方向 TCP <端口>，源只填入口机 IP（只改 iptables 不够）。
 EOF
 }
@@ -121,6 +145,8 @@ relay_env_save() {
         [[ -n "$RELAY_KEY" ]]        && printf 'RELAY_KEY=%s\n' "$RELAY_KEY"
         [[ -n "$RELAY_GEOIP_US" ]]   && printf 'RELAY_GEOIP_US=%s\n' "$RELAY_GEOIP_US"
         [[ -n "$RELAY_TAG" ]]        && printf 'RELAY_TAG=%s\n' "$RELAY_TAG"
+        [[ -n "$RELAY_FALLBACK" ]]   && printf 'RELAY_FALLBACK=%s\n' "$RELAY_FALLBACK"
+        [[ -n "$RELAY_TFO" ]]        && printf 'RELAY_TFO=%s\n' "$RELAY_TFO"
     } | atomic_write "$XHY_NODES/relay.env" 0600 || return 1
     return 0
 }
@@ -132,7 +158,13 @@ relay_env_load() {
     [[ -f "$f" ]] || return 1
     # shellcheck disable=SC1090
     source "$f"
-    [[ -n "$RELAY_ROLE" ]]
+    [[ -n "$RELAY_ROLE" ]] || return 1
+    # 从 v1.10.x 升级：老 relay.env 可能写着 security=tls + pin + 证书路径。
+    # 这一版起恒明文，读的时候就地把这些字段降级，老机器不用重配，
+    # config.json 也不会再产出任何 tlsSettings。
+    RELAY_SECURITY="none"
+    RELAY_SNI=""; RELAY_PIN=""; RELAY_CERT=""; RELAY_KEY=""
+    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -209,34 +241,26 @@ relay_pin_hex() {
     printf '%s' "$hex"
 }
 
-# $1 = 上游地址（SNI 缺省用它）
+# ---------------------------------------------------------------------------
+# v1.11.0 起：中继这一跳恒为明文（security=none），两端 security 一律不写 tls。
+#
+# 理由：两端都是自己的机器、这一跳走云厂商跨地域内网。客户端到目标站的 TLS
+# 本来就是端到端的（落地机只转密文），中间再套一层 TLS 防的是一个拿不到骨干
+# 设备的中间人，却要每条新连接多一次 TLS 握手、落地机每字节一遍 AES-GCM，
+# 还平白多出证书过期 / SAN 不匹配 / pin 对不上 / SNI 写错四个故障面。
+#
+# 下面的 TLS 生成函数（relay_pin_hex / relay_tls_ensure / relay_tls_pin_of）
+# 保留但不接入：将来若这一跳改成跨公网、或落地机不是自己的，恢复这两个
+# stream 函数里的调用点即可，不用重写。--tls 等参数也保留为兼容占位。
+# ---------------------------------------------------------------------------
+
+# $1 = 上游地址（保留参数，明文模式下不再用于 SNI）
 relay_stream_client_json() {
-    local host="${1:-}"
-    if [[ "$RELAY_SECURITY" == "tls" ]]; then
-        local extra="" sni pin
-        sni="${RELAY_SNI:-$host}"
-        # Xray 26.x 移除了 allowInsecure：有 pin 用 pinnedPeerCertSha256（单证书指纹），
-        # 没 pin 用 verifyPeerCertByName（按 SAN 校验名字，证书必须带 SAN）。
-        pin="$(relay_pin_hex "$RELAY_PIN")" || return 1
-        if [[ -n "$pin" ]]; then
-            # 自签证书 + 证书指纹 pin：不依赖 CA，也不怕中间人（pin 对不上就断）
-            extra=",\"pinnedPeerCertSha256\":\"$pin\""
-        else
-            extra=",\"verifyPeerCertByName\":\"$sni\""
-        fi
-        printf '{"network":"tcp","security":"tls","tlsSettings":{"serverName":"%s"%s}}' "$sni" "$extra"
-    else
-        printf '{"network":"tcp","security":"none"}'
-    fi
+    printf '{"network":"tcp","security":"none"}'
 }
 
 relay_stream_server_json() {
-    if [[ "$RELAY_SECURITY" == "tls" ]]; then
-        printf '{"network":"tcp","security":"tls","tlsSettings":{"serverName":"%s","certificates":[{"certificateFile":"%s","keyFile":"%s"}]}}' \
-            "$RELAY_SNI" "$RELAY_CERT" "$RELAY_KEY"
-    else
-        printf '{"network":"tcp","security":"none"}'
-    fi
+    printf '{"network":"tcp","security":"none"}'
 }
 
 # land 入站片段（一个标准 inbound 对象，被 rebuild_config 拼进 inbounds）
@@ -253,32 +277,66 @@ relay_fragment() {
 EOF
 }
 
+# 中继这一跳的两端都是自己的机器，TFO 不存在「伪装站不支持」的兼容问题，
+# 默认打开：省掉每条新连接的一次 TCP 握手往返。BBR 跟随系统是否可用。
+relay_sockopt_json() {
+    local tfo="true" cc=""
+    if [[ "${RELAY_TFO:-on}" == "off" ]]; then tfo="false"; fi
+    if declare -F sockopt_cc_available >/dev/null 2>&1 && sockopt_cc_available; then
+        cc=',"tcpcongestion":"bbr"'
+    fi
+    printf '{"tcpFastOpen":%s,"tcpNoDelay":true,"tcpKeepAliveIdle":45,"tcpUserTimeout":10000,"tcpMptcp":false%s}' "$tfo" "$cc"
+}
+
 # entry 出站（转发到落地机中继端口）
 relay_outbound_json() {
-    local hp host port ss
+    local hp host port ss so
     hp="$(relay_split_upstream "$RELAY_UPSTREAM")" || return 1
     host="${hp% *}"; port="${hp##* }"
     [[ "$host" == "$RELAY_UPSTREAM" ]] && return 1
     # 流传输片段单独取，失败就别产出半截 JSON（坏 JSON 会让 xray 起不来）
     ss="$(relay_stream_client_json "$host")" || { relay_say err "中继出站片段生成失败" "failed to build relay outbound stream"; return 1; }
-    printf '{"protocol":"vless","tag":"%s","settings":{"vnext":[{"address":"%s","port":%s,"users":[{"id":"%s","encryption":"none"}]}]},"streamSettings":%s}' \
-        "$(relay_out_tag)" "$host" "$port" "$RELAY_UUID" "$ss"
+    so="$(relay_sockopt_json)"
+    printf '{"protocol":"vless","tag":"%s","settings":{"vnext":[{"address":"%s","port":%s,"users":[{"id":"%s","encryption":"none"}]}]},"streamSettings":%s,"sockopt":%s}' \
+        "$(relay_out_tag)" "$host" "$port" "$RELAY_UUID" "$ss" "$so"
+}
+
+# ---------------------------------------------------------------------------
+# 失联回落（v1.11.0）
+#
+# 原方案的问题：路由规则死指 us-relay，落地机一挂，AI 分类流量直接黑洞 ——
+# 既不报错也不切走，家里只会看到「网卡住了」。这里给 balancer 配 fallback，
+# 由 burstObservatory 定时探活，候选全部 down 时交给 direct 出站。
+#
+# 为什么 leastPing 而不是 leastLoad：候选只有一个，leastLoad 的负载窗口在
+# 单节点上没有意义；leastPing 的语义（探活失败即剔除）正是要的。
+# ---------------------------------------------------------------------------
+relay_fallback_on() {
+    [[ "${RELAY_FALLBACK:-$RELAY_FALLBACK_DEFAULT}" != "off" ]]
+}
+
+relay_lb_tag() { printf '%s-lb' "$(relay_out_tag)"; }
+
+# 路由规则该指向谁：开了回落指向 balancer，关掉直接指出站（v1.10.x 行为）
+relay_target_tag() {
+    if relay_fallback_on; then relay_lb_tag; else relay_out_tag; fi
 }
 
 # entry 路由规则：输出「逗号分隔的 rule 对象」，无外层方括号（钩子约定）。
 # 顺序有意义：域名规则在前、geoip:us 在后，域名命中就不再解析 IP。
 relay_routing_rules_json() {
-    local c out="" doms="" sep=""
+    local c out="" doms="" sep="" tgt
+    tgt="$(relay_target_tag)"
     for c in ${RELAY_CATEGORIES//,/ }; do
         [[ -n "$c" ]] || continue
         doms+="${sep}\"geosite:${c}\""; sep=","
     done
     if [[ -n "$doms" ]]; then
-        out="{\"type\":\"field\",\"domain\":[${doms}],\"outboundTag\":\"$(relay_out_tag)\"}"
+        out="{\"type\":\"field\",\"domain\":[${doms}],\"outboundTag\":\"${tgt}\"}"
     fi
     if [[ "${RELAY_GEOIP_US:-on}" != "off" ]]; then
         [[ -n "$out" ]] && out+=","
-        out+="{\"type\":\"field\",\"ip\":[\"geoip:us\"],\"outboundTag\":\"$(relay_out_tag)\"}"
+        out+="{\"type\":\"field\",\"ip\":[\"geoip:us\"],\"outboundTag\":\"${tgt}\"}"
     fi
     printf '%s' "$out"
 }
@@ -300,6 +358,27 @@ extra_outbounds_json() {
 extra_routing_rules_json() {
     relay_entry_active || return 0
     relay_routing_rules_json
+}
+
+# routing 对象内、rules 之前：balancer 定义
+extra_routing_head_json() {
+    relay_entry_active || return 0
+    relay_fallback_on || return 0
+    printf '"balancers":[{"tag":"%s","selector":["%s"],"fallbackTag":"direct","strategy":{"type":"leastPing"}}]' \
+        "$(relay_lb_tag)" "$(relay_out_tag)"
+}
+
+# 顶层：探活器。探测目标必须选一个「从落地机看一定可达」的 204 端点，
+# gstatic 的 generate_204 是最省流量的通用选择，且不依赖落地机所在地区。
+extra_top_json() {
+    relay_entry_active || return 0
+    relay_fallback_on || return 0
+    printf '"burstObservatory":{"subjectSelector":["%s"],"pingConfig":{"destination":"%s","interval":"%s","sampling":%s,"timeout":"%s"}}' \
+        "$(relay_out_tag)" \
+        "${RELAY_PROBE_URL:-$RELAY_PROBE_URL_DEFAULT}" \
+        "${RELAY_PROBE_INTERVAL:-$RELAY_PROBE_INTERVAL_DEFAULT}" \
+        "${RELAY_PROBE_SAMPLING:-$RELAY_PROBE_SAMPLING_DEFAULT}" \
+        "${RELAY_PROBE_TIMEOUT:-$RELAY_PROBE_TIMEOUT_DEFAULT}"
 }
 
 # ---------------------------------------------------------------------------
@@ -510,9 +589,8 @@ relay_land() {
     RELAY_TAG=""
     RELAY_SECURITY="none"
     if (( tls )); then
-        relay_tls_ensure "$port" "$sni" "$crt" "$key" || return 1
-        RELAY_SECURITY="tls"
-        RELAY_PIN="$(relay_tls_pin_of "$RELAY_CERT" || true)"
+        relay_say warn "v1.11.0 起中继这一跳恒为明文，--tls 已停用（参数忽略）" \
+                      "relay hop is always plaintext since v1.11.0; --tls retired (ignored)"
     fi
 
     # 旧 land 换了端口/UUID → 先删旧片段与旧规则；同端口则原地覆盖
@@ -531,12 +609,8 @@ relay_land() {
     [[ -n "$myip" ]] || myip="$(public_ip)"
     relay_say ok "中继入站已就绪：${myip}:${port}（仅放行 ${allow}）" \
                 "relay inbound ready: ${myip}:${port} (allow ${allow} only)"
-    if [[ "$RELAY_SECURITY" == "tls" ]]; then
-        relay_say info "传输已加密（自签证书 + pin）" "transport encrypted (self-signed cert + pin)"
-    else
-        relay_say warn "当前是明文 vless（security=none），安全性只靠上面的源 IP 限制" \
-                      "plaintext vless (security=none); safety relies on the source-IP allowlist"
-    fi
+    relay_say info "明文 vless（security=none）：两端自有、走云内网时推荐，省掉每条新连接一次 TLS 握手" \
+                  "plaintext vless (security=none): recommended for owned-to-owned traffic on a cloud backbone; saves one TLS handshake per connection"
     relay_say info "云安全组记得放行：入方向 TCP ${port}，源 ${allow}/32" \
                   "also open the cloud security group: inbound TCP ${port} from ${allow}/32"
     relay_say info "把下面这条带到入口机执行：" "run this on the entry host:"
@@ -546,21 +620,14 @@ relay_land() {
 
 # 打印入口机该执行的命令（land 侧用）
 relay_entry_hint() {
-    local ip="$1" extra=""
-    [[ "$RELAY_SECURITY" == "tls" ]] && extra=" --tls --sni ${RELAY_SNI}"
-    [[ "$RELAY_SECURITY" == "tls" && -n "$RELAY_PIN" ]] && extra+=" --pin ${RELAY_PIN}"
-    printf '    xhy relay entry --to %s:%s --uuid %s%s\n' "$ip" "$RELAY_PORT" "$RELAY_UUID" "$extra"
-    if [[ "$RELAY_SECURITY" == "tls" ]]; then
-        printf 'vless://%s@%s:%s?encryption=none&security=tls&sni=%s&type=tcp#relay-land\n' \
-            "$RELAY_UUID" "$ip" "$RELAY_PORT" "$RELAY_SNI"
-    else
-        printf 'vless://%s@%s:%s?encryption=none&security=none&type=tcp#relay-land\n' \
-            "$RELAY_UUID" "$ip" "$RELAY_PORT"
-    fi
+    local ip="$1"
+    printf '    xhy relay entry --to %s:%s --uuid %s\n' "$ip" "$RELAY_PORT" "$RELAY_UUID"
+    printf 'vless://%s@%s:%s?encryption=none&security=none&type=tcp#relay-land\n' \
+        "$RELAY_UUID" "$ip" "$RELAY_PORT"
 }
 
 relay_entry() {
-    local upstream="" uuid="" categories="" geoip="on" tls=0 sni="" pin="" tag=""
+    local upstream="" uuid="" categories="" geoip="on" tls=0 sni="" pin="" tag="" fb="" tfo=""
     while (( $# > 0 )); do
         case "$1" in
             --to)         (( $# >= 2 )) || die "--to 缺少参数"; upstream="$2"; shift 2 ;;
@@ -572,6 +639,10 @@ relay_entry() {
             --sni)        (( $# >= 2 )) || die "--sni 缺少参数"; sni="$2"; shift 2 ;;
             --pin)        (( $# >= 2 )) || die "--pin 缺少参数"; pin="$2"; tls=1; shift 2 ;;
             --tag)        (( $# >= 2 )) || die "--tag 缺少参数"; tag="$2"; shift 2 ;;
+            --fallback)   (( $# >= 2 )) || die "--fallback 缺少参数"; fb="$2"; shift 2 ;;
+            --no-fallback) fb="off"; shift ;;
+            --tfo)        (( $# >= 2 )) || die "--tfo 缺少参数"; tfo="$2"; shift 2 ;;
+            --no-tfo)     tfo="off"; shift ;;
             -h|--help)    relay_usage; return 0 ;;
             *) die "未知参数: $1（xhy relay entry --help 看用法）" ;;
         esac
@@ -590,6 +661,7 @@ relay_entry() {
     categories="$(relay_norm_categories "${categories:-$RELAY_DEFAULT_CATEGORIES}")" || return 1
     [[ "$geoip" == "on" || "$geoip" == "off" ]] || die "--geoip-us 只接受 on / off"
     [[ -n "$tag" ]] && { relay_valid_host "$tag" || die "--tag 不合法: $tag"; }
+    [[ -z "$fb" || "$fb" == "on" || "$fb" == "off" ]] || die "--fallback 只接受 on / off"
 
     # 同机原本是 land → 摘掉入站片段与防火墙规则（角色互斥）
     relay_env_load >/dev/null 2>&1 || true
@@ -610,24 +682,13 @@ relay_entry() {
     RELAY_CATEGORIES="$categories"
     RELAY_GEOIP_US="$geoip"
     RELAY_TAG="$tag"
+    RELAY_FALLBACK="${fb:-$RELAY_FALLBACK_DEFAULT}"
+    RELAY_TFO="${tfo:-on}"
+    RELAY_SECURITY="none"
+    RELAY_SNI=""; RELAY_PIN=""; RELAY_CERT=""; RELAY_KEY=""
     if (( tls )); then
-        RELAY_SECURITY="tls"
-        # pin 一律归一成 64 位小写 hex 存进 relay.env（对端命令 / export 直接可用）
-        RELAY_PIN="$(relay_pin_hex "$pin")" || return 1
-        if [[ -n "$sni" ]]; then
-            RELAY_SNI="$sni"
-        elif [[ -n "$RELAY_PIN" ]]; then
-            # 有 pin 就只验指纹，serverName 只是握手时发出去的 SNI，用落地地址即可
-            RELAY_SNI="$host"
-        else
-            # 无 pin 时 Xray 走 verifyPeerCertByName —— 校验的名字必须等于落地证书的 SAN。
-            # 落地端自签时 SAN 是 relay-<port>，默认对齐它，别拿 IP 去比（必失败）。
-            RELAY_SNI="relay-$p"
-        fi
-    else
-        RELAY_SECURITY="none"
-        RELAY_SNI=""
-        RELAY_PIN=""
+        relay_say warn "v1.11.0 起中继这一跳恒为明文，--tls / --sni / --pin 已停用（参数忽略）" \
+                      "relay hop is always plaintext since v1.11.0; --tls/--sni/--pin retired (ignored)"
     fi
     relay_env_save || return 1
     relay_apply || return 1
@@ -636,10 +697,15 @@ relay_entry() {
                 "relay outbound ready: traffic -> ${RELAY_UPSTREAM}"
     relay_say info "分类=${categories:-无}  geoip:us=${geoip}  标签=$(relay_out_tag)" \
                   "categories=${categories:-none}  geoip:us=${geoip}  tag=$(relay_out_tag)"
-    if [[ "$RELAY_SECURITY" != "tls" ]]; then
-        relay_say info "传输为明文；落地端若开了 --tls，这里要带同样的 --tls --sni（可选 --pin）" \
-                      "plaintext transport; if the landing side uses --tls, pass the same --tls --sni (and --pin)"
+    if relay_fallback_on; then
+        relay_say info "失联回落已开：balancer $(relay_lb_tag) → direct（探活 ${RELAY_PROBE_INTERVAL:-$RELAY_PROBE_INTERVAL_DEFAULT}）" \
+                      "fallback on: balancer $(relay_lb_tag) -> direct (probe ${RELAY_PROBE_INTERVAL:-$RELAY_PROBE_INTERVAL_DEFAULT})"
+    else
+        relay_say warn "失联回落已关：落地机不可达时这些流量直接断掉，不会切 direct" \
+                      "fallback off: relayed traffic blacks out when the landing host is unreachable"
     fi
+    relay_say info "这一跳恒为明文（security=none），无 TLS 握手 / 无 AES 开销" \
+                  "hop is always plaintext (security=none); no TLS handshake, no AES overhead"
     relay_tcp_probe "$host" "$p" || true
     relay_say info "落地端用同一 UUID 配置：xhy relay land --allow <本机公网IP> --uuid $uuid" \
                   "configure the landing side with the same UUID: xhy relay land --allow <this-ip> --uuid $uuid"
@@ -653,20 +719,15 @@ relay_export() {
         relay_say info "在入口机执行：" "run on the entry host:"
         relay_entry_hint "$ip"
     else
-        local allow lp lextra="" lquery=""
+        local allow lp
         allow="$(public_ip)"
         lp="${RELAY_UPSTREAM##*:}"
         relay_say info "在落地机执行（源 IP 用本机公网 IP）：" \
                       "run on the landing host (allow this host's public IP):"
-        if [[ "$RELAY_SECURITY" == "tls" ]]; then
-            # 落地端要自己 --tls 产证书；SNI 必须与入口端一致，否则名字校验过不去
-            lextra=" --tls --sni ${RELAY_SNI:-relay-${lp}}"
-            lquery="&sni=${RELAY_SNI:-relay-${lp}}"
-        fi
-        printf '    xhy relay land --allow %s --port %s --uuid %s%s\n' \
-            "$allow" "$lp" "$RELAY_UUID" "$lextra"
-        printf 'vless://%s@%s?encryption=none&security=%s&type=tcp%s#relay-land\n' \
-            "$RELAY_UUID" "$RELAY_UPSTREAM" "$RELAY_SECURITY" "$lquery"
+        printf '    xhy relay land --allow %s --port %s --uuid %s\n' \
+            "$allow" "$lp" "$RELAY_UUID"
+        printf 'vless://%s@%s?encryption=none&security=none&type=tcp#relay-land\n' \
+            "$RELAY_UUID" "$RELAY_UPSTREAM"
     fi
     return 0
 }
@@ -737,7 +798,7 @@ relay_status() {
             relay_say info "角色: 落地端（接收）" "role: land (receiver)"
             printf '  端口   : %s\n' "$RELAY_PORT"
             printf '  放行源 : %s\n' "$RELAY_ALLOW"
-            printf '  传输   : %s%s\n' "$RELAY_SECURITY" "$([[ "$RELAY_SECURITY" == "tls" ]] && printf ' (sni=%s, pin=%s)' "$RELAY_SNI" "${RELAY_PIN:0:12}…")"
+            printf '  传输   : none（明文 vless）\n' 
             printf '  UUID   : %s\n' "$RELAY_UUID"
             relay_port_listening "$RELAY_PORT" && relay_say ok "端口 ${RELAY_PORT} 监听中" "port ${RELAY_PORT} listening" \
                 || relay_say warn "端口 ${RELAY_PORT} 未监听" "port ${RELAY_PORT} not listening"
@@ -747,13 +808,19 @@ relay_status() {
                 || relay_say warn "config 未含入站（xhy relay reapply）" "config lacks inbound (xhy relay reapply)"
             ;;
         entry)
-            local n=0
+            local n=0 fbs
             relay_say info "角色: 入口端（转发）" "role: entry (forwarder)"
             printf '  上游   : %s\n' "$RELAY_UPSTREAM"
-            printf '  传输   : %s%s\n' "$RELAY_SECURITY" "$([[ "$RELAY_SECURITY" == "tls" ]] && printf ' (sni=%s, pin=%s)' "$RELAY_SNI" "${RELAY_PIN:0:12}…")"
+            printf '  传输   : none（明文 vless）\n' 
             printf '  分类   : %s\n' "${RELAY_CATEGORIES:-（无，仅 geoip:us）}"
             printf '  geoip  : %s\n' "${RELAY_GEOIP_US:-on}"
             printf '  标签   : %s\n' "$(relay_out_tag)"
+            if relay_fallback_on; then
+                fbs="on（$(relay_lb_tag) → direct，探活 $(relay_out_tag)）"
+            else
+                fbs="off（死指 $(relay_out_tag)）"
+            fi
+            printf '  回落   : %s\n' "$fbs"
             printf '  UUID   : %s\n' "$RELAY_UUID"
             n="$(grep -o "\"$(relay_out_tag)\"" "$XHY_ETC/config.json" 2>/dev/null | wc -l | tr -d ' ')"
             if [[ "${n:-0}" -ge 2 ]]; then
@@ -782,6 +849,21 @@ relay_test() {
     fi
     relay_config_has "$(relay_out_tag)" && relay_say ok "config 含 $(relay_out_tag)" "config has $(relay_out_tag)" \
         || relay_say warn "config 未含 relay 出站（xhy relay reapply）" "config lacks relay outbound"
+    relay_config_has '"sockopt"' && relay_say ok "出站 sockopt 在位（TFO + tcpNoDelay + keepalive）" \
+        "outbound sockopt present (TFO, tcpNoDelay, keepalive)" \
+        || relay_say warn "出站缺 sockopt（每条新连接多一个 TCP 握手）" "outbound lacks sockopt"
+    if relay_fallback_on; then
+        relay_config_has "\"$(relay_lb_tag)\"" && relay_say ok "回落链路在位：$(relay_lb_tag) → direct" \
+            "fallback chain present: $(relay_lb_tag) -> direct" \
+            || relay_say warn "回落开关是 on 但 config 没有 balancer（xhy relay reapply）" "fallback on but no balancer in config"
+        relay_config_has 'burstObservatory' && relay_say ok "探活器 burstObservatory 在位" \
+            "prober burstObservatory present" \
+            || relay_say warn "缺 burstObservatory：balancer 拿不到延迟数据，回落不会触发" "burstObservatory missing; fallback will not trigger"
+    else
+        relay_say info "失联回落已关（--no-fallback）：落地挂掉时这些流量直接断" \
+                      "fallback disabled (--no-fallback): relayed traffic blacks out if the landing host dies"
+    fi
+    printf '  传输   : none（明文 vless）\n'
     local hp host p
     hp="$(relay_split_upstream "$RELAY_UPSTREAM")" || { relay_say err "RELAY_UPSTREAM 解析失败" "bad RELAY_UPSTREAM"; return 1; }
     host="${hp% *}"; p="${hp##* }"

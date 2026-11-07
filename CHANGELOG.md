@@ -2,6 +2,13 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.11.0 — 2026-11-08
+
+- feat(relay): 中继这一跳恒为 security=none —— 两端自有机器 + 云厂商内网，客户端到目标站 TLS 已端到端，再套一层只多一次握手与落地机每字节一遍 AES。--tls/--sni/--pin 停用为兼容占位（不再产出任何 tlsSettings）；v1.10.x 的旧 relay.env 读入时自动降级为 none
+- feat(relay): 出站补 sockopt（tcpFastOpen=true / tcpNoDelay / tcpKeepAliveIdle / tcpUserTimeout / BBR 跟随系统），省掉每条新连接一次 TCP 握手；--no-tfo 可关，开关持久化进 relay.env
+- feat(relay): 落地失联自动回落 —— nodes.sh 新增 extra_routing_head_json / extra_top_json 两个钩子，relay 注入 balancer(leastPing, fallbackTag=direct) 与顶层 burstObservatory(60s 探活 gstatic 204)；--no-fallback 回到 v1.10.x 死指行为
+- test(relay): 77 → 96 项（恒明文、旧 tls 状态自动降级、sockopt、balancer/observatory 位置与形状、--no-fallback/--no-tfo、非法值拒绝）；全套 654 项通过
+
 ## v1.10.1 — 2026-11-08
 
 - fix(relay): Xray 26.x 移除了 `allowInsecure`、`pinnedPeerCertificateChainSha256` 也只吃 hex —— TLS 出站改用 `pinnedPeerCertSha256`（64 位小写 hex）+ 无 pin 时 `verifyPeerCertByName`；旧 relay.env 里的 base64 pin 自动转 hex，非法 pin 直接报错不静默降级

@@ -19,6 +19,7 @@ stub_system
 make_stub_xray
 export XHY_SKIP_SNAPSHOT=1
 export XHY_RELAY_NO_TCP=1      # 不要真去 /dev/tcp 打 203.0.113.10
+export XHY_SOCKOPT_AVAIL_CC="bbr cubic"   # 测试机没有 sysctl，钉住 BBR 可用
 init_dirs
 
 # --- 假 iptables：记录「链 + 端口 + 源 + 注释」，-C 查表、-A 追加、-D 删除 -----
@@ -68,7 +69,7 @@ rules_order_ok() {
 import json,sys
 cfg=json.load(open(sys.argv[1]))
 rules=cfg["routing"]["rules"]
-relay=[i for i,r in enumerate(rules) if r.get("outboundTag")=="us-relay"]
+relay=[i for i,r in enumerate(rules) if r.get("outboundTag","").startswith("us-relay")]
 block=[i for i,r in enumerate(rules) if r.get("outboundTag")=="block"]
 assert relay, "no relay rule"
 assert block, "no base block rule"
@@ -90,6 +91,56 @@ chk "relay 规则排在基础规则之前"      'rules_order_ok'
 chk "上游地址/端口正确"               'grep -q "\"address\":\"203.0.113.10\",\"port\":14430" "$XHY_ETC/config.json"'
 chk "status 报角色"                   'relay_status | grep -q "入口"'
 chk "export 给出落地端命令"           'relay_export | grep -q "xhy relay land --allow"'
+
+# --- v1.11.0：出站 sockopt / 失联回落 -------------------------------------
+balancer_in_routing() {
+    "$PY" - "$XHY_ETC/config.json" <<'PY' >/dev/null 2>&1
+import json,sys
+cfg=json.load(open(sys.argv[1]))
+assert "balancers" not in cfg, "balancer must live inside routing, not top level"
+b=cfg["routing"]["balancers"][0]
+assert b["tag"]=="us-relay-lb", b
+assert b["selector"]==["us-relay"], b
+assert b["fallbackTag"]=="direct", b
+assert b["strategy"]["type"]=="leastPing", b
+obs=cfg["burstObservatory"]
+assert obs["subjectSelector"]==["us-relay"], obs
+assert obs["pingConfig"]["sampling"]==3, obs
+PY
+}
+
+echo "===== v1.11.0：出站 sockopt ====="
+chk "出站带 sockopt"                  'grep -q "\"sockopt\":{\"tcpFastOpen\":true" "$XHY_ETC/config.json"'
+chk "sockopt 含 tcpNoDelay"           'grep -q "\"tcpNoDelay\":true" "$XHY_ETC/config.json"'
+chk "sockopt 含 tcpUserTimeout"       'grep -q "\"tcpUserTimeout\":10000" "$XHY_ETC/config.json"'
+chk "sockopt 带 BBR"                  'grep -q "\"tcpcongestion\":\"bbr\"" "$XHY_ETC/config.json"'
+
+echo "===== v1.11.0：失联回落（balancer + burstObservatory） ====="
+chk "config 含 balancers"             'grep -q "\"balancers\"" "$XHY_ETC/config.json"'
+chk "balancer 落在 routing 内"        'balancer_in_routing'
+chk "路由规则指向 balancer"           'grep -q "\"outboundTag\":\"us-relay-lb\"" "$XHY_ETC/config.json"'
+chk "探活目标 gstatic 204"            'grep -q "generate_204" "$XHY_ETC/config.json"'
+chk "回落配置仍合法"                  'json_ok "$XHY_ETC/config.json"'
+chk "status 报回落 on"                'relay_status | grep -q "回落   : on"'
+chk "test 报回落链路"                 'relay_test 2>/dev/null | grep -q "回落链路在位"'
+
+echo "===== --no-fallback / --no-tfo：回到 v1.10.x 行为 ====="
+relay_entry --to 203.0.113.10:14430 --uuid test-uuid-0000 --categories openai \
+    --no-fallback --no-tfo >/dev/null
+chk "relay.env 记 fallback=off"       'grep -q "^RELAY_FALLBACK=off$" "$XHY_NODES/relay.env"'
+chk "relay.env 记 tfo=off"            'grep -q "^RELAY_TFO=off$" "$XHY_NODES/relay.env"'
+chk "无 balancers"                    '! grep -q "\"balancers\"" "$XHY_ETC/config.json"'
+chk "无 burstObservatory"             '! grep -q "burstObservatory" "$XHY_ETC/config.json"'
+chk "规则指回裸 us-relay"             'grep -q "\"outboundTag\":\"us-relay\"" "$XHY_ETC/config.json"'
+chk "tcpFastOpen 已关"                'grep -q "\"tcpFastOpen\":false" "$XHY_ETC/config.json"'
+chk "关掉回落仍合法"                  'json_ok "$XHY_ETC/config.json"'
+chk "非法 --fallback 值被拒"          '! ( relay_entry --to 203.0.113.10:14430 --fallback maybe ) >/dev/null 2>&1'
+
+echo "===== 恢复默认：回落与 TFO 重新打开 ====="
+relay_entry --to 203.0.113.10:14430 --uuid test-uuid-0000 --categories openai >/dev/null
+chk "默认回来是 on"                   'grep -q "^RELAY_FALLBACK=on$" "$XHY_NODES/relay.env"'
+chk "balancer 回来了"                 'grep -q "\"balancers\"" "$XHY_ETC/config.json"'
+chk "tcpFastOpen 回 true"             'grep -q "\"tcpFastOpen\":true" "$XHY_ETC/config.json"'
 
 echo "===== 基础 rebuild 不再覆盖 relay（本轮核心修复） ====="
 XHY_SKIP_SNAPSHOT=1 rebuild_config >/dev/null 2>&1
@@ -138,18 +189,19 @@ relay_land --allow 198.51.100.20 --uuid land-uuid-0000 >/dev/null
 chk "重复执行后片段只有一个"          '[ "$(ls "$XHY_CONFDIR"/relay_in_*.json | wc -l)" = "1" ]'
 chk "重复执行后配置仍合法"            'json_ok "$XHY_ETC/config.json"'
 
-echo "===== land --tls（指定证书文件） ====="
+echo "===== 恒明文：--tls 系列参数已停用 ====="
 printf 'dummy-cert\n' >"$TEST_TMP/relay.crt"
 printf 'dummy-key\n'  >"$TEST_TMP/relay.key"
 relay_land --allow 198.51.100.20 --uuid land-uuid-0000 \
     --tls-cert "$TEST_TMP/relay.crt" --tls-key "$TEST_TMP/relay.key" --sni relay.example.com >/dev/null
-chk "片段启用 tls"                    'grep -q "\"security\":\"tls\"" "$XHY_CONFDIR/relay_in_14430.json"'
-chk "片段带证书路径"                  "grep -q 'relay.crt' \"\$XHY_CONFDIR/relay_in_14430.json\""
-chk "relay.env 记 tls"                'grep -q "^RELAY_SECURITY=tls$" "$XHY_NODES/relay.env"'
-chk "relay.env 记 sni"                'grep -q "^RELAY_SNI=relay.example.com$" "$XHY_NODES/relay.env"'
-chk "tls 片段仍是合法 JSON"           'json_ok "$XHY_CONFDIR/relay_in_14430.json"'
+chk "land 片段恒 security=none"     'grep -q "\"security\":\"none\"" "$XHY_CONFDIR/relay_in_14430.json"'
+chk "land 片段无 tlsSettings"       '! grep -q "tlsSettings" "$XHY_CONFDIR/relay_in_14430.json"'
+chk "land 片段不引用证书文件"       "! grep -q 'relay.crt' \"\$XHY_CONFDIR/relay_in_14430.json\""
+chk "relay.env 记 none"             'grep -q "^RELAY_SECURITY=none$" "$XHY_NODES/relay.env"'
+chk "relay.env 不记 sni"            '! grep -q "^RELAY_SNI=" "$XHY_NODES/relay.env"'
+chk "片段仍是合法 JSON"             'json_ok "$XHY_CONFDIR/relay_in_14430.json"'
 
-echo "===== 证书 pin 归一：hex / 大写 / 冒号 / 旧 base64 ====="
+echo "===== 证书 pin 归一（函数保留，供将来跨公网复用） ====="
 PIN_HEX="$("$PY" -c 'print(bytes(range(32)).hex())')"
 PIN_UP="$("$PY" -c 'print(bytes(range(32)).hex().upper())')"
 PIN_COLON="$("$PY" -c 'print(":".join("%02x" % b for b in range(32)))')"
@@ -161,39 +213,36 @@ chk "旧 base64 pin 转 hex"            '[ "$(relay_pin_hex "$PIN_B64")" = "$PIN
 chk "空 pin 返回空（不报错）"         '[ -z "$(relay_pin_hex "")" ]'
 chk "非法 pin 必须报错"               '! relay_pin_hex "not-a-pin" 2>/dev/null'
 
-echo "===== entry --tls：pin 走 pinnedPeerCertSha256（Xray 26 只认 hex） ====="
+echo "===== entry 恒明文：传 --tls / --sni / --pin 也不产出加密 ====="
 relay_entry --to 203.0.113.10:14430 --uuid tls-uuid-0000 \
     --tls --sni relay.example.com --pin "$PIN_B64" >/dev/null
-chk "出站带 pinnedPeerCertSha256"     "grep -q '\"pinnedPeerCertSha256\":\"$PIN_HEX\"' \"\$XHY_ETC/config.json\""
-chk "出站不含 allowInsecure"          '! grep -q "allowInsecure" "$XHY_ETC/config.json"'
-chk "出站不带 base64 原值"            "! grep -q '$PIN_B64' \"\$XHY_ETC/config.json\""
-chk "tls 出站仍是合法 JSON"           'json_ok "$XHY_ETC/config.json"'
+chk "出站 security=none"            'grep -q "\"security\":\"none\"" "$XHY_ETC/config.json"'
+chk "无 pinnedPeerCertSha256"       '! grep -q "pinnedPeerCertSha256" "$XHY_ETC/config.json"'
+chk "无 verifyPeerCertByName"       '! grep -q "verifyPeerCertByName" "$XHY_ETC/config.json"'
+chk "无 allowInsecure"              '! grep -q "allowInsecure" "$XHY_ETC/config.json"'
+chk "无 serverName"                 '! grep -q "\\"serverName\\":" "$XHY_ETC/config.json"'
+chk "无 base64 pin 原值"            "! grep -q '$PIN_B64' \"\$XHY_ETC/config.json\""
+chk "relay.env 不记 SNI/PIN"        '! grep -qE "^RELAY_(SNI|PIN)=" "$XHY_NODES/relay.env"'
+chk "配置仍是合法 JSON"             'json_ok "$XHY_ETC/config.json"'
 
-echo "===== entry --tls 无 pin：退回 verifyPeerCertByName（按 SAN 校验） ====="
-relay_entry --to 203.0.113.10:14430 --uuid tls-uuid-0000 \
-    --tls --sni relay.example.com >/dev/null
-chk "改用 verifyPeerCertByName"       'grep -q "\"verifyPeerCertByName\":\"relay.example.com\"" "$XHY_ETC/config.json"'
-chk "无 pin 时不出 pinnedPeerCert"    '! grep -q "pinnedPeerCertSha256" "$XHY_ETC/config.json"'
-chk "无 pin 配置仍合法"               'json_ok "$XHY_ETC/config.json"'
+echo "===== 旧 tls 状态自动降级（v1.10.x 升级路径） ====="
+cat >"$XHY_NODES/relay.env" <<'EOF'
+RELAY_ROLE=entry
+RELAY_UPSTREAM=203.0.113.10:14430
+RELAY_UUID=legacy-uuid-0000
+RELAY_CATEGORIES=openai
+RELAY_SECURITY=tls
+RELAY_SNI=relay-14430
+RELAY_PIN=abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789
+RELAY_CERT=/etc/xray-hy/certs/relay_14430.crt
+RELAY_KEY=/etc/xray-hy/certs/relay_14430.key
+EOF
+XHY_SKIP_SNAPSHOT=1 rebuild_config >/dev/null 2>&1
+chk "旧 tls 状态不产出 tlsSettings" '! grep -q "tlsSettings" "$XHY_ETC/config.json"'
+chk "降级后出站 security=none"      'grep -q "\"security\":\"none\"" "$XHY_ETC/config.json"'
+chk "降级后配置仍合法"              'json_ok "$XHY_ETC/config.json"'
+chk "status 报 none"                'relay_status | grep -q "传输   : none"'
 
-echo "===== entry --tls 无 pin 无 sni：SNI 自动对齐落地自签 SAN ====="
-relay_entry --to 203.0.113.10:14430 --uuid tls-uuid-0000 --tls >/dev/null
-chk "verifyPeerCertByName 用 relay-14430" 'grep -q "\"verifyPeerCertByName\":\"relay-14430\"" "$XHY_ETC/config.json"'
-chk "serverName 也是 relay-14430"     'grep -q "\"serverName\":\"relay-14430\"" "$XHY_ETC/config.json"'
-chk "relay.env 记下对齐后的 SNI"      'grep -q "^RELAY_SNI=relay-14430$" "$XHY_NODES/relay.env"'
-chk "SNI 对齐后配置仍合法"            'json_ok "$XHY_ETC/config.json"'
-
-echo "===== 旧证书缺 SAN：自签分支就地重签 ====="
-mkdir -p "$XHY_CERTS"
-openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
-    -subj "/CN=relay-14430" -keyout "$XHY_CERTS/relay_14430.key" \
-    -out "$XHY_CERTS/relay_14430.crt" >/dev/null 2>&1
-chk "旧证书确实没有 SAN"              '! openssl x509 -in "$XHY_CERTS/relay_14430.crt" -noout -text 2>/dev/null | grep -q "Subject Alternative Name"'
-relay_land --allow 198.51.100.20 --uuid land-uuid-0000 --tls --sni relay.example.com >/dev/null 2>&1
-chk "缺 SAN 的证书被重签"             'openssl x509 -in "$XHY_CERTS/relay_14430.crt" -noout -text 2>/dev/null | grep -q "Subject Alternative Name"'
-chk "重签后 relay.env 记 hex pin"     'grep -qE "^RELAY_PIN=[0-9a-f]{64}$" "$XHY_NODES/relay.env"'
-chk "重签后 SAN = sni"                'openssl x509 -in "$XHY_CERTS/relay_14430.crt" -noout -text 2>/dev/null | grep -q "DNS:relay.example.com"'
-chk "重签后配置仍合法"                'json_ok "$XHY_ETC/config.json"'
 
 echo "===== 同机换角色：land → entry ====="
 relay_entry --to 203.0.113.10:14430 --uuid switch-uuid-0000 --categories openai >/dev/null

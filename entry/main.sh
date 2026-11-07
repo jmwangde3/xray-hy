@@ -231,13 +231,15 @@ Usage: xhy <command> [options]
                                 tarballs = xhy backup output, tmp = xray-rollback.*
     export clash|singbox [--out F]  Export mihomo/Clash or sing-box configs
 
-  Relay (entry -> landing)
-    relay land --allow IP [--port N] [--uuid U] [--tls [--tls-cert F --tls-key F]] [--sni NAME]
-                                Landing side: vless/tcp inbound, only that source IP
+  Relay (entry -> landing) -- plaintext vless/tcp, security=none
+    relay land --allow IP [--port N] [--uuid U]   Landing: inbound, only that source IP
     relay entry --to IP:PORT [--uuid U] [--categories a,b,c|ai|media|none] [--no-geoip-us]
-                 [--tls] [--sni NAME] [--pin HEX]   Entry side: AI/US traffic -> landing
+                 [--no-fallback] [--no-tfo]        Entry: AI/US traffic -> landing
     relay status|test|export|reapply|del         Inspect / self-check / peer cmd / remove
-    Also open the cloud security group (inbound TCP <port>, source = entry IP only).
+    Hop is unencrypted: both ends are yours on a cloud backbone; client-to-site TLS
+    is already end-to-end. --tls/--sni/--pin are retired no-ops (v1.11.0).
+    Fallback is on: the balancer probes the landing host and switches to direct
+    when unreachable. Open the cloud security group (inbound TCP <port>, entry IP).
     The relay survives xhy add/edit/del; reapply is only a fallback after a rollback.
 
   Service & uninstall
@@ -351,12 +353,14 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
                                      tarballs = xhy backup 产物，tmp = xray-rollback.* 残留
     export clash|singbox [--out F]   导出 mihomo/Clash 或 sing-box 节点配置
 
-  中继 / relay（入口机 → 落地机）
-    relay land --allow IP [--port N] [--uuid U] [--tls [--tls-cert F --tls-key F]] [--sni NAME]
-                                落地端：开 vless/tcp 入站，只放行这一个源 IP
+  中继 / relay（入口机 → 落地机，明文 vless/tcp，security=none）
+    relay land --allow IP [--port N] [--uuid U]   落地端：开入站，只放行这一个源 IP
     relay entry --to IP:端口 [--uuid U] [--categories a,b,c|ai|media|none] [--no-geoip-us]
-                [--tls] [--sni NAME] [--pin HEX]   入口端：AI/美区流量 → 落地端
+                [--no-fallback] [--no-tfo]        入口端：AI/美区流量 → 落地端
     relay status|test|export|reapply|del        查状态 / 自检 / 对端命令 / 移除
+    这一跳不加密：两端自有、走云内网，客户端到目标站 TLS 已端到端。
+    --tls / --sni / --pin 已停用（v1.11.0 起只留参数位兼容老脚本）。
+    失联回落默认开：balancer 探活落地机，不可达时切 direct 出站。
     云安全组要单独放行（入方向 TCP <端口>，源只填入口机 IP）。
     改造后 relay 不会被 xhy add/edit/del 覆盖；reapply 只在从快照回滚后兜底用。
 
