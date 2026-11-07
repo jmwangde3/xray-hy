@@ -453,6 +453,8 @@ scanner_cache_pick_valid() {
 
 SCANNER_SHORTLIST="${SCANNER_SHORTLIST:-5}"   # 最终展示给用户挑的候选数
 SCANNER_TFO_POOL="${SCANNER_TFO_POOL:-12}"    # require-tfo 时最多探多少个
+# 扩到 /21 后候选会多得多，别让排在前面的 /24 老候选把新站挤出探测池。
+SCANNER_TFO_POOL_WIDE="${SCANNER_TFO_POOL_WIDE:-32}"
 # 不能用 declare -A：本文件是被 load_libs() 在函数内 source 的，declare
 # 会创建局部变量，函数返回后它退化成普通索引数组、字符串下标触发算术错误。
 # 用空格分隔的 "ip|sni=0/1" 字符串做去重，无作用域问题。
@@ -482,11 +484,11 @@ scanner_tfo_tag() {
 # 因为调用方是 `best="$(scanner_pick)"`。
 # 非交互（读不到 /dev/tty）时自动取第 1 个，脚本化调用不会被卡住。
 scanner_shortlist() {
-    local require="${1:-0}" want="${2:-$SCANNER_SHORTLIST}" pool
+    local require="${1:-0}" want="${2:-$SCANNER_SHORTLIST}" pool_override="${3:-}" pool
     local -a tgts=() snis=() scs=() mss=() codes=() tfos=()
     local sc ip sni tgt ms code size iss tls at tfo n=0 ans="" pick=0 i
     if (( require == 1 )); then
-        pool="$SCANNER_TFO_POOL"
+        pool="${pool_override:-$SCANNER_TFO_POOL}"
     else
         pool=$(( want * 3 ))
     fi
@@ -508,7 +510,7 @@ scanner_shortlist() {
 
     if (( ${#tgts[@]} == 0 )); then
         if (( require == 1 )); then
-            warn "前 $pool 个候选都不支持被动 TFO（上面每个站点后已标注 TFO 结果）。可去掉 --require-tfo 按质量选、换 --cidr 网段，或 xhy scan --refresh 重扫。"
+            warn "当前网段内没有支持被动 TFO 的候选（每个站点后已标注 TFO 结果）；将自动扩大到 /21 再扫一次"
         else
             warn "缓存里没有通过校验的候选，请 xhy scan --refresh 重扫。"
         fi
@@ -551,8 +553,12 @@ scanner_shortlist() {
 # 扫描与选择
 # ---------------------------------------------------------------------------
 
+# scanner_scan <cidr> [cache_replace 0|1]
+# cache_replace=1：扩到 /21 后不再和旧 /24 缓存合并，直接写本次结果，
+# 避免旧候选把新扫到的站点挤出 --require-tfo 的探测池（/21 覆盖 /24，
+# 同网段站点会被重新发现，不会真的丢）。
 scanner_scan() {
-    local cidr="$1" ts csv log ranked n uniq
+    local cidr="$1" cache_replace="${2:-0}" ts csv log ranked n uniq
     scanner_ensure || return 1
     install -d -m 0700 "$SCANNER_WORK" || return 1
     ts="$(date +%s)"
@@ -576,7 +582,7 @@ scanner_scan() {
         warn "没有既非 CDN、又不跳转、证书可校验的站点（日志: $log）"
         return 1
     fi
-    scanner_cache_save "$cidr" "$ranked" 0 || return 1
+    scanner_cache_save "$cidr" "$ranked" "$cache_replace" || return 1
     scanner_prune_work
     sc_ok "结果已缓存: $SCANNER_CACHE"
 }
@@ -596,8 +602,11 @@ scanner_prune_work() {
 # 输出 "<target> <sni> <label>"：优先用有效缓存，否则扫本机 /24（不够再扩 /21）。
 #   scanner_pick [--refresh] [--cidr 1.2.3.0/24] [--require-tfo]
 # --require-tfo：只展示支持被动 TFO 的候选；默认不强制（按质量选，可能含 TFO 站）。
+#   /24（或缓存）里没有支持 TFO 的站点时，自动扩到同机房 /21 再扫一次。
+#   扩的是**不同网段**，不是把同一 /24 白扫两遍 —— 早期版本那个误导已修掉。
 scanner_pick() {
-    local refresh=0 cidr="" best wide require_tfo=0
+    local refresh=0 cidr="" best wide="" require_tfo=0
+    local save_mode=0 tried_wide=0 cache_ok=0 pool_arg=""
     while (( $# > 0 )); do
         case "$1" in
             --refresh) refresh=1; shift ;;
@@ -609,20 +618,19 @@ scanner_pick() {
     done
 
     if (( refresh == 0 )) && scanner_cache_valid; then
+        cache_ok=1
         sc_info "使用扫描缓存（$(scanner_cache_age_h) 小时前，$(scanner_cache_count) 个候选；--refresh 可强制重扫）"
         if best="$(scanner_shortlist "$require_tfo")"; then
             printf '%s\n' "$best"
             return 0
         fi
-        # require-tfo 过滤为空 ≠ 缓存失效。同一个 /24 的站点集合是稳定的，
-        # 重扫一遍大概率还是这几个、还是都不支持，只会把同样的 [ok] 行再打
-        # 一次（早期版本就是这么误导人的）。直接失败并给出可选路径。
-        if (( require_tfo == 1 )); then
-            err "缓存候选都不支持被动 TFO（逐个结果见上面每行的 TFO 标记）" >&2
-            err "可去掉 --require-tfo 按质量选，或 xhy scan --cidr <其它网段> --require-tfo 换网段；确要重扫加 --refresh" >&2
-            return 1
+        if (( require_tfo == 0 )); then
+            warn "缓存里的候选都已失效，重新扫描"
+        else
+            # 过滤为空 ≠ 缓存失效，但用户要求「必须 TFO 时第一次没扫到就
+            # 自动扩大范围再扫」：直接跳到 /21，不重复扫同一个 /24。
+            sc_info "缓存里没有支持被动 TFO 的站点；自动扩大网段再扫一次（不重复扫同一 /24）"
         fi
-        warn "缓存里的候选都已失效，重新扫描"
     fi
 
     if [[ -z "$cidr" ]]; then
@@ -632,27 +640,50 @@ scanner_pick() {
         fi
     fi
 
-    if ! scanner_scan "$cidr"; then
-        case "$cidr" in
-            */24)
-                wide="$(cidr_truncate "${cidr%%/*}" 21)" || wide=""
-                if [[ -n "$wide" ]]; then
-                    warn "$cidr 无合格候选，扩大到同机房 $wide 再试一次"
-                    scanner_scan "$wide" || return 1
-                else
-                    return 1
-                fi ;;
-            *) return 1 ;;
-        esac
+    # 缓存有效但 require-tfo 过滤为空：直接以 /21 起步，别把同一 /24 重扫一遍。
+    if (( cache_ok == 1 && require_tfo == 1 )); then
+        wide="$(cidr_truncate "${cidr%%/*}" 21)" || wide=""
+        if [[ -n "$wide" && "$wide" != "$cidr" ]]; then
+            cidr="$wide"; tried_wide=1; save_mode=1
+        fi
     fi
 
-    if best="$(scanner_shortlist "$require_tfo")"; then
-        printf '%s\n' "$best"
-        return 0
-    fi
+    while :; do
+        if ! scanner_scan "$cidr" "$save_mode"; then
+            # 扫描本身没有合格站点：/24 时也扩到 /21 再试一次。
+            if [[ "$cidr" == */24 ]] && (( tried_wide == 0 )); then
+                wide="$(cidr_truncate "${cidr%%/*}" 21)" || wide=""
+                if [[ -n "$wide" && "$wide" != "$cidr" ]]; then
+                    warn "$cidr 无合格候选，扩大到同机房 $wide 再试一次"
+                    cidr="$wide"; tried_wide=1; save_mode=1
+                    continue
+                fi
+            fi
+            return 1
+        fi
+
+        # 扩到 /21 后候选变多，放宽 require-tfo 的探测池上限。
+        if (( tried_wide == 1 )); then pool_arg="$SCANNER_TFO_POOL_WIDE"; fi
+        if best="$(scanner_shortlist "$require_tfo" "$SCANNER_SHORTLIST" "$pool_arg")"; then
+            printf '%s\n' "$best"
+            return 0
+        fi
+
+        # require-tfo 过滤为空且 /21 还没试过：自动扩网段再扫。
+        if (( require_tfo == 1 )) && [[ "$cidr" == */24 ]] && (( tried_wide == 0 )); then
+            wide="$(cidr_truncate "${cidr%%/*}" 21)" || wide=""
+            if [[ -n "$wide" && "$wide" != "$cidr" ]]; then
+                warn "$cidr 里没有支持被动 TFO 的站点，自动扩大到 $wide 再扫一次"
+                cidr="$wide"; tried_wide=1; save_mode=1; pool_arg="$SCANNER_TFO_POOL_WIDE"
+                continue
+            fi
+        fi
+        break
+    done
+
     if (( require_tfo == 1 )); then
-        err "扫描完成，但新扫出的候选都不支持被动 TFO（xhy scan --list 可看每个站点的 TFO 标记）" >&2
-        err "可去掉 --require-tfo 按质量选，或换 --cidr 网段再试" >&2
+        err "扫描完成，但所扫网段里没有支持被动 TFO 的候选（xhy scan --list 可看每个站点的 TFO 标记）" >&2
+        err "已自动试过 /24 与 /21；可去掉 --require-tfo 按质量选，或 xhy scan --cidr <其它网段> --require-tfo" >&2
     else
         err "扫描完成但没有可用站点（xhy scan --list 查看候选与失败原因）" >&2
     fi

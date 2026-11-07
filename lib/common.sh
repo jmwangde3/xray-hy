@@ -69,14 +69,18 @@ need_root() {
 }
 
 # Read a single line from stdin with an optional default and 60s timeout.
+# read -p 的提示不走 printf 过滤器，必须在这里显式过一遍 xhy_t，否则英文模式下
+# 所有交互提问依旧是中文方块。返回值用 builtin printf 输出，避免被过滤器碰。
 ask() {
-    local prompt="$1" default="${2:-}" reply=""
+    local prompt="$1" default="${2:-}" reply="" p
     if [[ -n "$default" ]]; then
-        read -r -t 60 -p "$prompt [$default]: " reply || reply=""
+        p="$prompt [$default]: "
     else
-        read -r -t 60 -p "$prompt: " reply || reply=""
+        p="$prompt: "
     fi
-    printf '%s' "${reply:-$default}"
+    if declare -F xhy_t >/dev/null 2>&1; then p="$(xhy_t "$p")"; fi
+    read -r -t 60 -p "$p" reply || reply=""
+    builtin printf '%s' "${reply:-$default}"
 }
 
 confirm() {

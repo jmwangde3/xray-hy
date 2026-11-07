@@ -20,6 +20,11 @@ target_validate() {
 
 export SCANNER_CACHE="$TEST_TMP/scan-cache.tsv"
 TFO_SUPPORT=""
+# 离线：不让 scanner_pick 去探测真实公网网段，也不真的跑扫描器。
+# 默认让扫描失败；自动扩 /21 的用例会临时改成「成功并记录调用」。
+SCAN_LOG="$TEST_TMP/scan.log"
+scanner_default_cidr() { printf '1.1.1.0/24'; }
+scanner_scan() { printf '%s %s\n' "$1" "${2:-0}" >>"$SCAN_LOG"; return 1; }
 
 # stub_system 把探测 stub 成「不支持」；这里按 IP 注入可控结果。
 target_tfo_detect() {
@@ -139,6 +144,36 @@ TFO_SUPPORT="2.2.2.2"
 out="$(scanner_pick --require-tfo 2>/dev/null)"
 chk "pick --require-tfo 返回支持项" "2.2.2.2:443 www.b.com scan" "$out"
 
+# 这个文件的 chk 是三参比较版（label / expected / got），布尔断言单独走 assert。
+assert() {
+    local d="$1" c="$2"
+    if eval "$c" >/dev/null 2>&1; then
+        printf '  PASS  %s\n' "$d"; pass=$((pass + 1))
+    else
+        printf '  FAIL  %s\n' "$d"; fail=$((fail + 1))
+    fi
+}
+
+echo "=== require-tfo 无结果自动扩 /21 再扫 ==="
+TFO_SUPPORT=""
+: >"$SCAN_LOG"
+scanner_scan() { printf '%s %s\n' "$1" "${2:-0}" >>"$SCAN_LOG"; return 0; }
+err="$(scanner_pick --cidr 1.1.1.0/24 --require-tfo 2>&1 >/dev/null)"; rc=$?
+chk "缓存无 TFO 时仍返回 1" "1" "$rc"
+assert "缓存有效时直接扩 /21、不重扫同一 /24" \
+    'grep -qx "1.1.0.0/21 1" "$SCAN_LOG" && ! grep -q "1.1.1.0/24" "$SCAN_LOG"'
+assert "提示里说明自动扩网段" 'printf "%s\n" "$err" | grep -q "自动扩大网段"'
+
+echo "=== 首次 /24 扫完无 TFO 也自动扩 /21 ==="
+scanner_cache_valid() { return 1; }
+: >"$SCAN_LOG"
+err="$(scanner_pick --refresh --cidr 1.1.1.0/24 --require-tfo 2>&1 >/dev/null)"; rc=$?
+chk "仍返回 1" "1" "$rc"
+assert "先扫 /24 再扩 /21（共两次）" \
+    '[[ $(wc -l < "$SCAN_LOG" | tr -d " ") -eq 2 ]] && grep -qx "1.1.1.0/24 0" "$SCAN_LOG" && grep -qx "1.1.0.0/21 1" "$SCAN_LOG"'
+assert "扩网段时替换写缓存" 'grep -qx "1.1.0.0/21 1" "$SCAN_LOG"'
+assert "提示里说明 /24 里没有支持 TFO 的站" 'printf "%s\n" "$err" | grep -q "自动扩大到"'
+
 echo "=== 源码接线 ==="
 for spec in \
     "scanner_shortlist 函数存在|declare -F scanner_shortlist >/dev/null" \
@@ -153,7 +188,13 @@ for spec in \
     "scan --list 有 TFO 列|grep -q 'TFO 列为现场探测结果' lib/scanner.sh" \
     "帮助说明每个候选标注 TFO|grep -q '每个候选后面都标注' entry/main.sh" \
     "cmd_scan 用 -t 0 判交互|grep -q -- '-t 0' entry/main.sh" \
-    "读 tty 用复合命令抑制重定向报错|grep -q '} 2>/dev/null' lib/scanner.sh"; do
+    "读 tty 用复合命令抑制重定向报错|grep -q '} 2>/dev/null' lib/scanner.sh" \
+    "scanner_pick 自动扩 /21|grep -q '自动扩大到' lib/scanner.sh" \
+    "扩网段放宽 TFO 探测池|grep -q 'SCANNER_TFO_POOL_WIDE' lib/scanner.sh" \
+    "scanner_scan 支持 cache_replace|grep -q 'cache_replace' lib/scanner.sh" \
+    "短名单支持 pool_override|grep -q 'pool_override' lib/scanner.sh" \
+    "不再把过滤为空误报缓存失效|! grep -q '缓存候选都不支持被动 TFO' lib/scanner.sh" \
+    "帮助说明自动扩 /21|grep -q '会自动扩到同机房 /21 再扫一次' entry/main.sh"; do
     d="${spec%%|*}"; c="${spec#*|}"
     if eval "$c" >/dev/null 2>&1; then
         printf '  PASS  %s\n' "$d"; pass=$((pass + 1))

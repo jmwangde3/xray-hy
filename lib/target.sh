@@ -39,7 +39,7 @@ is_ip_literal() {
 
 # 概念说明：target/dest、SNI、serverNames 三个词最容易被混用。
 target_help() {
-    cat <<'EOF'
+    xhy_t <<'EOF'
   ---- REALITY 名词（这几个词经常被混着说）----
   target / dest  服务端主动去连的「目的地址」，形如 IP:端口 或 域名:端口。
                  REALITY 把未通过认证的探测流量原样转发过去，所以它必须是一个
@@ -65,6 +65,8 @@ target_help() {
   不把 TFO 纳入打分 —— 先按质量选最优站，再读它的能力。
   scan 的每个候选后面都会标注「TFO 支持 / 不支持」；--require-tfo 只留支持的，
   探测不了或明确不支持都按「不支持」显示（决策上一律关，不做模糊态）。
+  --require-tfo 在 /24（或缓存）里没找到时，会自动扩到同机房 /21 再扫一次；
+  扩的是不同网段，不会把同一个 /24 白扫两遍。
 EOF
 }
 
@@ -243,7 +245,7 @@ target_menu() {
     while true; do
         printf '\n'
         target_show
-        cat <<'EOF'
+        xhy_t <<'EOF'
   1) 按地区自动匹配（按 VPS 出口国家）
   2) 指定地区
   3) 手动指定 target / SNI
@@ -261,7 +263,7 @@ EOF
                target_rows | grep -q "^${r}|" || { warn "可用地区: $(target_list_regions)"; continue; }
                state_del TARGET_CUSTOM; state_del TARGET_SNI; state_set TARGET_REGION "$r"; pick_target ;;
             3) local h s
-               cat <<'EOF'
+               xhy_t <<'EOF'
   输入格式（三种都行）：
     www.example.com                     域名，dest 与 SNI 相同
     1.2.3.4:443,sni=www.example.com     源站 IP + 域名 SNI（目标在 CDN 后时用这个）
@@ -283,7 +285,7 @@ EOF
                info "已存在的 REALITY 节点不会自动套用新 target：需 xhy del 后重新 add" ;;
             4) state_del TARGET_CUSTOM; state_del TARGET_SNI; state_set TARGET_REGION auto; ok "已清除" ;;
             5) local v vs
-               cat <<'EOF'
+               xhy_t <<'EOF'
   格式同选项 3：域名 / 域名:端口 / IP:端口,sni=域名
 EOF
                v="$(ask '要校验的 target')"
@@ -331,6 +333,7 @@ EOF
 limit_fallback_json() {
     # Mitigation for the upstream REALITY warning: unauthenticated traffic is
     # forwarded to the target. Rate-limit that fallback path.
+    # 这是配置片段，不是给人看的文本：保持 cat，别走语言过滤器。
     cat <<'EOF'
         "limitFallbackUpload":   { "afterBytes": 0, "bytesPerSec": 65536, "burstBytesPerSec": 131072 },
         "limitFallbackDownload": { "afterBytes": 0, "bytesPerSec": 65536, "burstBytesPerSec": 131072 },

@@ -39,8 +39,172 @@ create_symlink() {
     ok "命令入口: /usr/local/bin/xhy -> $XHY_SELF"
 }
 
+# 一键脚本（bash <(curl ...)、wget|sh、sh install.sh）跑完后退出菜单，
+# `xhy` 必须能用。以前只有 cmd_install 的 stage 2 会落地脚本本体，而无参数
+# 运行走的是菜单，于是「装完了」其实什么都没装 —— 连 /usr/local/bin/xhy
+# 都不存在。任何从非安装位置发起的运行，先在这里把本体与入口装上（幂等）。
+XHY_BOOTSTRAPPED=0
+bootstrap_self() {
+    [[ "${XHY_DEV:-0}" == "1" ]] && return 0
+    local src="${XHY_RUNNING:-}" self
+    self="$(readlink -f "$XHY_SELF" 2>/dev/null || printf '%s' "$XHY_SELF")"
+    if [[ -n "$src" ]] && [[ "$(readlink -f "$src" 2>/dev/null || printf '%s' "$src")" == "$self" ]]; then
+        return 0
+    fi
+    install_self
+    create_symlink
+    XHY_BOOTSTRAPPED=1
+    return 0
+}
+
+# 是否已完成过完整安装。三样都在才算：Xray 二进制、INSTALLED 状态、命令入口。
+# 半安装状态（比如 Xray 装了但 state 没写）会自动补一次完整安装。
+xhy_is_installed() {
+    [[ -x "$XRAY_BIN" ]] || return 1
+    [[ -n "$(state_get INSTALLED '')" ]] || return 1
+    [[ -x /usr/local/bin/xhy ]] || return 1
+    return 0
+}
+
+cmd_lang() {
+    local v="${1:-}"
+    case "${v,,}" in
+        en|zh|auto|"") ;;
+        *) die "用法: xhy lang [en|zh|auto]" ;;
+    esac
+    if [[ -z "$v" ]]; then
+        # 这里要走 printf 过滤器：英文模式下这些中文提示同样不能变成方块。
+        printf '当前语言 : %s（state: %s）\n' "$XHY_LANG_EFFECTIVE" "$(state_get XHY_LANG auto)"
+        printf '  xhy lang en    强制英文（纯 ASCII；云 VNC 控制台中文是小方块时用）\n'
+        printf '  xhy lang zh    强制中文\n'
+        printf '  xhy lang auto  按终端 / locale 自动判定（默认）\n'
+        printf '  单次强制：XHY_LANG=en xhy  或  XHY_ASCII=1 xhy\n'
+        return 0
+    fi
+    state_set XHY_LANG "${v,,}"
+    ok "已设置语言为 ${v,,}（下次运行生效；本次可用 XHY_LANG=${v,,} 立即切换）"
+}
+
 usage() {
-    cat <<EOF
+    # 帮助是用户最需要读通的长文本，短语替换会把它切碎，所以单独写一份英文版。
+    # 纯 ASCII，不走 xhy_t；中文版继续走原来的 xhy_t <<EOF。
+    if [[ "${XHY_LANG_EFFECTIVE:-zh}" == "en" ]]; then
+        cat <<EOF
+xray-hy $XHY_VERSION - modular Xray deployment manager (Debian/Ubuntu, Alpine, RHEL)
+
+Usage: xhy <command> [options]
+
+  Install & check
+    install                     Full init (script, deps, Xray, service, BBR, firewall)
+    preflight                   Pre-install checks (ports/disk/kernel/network/deps)
+    check                       Environment report
+    version                     Show script version
+
+  Node management
+    add <mode> [--port N] [opts]  Add a node
+    list                          List nodes
+    link [--all|--uri|--qr]       Export vless:// links
+    del [mode] [port]             Delete node; no args = pick by number
+    menu                          Interactive menu
+
+    mode: direct | tunnel | reality | xhttp | hy2
+    add opts: --host --path --uuid --sni --target --domain --token --reality
+              --masq --masq-proxy --up --down   (hy2 only)
+              --scan [--scan-cidr CIDR] [--scan-refresh]   (reality only)
+              --tfo auto|on|off            (reality/xhttp; auto = follow target)
+    Default ports: direct 8080 / tunnel 10086 / reality 443 / xhttp 8081 / hy2 8443(UDP)
+    hy2 uses Xray's built-in Hysteria2 inbound (v26.3.27+), self-signed cert + pinSHA256
+    hy2 default masquerade is a static page; --masq-proxy proxies a real site
+      (looks better, but unauthenticated traffic uses this host's bandwidth)
+
+  Camouflage site auto-scan
+    scan [CIDR]                 Scan this rack's subnet, show 3-5 candidates (cached)
+    scan --require-tfo          Only TFO-capable sites; otherwise asks once
+    scan --list                 Show cached candidates and scores
+    scan --verify               Re-verify cached candidates, drop stale ones
+    scan --refresh              Ignore cache and rescan
+    scan --clear                Clear cache
+    How it works: RealiTLScanner enumerates TLS 1.3 + h2 sites in a /24, each is
+    validated with its real SNI (cert/redirect/CDN) and scored; the top 3-5 are
+    shown for you to pick (scripted calls take the best score).
+    TFO is display/filter only, never part of the score: by default we pick by
+    quality (TFO-capable sites may still appear); with --require-tfo only
+    TFO-capable ones remain. If the /24 (or cache) has no TFO-capable site it
+    auto-widens to the /21 of the same rack and rescans once.
+    Every candidate is labelled "TFO: yes / no" (live probe, not cached),
+    including [ok] lines, the shortlist, scan --list and scan --verify.
+    Results go to /etc/xray-hy/scan-cache.tsv (7 days); later REALITY nodes
+    reuse it without rescanning. amd64 / arm64 only; other arches use the
+    built-in region library.
+
+  Camouflage site / REALITY terms (xhy target -> 6)
+    target(dest)   Address the server connects to (IP:port or domain:port).
+                   REALITY forwards unauthenticated probes there verbatim, so it
+                   must be a real, stable, long-lived HTTPS site.
+    SNI            Domain in the client TLS ClientHello; serverNames is Xray's
+                   SNI allowlist and must be covered by the target certificate.
+    Behind a CDN?  dest = origin IP, SNI stays the domain:
+        xhy add reality --port 443 --target 1.2.3.4:443 --sni www.example.com
+    Menu 8) -> 3) manual accepts the same form (1.2.3.4:443,sni=www.example.com);
+    validation uses --resolve to hit that IP and verify the cert covers the name.
+    Or just xhy scan: auto-scan this rack's subnet and pick the best site (cached).
+
+  TFO (TCP Fast Open) - follows the target by default, can be overridden
+    Xray's tcpFastOpen really works (accepts early data in SYN, answers
+    cookiereq with a cookie). Whether to enable it depends on the target:
+      target supports passive TFO -> auto enables it; probe sees the same
+                                    SYN-ACK, and we save 1 RTT
+      target does not support it  -> auto disables it; otherwise a probe sending
+                                    a cookiereq SYN sees our tfo cookie while the
+                                    real site sends none - trivially distinguishable
+    auto probes with curl --tcp-fastopen x3 and checks TcpExtTCPFastOpenActive;
+    the result is stored in the node env, so config rebuilds do not re-probe.
+    --tfo on / off overrides. Clients follow the server: on->on, off->off.
+    Note: the target carries no normal proxy traffic (REALITY only forwards
+    unauthenticated probes), so its bandwidth/latency do not affect proxy speed;
+    scanning does not shrink the candidate pool just to find TFO.
+
+  Config
+    config                      Routing / DNS / log menu (or set directly)
+    config set KEY VALUE        Change a setting, see KEYs below
+    snapshots                   List the 5 most recent full-state snapshots
+    rollback [path]             Roll back the whole state
+    target                      Camouflage site selection / validation
+    firewall [apply|strict|off|status]   Dual-stack IPv4 + IPv6
+    bbr [on|status]             Includes MPTCP off (CVE-2026-98432)
+
+  Language / VNC console
+    lang [en|zh|auto]           Switch to English when Chinese shows as boxes on
+                                a cloud VNC console (pure ASCII output)
+    XHY_LANG=en xhy <command>   Force English for one run; XHY_ASCII=1 is the same
+    XHY_LANG=zh xhy <command>   Force Chinese for one run
+    English mode guarantees printable ASCII; Chinese mode is byte-for-byte
+    unchanged. auto checks LANG/TERM/charmap: C locale, non-UTF-8 and
+    linux/vt100 style consoles switch to English; ordinary UTF-8 SSH
+    terminals stay Chinese.
+
+  Version & update
+    core [status|channel pinned|channel latest|channel vX.Y.Z|update]
+    update [script|core|geodata|config|all]
+    update script --yes [--allow-major]   Non-interactive (major bump needs flag)
+
+  Backup & export
+    backup [--out FILE]         Back up /etc/xray-hy (per-file SHA256 list)
+    restore <file>              Verify then restore (auto rollback on failure)
+    export clash|singbox [--out F]  Export mihomo/Clash or sing-box configs
+
+  Service & uninstall
+    service [start|stop|restart|status]
+    uninstall                   Uninstall (optionally keep config)
+
+config KEYs: BLOCK_BT BLOCK_PRIVATE BLOCK_CN BLOCK_ADS
+             DNS_PROVIDER(cloudflare|quad9|dns-sb|system)
+             LOG_LEVEL(warning|info|none) SSH_GUARD TARGET_REGION
+             DUAL_STACK(on = new nodes listen on ::, off = 0.0.0.0)
+EOF
+        return 0
+    fi
+    xhy_t <<EOF
 xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 系)
 
 用法: xhy <命令> [选项]
@@ -79,6 +243,7 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
     做证书/跳转/CDN 校验并打分，最后列出前 3-5 个候选由你选（脚本化调用
     自动取最高分）。TFO 只是展示/过滤项，不参与打分：不强制时按质量选，
     结果里也可能带支持 TFO 的站点；强制时只留支持 TFO 的。
+    --require-tfo 在 /24（或缓存）里没找到时，会自动扩到同机房 /21 再扫一次。
     每个候选后面都标注「TFO 支持 / 不支持」（现场探测，不写进缓存），
     包括 [ok] 校验行、3-5 短名单、scan --list 与 scan --verify。
     结果记在 /etc/xray-hy/scan-cache.tsv（默认 7 天），此后再建 REALITY 节点
@@ -116,6 +281,14 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
     firewall [apply|strict|off|status]   双栈 IPv4 + IPv6
     bbr [on|status]             含 MPTCP 关闭 (CVE-2026-98432)
 
+  语言 / VNC 控制台
+    lang [en|zh|auto]           中文在云 VNC 上显示成小方块时切英文（纯 ASCII）
+    XHY_LANG=en xhy <命令>      单次强制英文；XHY_ASCII=1 同义
+    XHY_LANG=zh xhy <命令>      单次强制中文
+    英文模式下所有输出保证是可打印 ASCII；中文模式下输出逐字节不变。
+    auto 会按 LANG/TERM/charmap 判定：C locale、非 UTF-8、linux/vt100 之类
+    控制台终端自动切英文，普通 UTF-8 SSH 终端保持中文。
+
   版本与更新
     core [status|channel pinned|channel latest|channel vX.Y.Z|update]
     update [script|core|geodata|config|all]
@@ -147,14 +320,21 @@ default_port() {
 cmd_install() {
     need_root
     detect_platform
+    xhy_lang_banner
     printf '\n'
     platform_summary
     printf '\n'
     stage 1 7 "依赖检查与安装（这一步最慢；卡住多半是软件源，见文末提示）"
     ensure_deps
     stage 2 7 "安装脚本本体与命令入口"
-    install_self
-    create_symlink
+    # bootstrap_self 在 main() 里已经把本体 + /usr/local/bin/xhy 落地了，
+    # 别再下载/复制一遍；显式 `xhy install` 时仍完整执行。
+    if [[ "${XHY_BOOTSTRAPPED:-0}" == "1" ]]; then
+        ok "脚本本体已就位（本次启动已落地）"
+    else
+        install_self
+        create_symlink
+    fi
     stage 3 7 "创建数据目录"
     init_dirs
     if [[ -z "$(state_get DUAL_STACK '')" && -n "$(public_ip6 || true)" ]]; then
@@ -194,13 +374,13 @@ cmd_install() {
     xray_config_test || die "初始配置校验失败"
     svc_start "$SVC_XRAY" || die "Xray 启动失败，查看 $XHY_LOGDIR/xray.err"
     state_set INSTALLED "$(date -Is)"
-    ok "安装完成。现在用 xhy add reality 添加第一个节点，或输入 xhy 打开菜单。"
+    ok "安装完成。现在可用 xhy add reality 添加第一个节点，或直接输入 xhy 打开菜单。"
 }
 
 cmd_add_interactive() {
     local mode port host path sni target domain token
     local -a extra=()
-    cat <<'EOF'
+    xhy_t <<'EOF'
   节点类型：
     1) direct   VLESS + WS 直连（明文，建议套 CDN / 反代）
     2) tunnel   VLESS + WS + Cloudflare Tunnel（不需要公网入站端口）
@@ -228,7 +408,7 @@ EOF
     [[ -n "$path" ]] && opts+=(--path "$path")
     case "$mode" in
         reality)
-            cat <<'EOF'
+            xhy_t <<'EOF'
   伪装站（target / dest）来源：
     1) 自动扫描本机机房网段，选最优站点（推荐；有缓存直接复用，不重复扫）
     2) 内置地区库（按 VPS 出口国家匹配）
@@ -241,13 +421,13 @@ EOF
                         info "已有 $(scanner_cache_age_h) 小时前的扫描缓存（$(scanner_cache_count) 个候选）"
                         if confirm "忽略缓存重新扫描？" "n"; then opts+=(--scan-refresh); fi
                     else
-                        info "扫描范围默认是本机公网 IP 所在 /24，无结果会自动扩到 /21"
+                        info "扫描范围默认是本机公网 IP 所在 /24；无合格站点、或强制 TFO 时没找到支持 TFO 的站，会自动扩到 /21 再扫一次"
                     fi ;;
                 3)
                     # 一条输入：host[:port][,sni=xxx]；不写 sni= 时 SNI 与 target 同名。
                     # 目标站在 CDN 后面时用「源站 IP + 域名 SNI」：1.2.3.4:443,sni=www.example.com
                     local t_in ts
-                    cat <<'EOF'
+                    xhy_t <<'EOF'
   输入示例：
     www.example.com                    域名，dest 与 SNI 相同
     1.2.3.4:443,sni=www.example.com   源站 IP + 域名 SNI（站点在 CDN 后时用这个）
@@ -353,7 +533,8 @@ cmd_scan() {
                 printf '    xhy add reality --port 443 --scan\n'
             else
                 if (( require == 1 )); then
-                    err "自动扫描失败（没有支持被动 TFO 的候选）；可去掉 --require-tfo 按质量选，或换 --cidr 网段"
+                    err "自动扫描失败：/24 与 /21 里都没有支持被动 TFO 的候选"
+                    err "可去掉 --require-tfo 按质量选，或 xhy scan --cidr <其它网段> --require-tfo"
                     err "也可改用 xhy target → 1) 内置地区库，或 3) 手动指定"
                 else
                     err "自动扫描失败；可改用 xhy target → 1) 内置地区库，或 3) 手动指定"
@@ -463,10 +644,11 @@ cmd_uninstall() {
 }
 
 cmd_menu() {
+    xhy_lang_banner
     while true; do
         printf '\n============ xray-hy %s ============\n' "$XHY_VERSION"
         printf '  %s / %s / Xray %s / 节点 %s 个\n' "$XHY_DISTRO" "$XHY_INIT" "$(xray_installed_version)" "$(node_count)"
-        cat <<'EOF'
+        xhy_t <<'EOF'
   ---- 节点 ----
    1) 添加节点               2) 节点列表
    3) 导出分享链接           4) 删除节点
@@ -532,8 +714,12 @@ EOF
 }
 
 main() {
-    local cmd="${1:-menu}"
+    # 无参数 = 一键入口：没装过就自动完整安装（含脚本本体与 xhy 命令），
+    # 装过就进菜单。显式 `xhy menu` / `xhy install` 保持原语义。
+    local cmd="${1:-auto}"
     [[ $# -gt 0 ]] && shift
+    xhy_lang_init
+    xhy_install_output_filters
     case "$cmd" in
         --help|-h|help) usage; return 0 ;;
         --version|version) printf 'xray-hy %s (build %s)\n' "$XHY_VERSION" "$XHY_BUILD"; return 0 ;;
@@ -544,11 +730,27 @@ main() {
     acquire_lock
     trap release_lock EXIT
 
+    # 任何从非安装位置发起的运行都先把本体 + /usr/local/bin/xhy 落地。
+    bootstrap_self
+
     case "$cmd" in
+        auto)
+            # 仓库开发入口永远进菜单，别让本地 ./xhy 触发完整安装。
+            if [[ "${XHY_DEV:-0}" == "1" ]] || xhy_is_installed; then
+                cmd_menu
+            else
+                cmd_install || return 1
+                if [[ -t 0 ]]; then
+                    cmd_menu
+                else
+                    info "非交互环境：安装完成，下次直接运行 xhy 即可打开菜单。"
+                fi
+            fi ;;
+        lang)       cmd_lang "$@" ;;
         install)    cmd_install ;;
         preflight)  preflight_check ;;
         check)      self_check ;;
-        menu)       cmd_menu ;;
+        menu|--menu) cmd_menu ;;
         add)        cmd_add "$@" ;;
         list)       node_list ;;
         link)       cmd_link "$@" ;;
