@@ -28,6 +28,9 @@ backup_create() {
     done
     need_root
     init_dirs
+    # 备份只打包配置（config.json / nodes / confs / certs / state.env），
+    # 二进制与 geoip/geosite 不入档 —— 它们能重新下载，且 65 MB 在小盘上是灾难。
+    disk_need 15 "打包配置备份" || die "已中止：先腾出空间再备份"
     local ts stage f cnt=0
     ts="$(date +%Y%m%d-%H%M%S)"
     [[ -n "$out" ]] || out="$XHY_BACKUP/xhy-backup-$ts.tar.gz"
@@ -151,6 +154,16 @@ backup_restore() {
 # 删除一组文件，逐个报体积，并把「删了几个 / 释放多少」累加到 _CLEAN_N / _CLEAN_KB。
 # 为什么不拿 df 前后相减：df 粒度 1 MB，删掉零星零字节残留会显示「释放 0 MB」，
 # 看上去像什么都没删（v1.6.1 在 47.88.102.45 上就报过这个数）。
+# 一组文件合计多少 KB（不删除，只统计）。
+_clean_sum() {
+    local f total=0
+    for f in "$@"; do
+        [[ -e "$f" ]] || continue
+        total=$(( total + $(file_kb "$f") ))
+    done
+    printf '%s' "$total"
+}
+
 _clean_drop() {
     local label="$1"; shift
     local f kb total=0 cnt=0
@@ -171,10 +184,11 @@ _clean_drop() {
 }
 
 cmd_clean() {
-    local what="${1:-all}" keep_bin=1 keep_snap=5 keep_bak=20 keep_tar=3
+    local what="${1:-all}" keep_bin=1 keep_snap=5 keep_bak=20 keep_tar=3 keep_big=2
     local before after f i k p
     local _keep=0
-    local -a bins=() rt=() snaps=() baks=() tars=() drop=()
+    local -a bins=() rt=() snaps=() baks=() bigs=() tars=() drop=()
+    local -A fbseen=()
     need_root
     init_dirs
     _CLEAN_N=0
@@ -199,16 +213,27 @@ cmd_clean() {
     done < <(ls -1t "$XHY_BACKUP"/xray-* 2>/dev/null || true)
     while IFS= read -r f; do [[ -e "$f" ]] && snaps+=("$f"); done \
         < <(ls -1t "$XHY_SNAPSHOTS"/state.*.tar.gz 2>/dev/null || true)
-    while IFS= read -r f; do [[ -e "$f" ]] && baks+=("$f"); done \
-        < <(ls -1t "$XHY_BACKUP"/*.bak 2>/dev/null || true)
+    while IFS= read -r f; do
+        [[ -e "$f" ]] || continue
+        # 大体积 .bak（geoip.dat / geosite.dat 这类十几 MB 的数据文件）单独算：
+        # 「.bak 留 20 份」对它们等于永不清理，一次 geodata 更新就留 30 MB。
+        # 而它们本来就能重新下载，留最新 2 份足够回退。
+        if (( $(file_kb "$f") >= 2048 )); then
+            bigs+=("$f")
+        else
+            baks+=("$f")
+        fi
+    done < <(ls -1t "$XHY_BACKUP"/*.bak 2>/dev/null || true)
     while IFS= read -r f; do [[ -e "$f" ]] && tars+=("$f"); done \
         < <(ls -1t "$XHY_BACKUP"/xhy-backup-*.tar.gz "$XHY_BACKUP"/pre-restore-* 2>/dev/null || true)
 
     printf '\n清理前：根分区剩余 %s MB\n' "$before"
     printf '  备份目录 %s / 快照目录 %s\n' \
         "$(human_kb "$(file_kb "$XHY_BACKUP")")" "$(human_kb "$(file_kb "$XHY_SNAPSHOTS")")"
-    printf '  二进制备份 %d 个 / 临时副本 %d 个 / 状态快照 %d 个 / 打包备份 %d 个 / .bak %d 个\n' \
-        "${#bins[@]}" "${#rt[@]}" "${#snaps[@]}" "${#tars[@]}" "${#baks[@]}"
+    printf '  二进制备份 %d 个 / 临时副本 %d 个 / 状态快照 %d 个 / 打包备份 %d 个\n' \
+        "${#bins[@]}" "${#rt[@]}" "${#snaps[@]}" "${#tars[@]}"
+    printf '  .bak 小文件 %d 个 / 大体积 .bak %d 个（%s）\n' \
+        "${#baks[@]}" "${#bigs[@]}" "$(human_kb "$(_clean_sum "${bigs[@]}")")"
 
     # ---- 临时副本：按定义就是可丢的，不看数量 ----
     if [[ "$what" == "tmp" || "$what" == "backups" || "$what" == "all" ]]; then
@@ -253,6 +278,25 @@ cmd_clean() {
         fi
         if (( ${#tars[@]} > 0 )); then
             info "保留 $(( ${#tars[@]} > keep_tar ? keep_tar : ${#tars[@]} )) 份打包备份（最新一份 $(human_kb "$(file_kb "${tars[0]}")")）"
+        fi
+    fi
+
+    # ---- 大体积 .bak：同名（去掉时间戳）留最新 keep_big 份 ----
+    # 47.88.102.45 上 63.8 MB 的备份目录里，29.5 MB 是 geoip.dat / geosite.dat 的旧
+    # 副本；它们掉进「.bak 留 20 份」就永远清不掉。
+    if [[ "$what" == "backups" || "$what" == "all" ]]; then
+        drop=()
+        for f in "${bigs[@]}"; do
+            k="$(basename "$f")"
+            k="${k%.bak}"; k="${k%.*}"      # geoip.dat.20261107092534 -> geoip.dat
+            fbseen[$k]=$(( ${fbseen[$k]:-0} + 1 ))
+            (( ${fbseen[$k]} > keep_big )) && drop+=("$f")
+        done
+        if (( ${#drop[@]} > 0 )); then
+            _clean_drop "旧大体积数据备份" "${drop[@]}"
+        fi
+        if (( ${#bigs[@]} > 0 )); then
+            info "大体积 .bak 每类保留最新 $keep_big 份（geoip/geosite 可重新下载）"
         fi
     fi
 

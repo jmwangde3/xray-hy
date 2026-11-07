@@ -61,29 +61,35 @@ xray_installed_version() {
 
 # Download a pinned-or-latest Xray release. The .dgst checksum is MANDATORY:
 # unlike most one-key scripts, a missing digest aborts instead of continuing.
+#
+# 三段式，顺序不能动：
+#   ① 写前空间闸门 —— 不够就中止，目标二进制一个字节都不碰
+#   ② 在临时目录里先验证新二进制能不能跑
+#   ③ 同盘 rename 原子替换（跨盘时 .new + mv）
+# 反过来做（先 install 再 version）就是 47.88.102.45 那次事故：0 MB 余量下
+# install 先把目标 truncate 掉再写到一半，留下 11 MB 的半截文件，而 version
+# 失败被误报成「架构或依赖不匹配」。
 xray_install() {
-    local ver="$1" asset tmp unpack f oldver
-    # Keep the currently working binary before replacing it. A failed download
-    # never reaches this point; a failed post-install check can still roll back.
-    if [[ -x "$XRAY_BIN" ]]; then
+    local ver="$1" asset tmp unpack f oldver got
+    # 旧二进制不再归档：36 MB 一份，切几次 channel 就是几百 MB，而它能按版本号
+    # 重新下载。要留一份保险就显式 XHY_BACKUP_CORE=1（只留最新 1 份）。
+    if [[ -x "$XRAY_BIN" && "${XHY_BACKUP_CORE:-0}" == "1" ]]; then
         oldver="$(xray_installed_version)"
         install -d -m 0700 "$XHY_BACKUP"
-        # 一个静态二进制约 32 MB。小硬盘 VPS（很多 40 GB 以内的机型根分区只有
-        # 400-500 MB）切几次 channel 就能把盘塞满，而盘满会让 sshd 直接失联。
-        # 余量不够就跳过备份：备份是便利，不是必需品。
-        if (( $(disk_free_mb "$XHY_BACKUP") < 120 )); then
-            warn "磁盘余量不足 120 MB，跳过旧二进制备份（$XHY_BACKUP）"
-            warn "切回旧版本需要重新下载；可先 xhy clean 清理历史备份"
-        else
-            cp -a "$XRAY_BIN" "$XHY_BACKUP/xray-${oldver//[^0-9A-Za-z._-]/_}-$(date +%Y%m%d%H%M%S)" 2>/dev/null \
-                || warn "旧二进制备份失败（磁盘？），继续安装"
-        fi
+        cp -a "$XRAY_BIN" "$XHY_BACKUP/xray-${oldver//[^0-9A-Za-z._-]/_}-$(date +%Y%m%d%H%M%S)" 2>/dev/null \
+            || warn "旧二进制备份失败（磁盘？），继续安装"
+        ls -1t "$XHY_BACKUP"/xray-[0-9]* 2>/dev/null | tail -n +2 | while IFS= read -r f; do rm -f "$f"; done
     fi
+
     asset="Xray-linux-${XHY_ARCH}.zip"
     tmp="$(mktemp -d)" || die "无法创建临时目录"
     unpack="$tmp/unpack"
     # shellcheck disable=SC2064
     trap "rm -rf '$tmp'" RETURN
+
+    # ① 写前闸门：36 MB 二进制 + geo 数据 + 余量。不足就中止，原文件未动。
+    disk_need 90 "安装 Xray $ver" || die "已中止安装：原二进制未改动"
+    install -d -m 0700 "$XHY_BACKUP"
 
     info "下载 Xray $ver ($asset)"
     fetch "${XHY_RELEASE_DL}/${ver}/${asset}" "$tmp/$asset" \
@@ -99,11 +105,35 @@ xray_install() {
         busybox unzip -o -q "$tmp/$asset" -d "$unpack" || die "解压失败"
     fi
     [[ -f "$unpack/xray" ]] || die "压缩包中缺少 xray 二进制"
+    chmod 0755 "$unpack/xray"
 
+    # ② 先在临时目录验证，通过后才碰目标文件
+    got="$(XRAY_LOCATION_ASSET="$XRAY_ASSET" "$unpack/xray" version 2>/dev/null \
+           | head -1 | awk '{print $2}' | tr -d '\r' || true)"
+    if [[ -z "$got" ]]; then
+        err "下载的二进制无法执行（下载损坏 / 架构 $XHY_ARCH 不符）"
+        err "原二进制未改动，当前版本: $(xray_installed_version)"
+        die "安装失败"
+    fi
+
+    # ③ 原子替换：同一文件系统用 rename（零拷贝、瞬间），跨盘才退化成 .new + mv
     install -d -m 0755 "$(dirname "$XRAY_BIN")" "$XRAY_ASSET"
-    install -m 0755 "$unpack/xray" "$XRAY_BIN"
+    if [[ "$(df -P "$unpack" 2>/dev/null | awk 'NR==2 {print $1}')" \
+        == "$(df -P "$(dirname "$XRAY_BIN")" 2>/dev/null | awk 'NR==2 {print $1}')" ]]; then
+        mv -f "$unpack/xray" "$XRAY_BIN" || die "替换 $XRAY_BIN 失败（磁盘满？）；原文件未动"
+    else
+        install -m 0755 "$unpack/xray" "$XRAY_BIN.new" 2>/dev/null \
+            || { rm -f "$XRAY_BIN.new"
+                 err "写入 $XRAY_BIN.new 失败，余量 $(disk_free_mb /) MB —— 多半是根分区满"
+                 die "原二进制未改动"; }
+        mv -f "$XRAY_BIN.new" "$XRAY_BIN" || die "替换 $XRAY_BIN 失败；原文件未动"
+    fi
+    sync
     for f in geoip.dat geosite.dat; do
-        [[ -s "$unpack/$f" ]] && install -m 0644 "$unpack/$f" "$XRAY_ASSET/$f"
+        [[ -s "$unpack/$f" ]] || continue
+        install -m 0644 "$unpack/$f" "$XRAY_ASSET/$f.new" 2>/dev/null \
+            || { rm -f "$XRAY_ASSET/$f.new"; warn "$f 写入失败（磁盘满？），保留旧文件"; continue; }
+        mv -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f"
     done
 
     # Older/newer release archives occasionally omit geodata. geoip:private
@@ -116,9 +146,6 @@ xray_install() {
         fi
     done
 
-    local got
-    got="$(XRAY_LOCATION_ASSET="$XRAY_ASSET" "$XRAY_BIN" version 2>/dev/null | head -1 | awk '{print $2}' | tr -d '\r' || true)"
-    [[ -n "$got" ]] || die "下载的 Xray 无法运行（架构或依赖不匹配）"
     if [[ "v$got" != "$ver" ]]; then
         warn "版本校验: 请求 $ver，实际 v$got（预发布版或镜像差异时可能不同，请确认）"
     fi

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.6.2}"
+XHY_VERSION="${XHY_VERSION:-1.7.0}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -175,11 +175,46 @@ human_kb() {
     fi
 }
 
+# 写盘前的空间闸门。need_mb = 这次操作还要占多少，不是「剩多少才好」。
+# 与 v1.6.1 的 `if free < 120 then 跳过备份 else 备份` 是完全不同的语义：
+# 那种写法在余量为 0 时是「跳过保险，继续写」—— 47.88.102.45 上就是这么把
+# /usr/local/bin/xray 写成 11 MB 半截文件的。这里不足就直接返回非零。
+disk_need() {
+    local need="${1:-0}" what="${2:-当前操作}" have
+    have="$(disk_free_mb "$XHY_ETC")"
+    (( have >= need )) && return 0
+    err "根分区余量 ${have} MB，${what} 至少需要 ${need} MB"
+    err "先清理：xhy clean all     然后 df -h / 确认余量"
+    return 1
+}
+
+# 可重新下载 / 可再生的文件不进备份目录：xray 36 MB + geoip 19 MB + geosite 10 MB
+# ≈ 65 MB，在 427 MB 根分区上备份几次就是灾难，而它们一条命令就能重新拉回来。
+backup_is_redownloadable() {
+    case "$(basename "$1")" in
+        xray|xray.new|geoip.dat|geosite.dat|geoip.dat.new|geosite.dat.new) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# 只备份配置类文件。可重下的大件直接跳过并说明省了多少 —— 备份目录的职责是
+# 「丢了要重新想一遍」的东西（config.json / nodes / certs / state.env），不是镜像站。
 backup_file() {
-    local f="$1"
+    local f="$1" base keep="${XHY_BACKUP_KEEP:-2}" n=0
     [[ -f "$f" ]] || return 0
+    if backup_is_redownloadable "$f"; then
+        info "不备份 $(basename "$f")（可重新下载，省 $(human_kb "$(file_kb "$f")")）"
+        return 0
+    fi
     mkdir -p "$XHY_BACKUP"
-    cp -a "$f" "$XHY_BACKUP/$(basename "$f").$(date +%Y%m%d%H%M%S).bak"
+    base="$(basename "$f")"
+    cp -a "$f" "$XHY_BACKUP/$base.$(date +%Y%m%d%H%M%S).bak"
+    # 写完就裁：同名只留最新 N 份。备份该在写入时收敛，而不是等 xhy clean 收拾。
+    while IFS= read -r old; do
+        n=$(( n + 1 ))
+        (( n > keep )) && rm -f "$old"
+    done < <(ls -1t "$XHY_BACKUP/$base."*.bak 2>/dev/null || true)
+    return 0
 }
 
 state_get() {

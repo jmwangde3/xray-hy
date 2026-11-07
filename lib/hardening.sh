@@ -241,15 +241,35 @@ _apply_family() {
     return 0
 }
 
+# 存一份防火墙规则快照；空表不存，同类只留最新 3 份。
+_fw_snapshot() {
+    local tool="$1" tmp cnt f n=0
+    tmp="$(mktemp "${TMPDIR:-/tmp}/fw.XXXXXX" 2>/dev/null || true)"
+    [[ -n "$tmp" ]] || return 0
+    if ! "${tool}-save" >"$tmp" 2>/dev/null; then rm -f "$tmp"; return 0; fi
+    cnt="$(grep -c '^-A' "$tmp" 2>/dev/null || true)"
+    if (( ${cnt:-0} == 0 )); then
+        rm -f "$tmp"
+        info "${tool} 当前没有规则（空表），跳过快照"
+        return 0
+    fi
+    mv -f "$tmp" "$XHY_BACKUP/${tool}.$(date +%Y%m%d%H%M%S).rules" 2>/dev/null || { rm -f "$tmp"; return 0; }
+    while IFS= read -r f; do
+        n=$(( n + 1 ))
+        (( n > 3 )) && rm -f "$f"
+    done < <(ls -1t "$XHY_BACKUP/${tool}."*.rules 2>/dev/null || true)
+    return 0
+}
+
 firewall_apply() {
     local mode="${1:-$(state_get FIREWALL_MODE safe)}" quiet="${2:-}" guard
     have_cmd iptables || { warn "未安装 iptables，跳过防火墙配置"; return 1; }
     guard="$(state_get SSH_GUARD on)"
     install -d -m 0700 "$XHY_BACKUP"
-    iptables-save >"$XHY_BACKUP/iptables.$(date +%Y%m%d%H%M%S).rules" 2>/dev/null || true
-    if have_cmd ip6tables; then
-        ip6tables-save >"$XHY_BACKUP/ip6tables.$(date +%Y%m%d%H%M%S).rules" 2>/dev/null || true
-    fi
+    # 空规则不值一份快照：`iptables -F` 之后存下来的是两百多字节的空表，还会按
+    # 「最新一份」把有价值的历史顶掉（47.88.102.45 上真实发生过）。
+    _fw_snapshot iptables
+    if have_cmd ip6tables; then _fw_snapshot ip6tables; fi
 
     _apply_family iptables "$mode" "$guard" || return 1
     if have_cmd ip6tables; then

@@ -2,6 +2,22 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.7.0 — 2026-11-07
+
+**备份只留配置，写盘前先过闸门。** 依据 `xray-hy_磁盘写满事故报告_20261107.md`（生产机 220 MB 备份撑满 427 MB 根分区，`install` 把 xray 写成 11 MB 半截文件）。
+
+- **备份范围收窄到「丢了要重新想一遍」的东西**：`config.json` / `nodes/` / `confs/` / `certs/` / `state.env`。`xray` 二进制、`geoip.dat`、`geosite.dat` 约 65 MB，全部可重新下载，`backup_file` 直接跳过并打印省下多少
+- 旧二进制不再归档进 `backups/`：要留一份保险得显式 `XHY_BACKUP_CORE=1`，且只留最新 1 份（写入后立刻裁）
+- **写作前空间闸门 `disk_need <MB> <操作>`**：不足直接返回非零，不再「余量不够就跳过备份、然后继续写」。接线在 `xray_install`（90 MB，在下载之前）、`update_geodata`（45 MB）、`backup_create`（15 MB）
+- **`xray_install` 改三段式**：闸门 → 临时目录里先 `version` 验证 → 同盘 `rename` 原子替换（跨盘才退回 `.new` + `mv`）。目标二进制永远不会处于半写状态；写入失败时明确报「原二进制未改动」，不再误报成「架构或依赖不匹配」
+- geodata 替换同样改成 `.new` + `mv`
+- `update_core`：回滚副本是「换核这次事务」的临时保险（成功/失败都删），余量 < 100 MB 直接拒绝换核并提示 `xhy clean all`；确要硬来的用 `xhy core update --force`
+- `xhy check` 的磁盘行改成「余量 / 总容量 / 备份目录占用」，阈值按机型自适应（总盘 < 1 GB 取 80 MB，否则 200 MB）—— 427 MB 的机器永远到不了 200 MB，固定阈值的后果是用户学会无视告警
+- `preflight` 的 300 MB 阈值同样自适应：小盘取 90 MB，并显示「本机需 N MB」
+- `backup_file` 写完就裁：同名 `.bak` 只留最新 2 份
+- `xhy firewall` 快照：空表（没有 `-A` 行）不再存，同类只留最新 3 份
+- `test/disk-test.sh` 扩到 70 项：闸门语义、可重下判定、`backup_file` 裁剪、**余量为 0 时原二进制逐字节不变**的回归
+
 ## v1.6.2 — 2026-11-07
 
 - **修 `xhy clean` 的账算错了**：`ls -1t $XHY_BACKUP/xray-*` 把 `update_core` 的临时回滚副本 `xray-rollback.??????` 也当成二进制备份，而且按 mtime 排序后「最新一份」可能正是这个零字节残留 —— 真正 30 MB 的备份反而被当旧文件删掉。现在两类分开统计：临时副本一律清掉，二进制备份只按真实备份排最新

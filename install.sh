@@ -135,8 +135,8 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.6.2"
-XHY_BUILD="cc40b38cf195"
+XHY_VERSION="1.7.0"
+XHY_BUILD="a3276267871b"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -154,7 +154,7 @@ fi
 # ===================== lib/common.sh =====================
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.6.2}"
+XHY_VERSION="${XHY_VERSION:-1.7.0}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -328,11 +328,46 @@ human_kb() {
     fi
 }
 
+# 写盘前的空间闸门。need_mb = 这次操作还要占多少，不是「剩多少才好」。
+# 与 v1.6.1 的 `if free < 120 then 跳过备份 else 备份` 是完全不同的语义：
+# 那种写法在余量为 0 时是「跳过保险，继续写」—— 47.88.102.45 上就是这么把
+# /usr/local/bin/xray 写成 11 MB 半截文件的。这里不足就直接返回非零。
+disk_need() {
+    local need="${1:-0}" what="${2:-当前操作}" have
+    have="$(disk_free_mb "$XHY_ETC")"
+    (( have >= need )) && return 0
+    err "根分区余量 ${have} MB，${what} 至少需要 ${need} MB"
+    err "先清理：xhy clean all     然后 df -h / 确认余量"
+    return 1
+}
+
+# 可重新下载 / 可再生的文件不进备份目录：xray 36 MB + geoip 19 MB + geosite 10 MB
+# ≈ 65 MB，在 427 MB 根分区上备份几次就是灾难，而它们一条命令就能重新拉回来。
+backup_is_redownloadable() {
+    case "$(basename "$1")" in
+        xray|xray.new|geoip.dat|geosite.dat|geoip.dat.new|geosite.dat.new) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# 只备份配置类文件。可重下的大件直接跳过并说明省了多少 —— 备份目录的职责是
+# 「丢了要重新想一遍」的东西（config.json / nodes / certs / state.env），不是镜像站。
 backup_file() {
-    local f="$1"
+    local f="$1" base keep="${XHY_BACKUP_KEEP:-2}" n=0
     [[ -f "$f" ]] || return 0
+    if backup_is_redownloadable "$f"; then
+        info "不备份 $(basename "$f")（可重新下载，省 $(human_kb "$(file_kb "$f")")）"
+        return 0
+    fi
     mkdir -p "$XHY_BACKUP"
-    cp -a "$f" "$XHY_BACKUP/$(basename "$f").$(date +%Y%m%d%H%M%S).bak"
+    base="$(basename "$f")"
+    cp -a "$f" "$XHY_BACKUP/$base.$(date +%Y%m%d%H%M%S).bak"
+    # 写完就裁：同名只留最新 N 份。备份该在写入时收敛，而不是等 xhy clean 收拾。
+    while IFS= read -r old; do
+        n=$(( n + 1 ))
+        (( n > keep )) && rm -f "$old"
+    done < <(ls -1t "$XHY_BACKUP/$base."*.bak 2>/dev/null || true)
+    return 0
 }
 
 state_get() {
@@ -1222,29 +1257,35 @@ xray_installed_version() {
 
 # Download a pinned-or-latest Xray release. The .dgst checksum is MANDATORY:
 # unlike most one-key scripts, a missing digest aborts instead of continuing.
+#
+# 三段式，顺序不能动：
+#   ① 写前空间闸门 —— 不够就中止，目标二进制一个字节都不碰
+#   ② 在临时目录里先验证新二进制能不能跑
+#   ③ 同盘 rename 原子替换（跨盘时 .new + mv）
+# 反过来做（先 install 再 version）就是 47.88.102.45 那次事故：0 MB 余量下
+# install 先把目标 truncate 掉再写到一半，留下 11 MB 的半截文件，而 version
+# 失败被误报成「架构或依赖不匹配」。
 xray_install() {
-    local ver="$1" asset tmp unpack f oldver
-    # Keep the currently working binary before replacing it. A failed download
-    # never reaches this point; a failed post-install check can still roll back.
-    if [[ -x "$XRAY_BIN" ]]; then
+    local ver="$1" asset tmp unpack f oldver got
+    # 旧二进制不再归档：36 MB 一份，切几次 channel 就是几百 MB，而它能按版本号
+    # 重新下载。要留一份保险就显式 XHY_BACKUP_CORE=1（只留最新 1 份）。
+    if [[ -x "$XRAY_BIN" && "${XHY_BACKUP_CORE:-0}" == "1" ]]; then
         oldver="$(xray_installed_version)"
         install -d -m 0700 "$XHY_BACKUP"
-        # 一个静态二进制约 32 MB。小硬盘 VPS（很多 40 GB 以内的机型根分区只有
-        # 400-500 MB）切几次 channel 就能把盘塞满，而盘满会让 sshd 直接失联。
-        # 余量不够就跳过备份：备份是便利，不是必需品。
-        if (( $(disk_free_mb "$XHY_BACKUP") < 120 )); then
-            warn "磁盘余量不足 120 MB，跳过旧二进制备份（$XHY_BACKUP）"
-            warn "切回旧版本需要重新下载；可先 xhy clean 清理历史备份"
-        else
-            cp -a "$XRAY_BIN" "$XHY_BACKUP/xray-${oldver//[^0-9A-Za-z._-]/_}-$(date +%Y%m%d%H%M%S)" 2>/dev/null \
-                || warn "旧二进制备份失败（磁盘？），继续安装"
-        fi
+        cp -a "$XRAY_BIN" "$XHY_BACKUP/xray-${oldver//[^0-9A-Za-z._-]/_}-$(date +%Y%m%d%H%M%S)" 2>/dev/null \
+            || warn "旧二进制备份失败（磁盘？），继续安装"
+        ls -1t "$XHY_BACKUP"/xray-[0-9]* 2>/dev/null | tail -n +2 | while IFS= read -r f; do rm -f "$f"; done
     fi
+
     asset="Xray-linux-${XHY_ARCH}.zip"
     tmp="$(mktemp -d)" || die "无法创建临时目录"
     unpack="$tmp/unpack"
     # shellcheck disable=SC2064
     trap "rm -rf '$tmp'" RETURN
+
+    # ① 写前闸门：36 MB 二进制 + geo 数据 + 余量。不足就中止，原文件未动。
+    disk_need 90 "安装 Xray $ver" || die "已中止安装：原二进制未改动"
+    install -d -m 0700 "$XHY_BACKUP"
 
     info "下载 Xray $ver ($asset)"
     fetch "${XHY_RELEASE_DL}/${ver}/${asset}" "$tmp/$asset" \
@@ -1260,11 +1301,35 @@ xray_install() {
         busybox unzip -o -q "$tmp/$asset" -d "$unpack" || die "解压失败"
     fi
     [[ -f "$unpack/xray" ]] || die "压缩包中缺少 xray 二进制"
+    chmod 0755 "$unpack/xray"
 
+    # ② 先在临时目录验证，通过后才碰目标文件
+    got="$(XRAY_LOCATION_ASSET="$XRAY_ASSET" "$unpack/xray" version 2>/dev/null \
+           | head -1 | awk '{print $2}' | tr -d '\r' || true)"
+    if [[ -z "$got" ]]; then
+        err "下载的二进制无法执行（下载损坏 / 架构 $XHY_ARCH 不符）"
+        err "原二进制未改动，当前版本: $(xray_installed_version)"
+        die "安装失败"
+    fi
+
+    # ③ 原子替换：同一文件系统用 rename（零拷贝、瞬间），跨盘才退化成 .new + mv
     install -d -m 0755 "$(dirname "$XRAY_BIN")" "$XRAY_ASSET"
-    install -m 0755 "$unpack/xray" "$XRAY_BIN"
+    if [[ "$(df -P "$unpack" 2>/dev/null | awk 'NR==2 {print $1}')" \
+        == "$(df -P "$(dirname "$XRAY_BIN")" 2>/dev/null | awk 'NR==2 {print $1}')" ]]; then
+        mv -f "$unpack/xray" "$XRAY_BIN" || die "替换 $XRAY_BIN 失败（磁盘满？）；原文件未动"
+    else
+        install -m 0755 "$unpack/xray" "$XRAY_BIN.new" 2>/dev/null \
+            || { rm -f "$XRAY_BIN.new"
+                 err "写入 $XRAY_BIN.new 失败，余量 $(disk_free_mb /) MB —— 多半是根分区满"
+                 die "原二进制未改动"; }
+        mv -f "$XRAY_BIN.new" "$XRAY_BIN" || die "替换 $XRAY_BIN 失败；原文件未动"
+    fi
+    sync
     for f in geoip.dat geosite.dat; do
-        [[ -s "$unpack/$f" ]] && install -m 0644 "$unpack/$f" "$XRAY_ASSET/$f"
+        [[ -s "$unpack/$f" ]] || continue
+        install -m 0644 "$unpack/$f" "$XRAY_ASSET/$f.new" 2>/dev/null \
+            || { rm -f "$XRAY_ASSET/$f.new"; warn "$f 写入失败（磁盘满？），保留旧文件"; continue; }
+        mv -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f"
     done
 
     # Older/newer release archives occasionally omit geodata. geoip:private
@@ -1277,9 +1342,6 @@ xray_install() {
         fi
     done
 
-    local got
-    got="$(XRAY_LOCATION_ASSET="$XRAY_ASSET" "$XRAY_BIN" version 2>/dev/null | head -1 | awk '{print $2}' | tr -d '\r' || true)"
-    [[ -n "$got" ]] || die "下载的 Xray 无法运行（架构或依赖不匹配）"
     if [[ "v$got" != "$ver" ]]; then
         warn "版本校验: 请求 $ver，实际 v$got（预发布版或镜像差异时可能不同，请确认）"
     fi
@@ -1916,15 +1978,35 @@ _apply_family() {
     return 0
 }
 
+# 存一份防火墙规则快照；空表不存，同类只留最新 3 份。
+_fw_snapshot() {
+    local tool="$1" tmp cnt f n=0
+    tmp="$(mktemp "${TMPDIR:-/tmp}/fw.XXXXXX" 2>/dev/null || true)"
+    [[ -n "$tmp" ]] || return 0
+    if ! "${tool}-save" >"$tmp" 2>/dev/null; then rm -f "$tmp"; return 0; fi
+    cnt="$(grep -c '^-A' "$tmp" 2>/dev/null || true)"
+    if (( ${cnt:-0} == 0 )); then
+        rm -f "$tmp"
+        info "${tool} 当前没有规则（空表），跳过快照"
+        return 0
+    fi
+    mv -f "$tmp" "$XHY_BACKUP/${tool}.$(date +%Y%m%d%H%M%S).rules" 2>/dev/null || { rm -f "$tmp"; return 0; }
+    while IFS= read -r f; do
+        n=$(( n + 1 ))
+        (( n > 3 )) && rm -f "$f"
+    done < <(ls -1t "$XHY_BACKUP/${tool}."*.rules 2>/dev/null || true)
+    return 0
+}
+
 firewall_apply() {
     local mode="${1:-$(state_get FIREWALL_MODE safe)}" quiet="${2:-}" guard
     have_cmd iptables || { warn "未安装 iptables，跳过防火墙配置"; return 1; }
     guard="$(state_get SSH_GUARD on)"
     install -d -m 0700 "$XHY_BACKUP"
-    iptables-save >"$XHY_BACKUP/iptables.$(date +%Y%m%d%H%M%S).rules" 2>/dev/null || true
-    if have_cmd ip6tables; then
-        ip6tables-save >"$XHY_BACKUP/ip6tables.$(date +%Y%m%d%H%M%S).rules" 2>/dev/null || true
-    fi
+    # 空规则不值一份快照：`iptables -F` 之后存下来的是两百多字节的空表，还会按
+    # 「最新一份」把有价值的历史顶掉（47.88.102.45 上真实发生过）。
+    _fw_snapshot iptables
+    if have_cmd ip6tables; then _fw_snapshot ip6tables; fi
 
     _apply_family iptables "$mode" "$guard" || return 1
     if have_cmd ip6tables; then
@@ -4398,6 +4480,9 @@ backup_create() {
     done
     need_root
     init_dirs
+    # 备份只打包配置（config.json / nodes / confs / certs / state.env），
+    # 二进制与 geoip/geosite 不入档 —— 它们能重新下载，且 65 MB 在小盘上是灾难。
+    disk_need 15 "打包配置备份" || die "已中止：先腾出空间再备份"
     local ts stage f cnt=0
     ts="$(date +%Y%m%d-%H%M%S)"
     [[ -n "$out" ]] || out="$XHY_BACKUP/xhy-backup-$ts.tar.gz"
@@ -4521,6 +4606,16 @@ backup_restore() {
 # 删除一组文件，逐个报体积，并把「删了几个 / 释放多少」累加到 _CLEAN_N / _CLEAN_KB。
 # 为什么不拿 df 前后相减：df 粒度 1 MB，删掉零星零字节残留会显示「释放 0 MB」，
 # 看上去像什么都没删（v1.6.1 在 47.88.102.45 上就报过这个数）。
+# 一组文件合计多少 KB（不删除，只统计）。
+_clean_sum() {
+    local f total=0
+    for f in "$@"; do
+        [[ -e "$f" ]] || continue
+        total=$(( total + $(file_kb "$f") ))
+    done
+    printf '%s' "$total"
+}
+
 _clean_drop() {
     local label="$1"; shift
     local f kb total=0 cnt=0
@@ -4541,10 +4636,11 @@ _clean_drop() {
 }
 
 cmd_clean() {
-    local what="${1:-all}" keep_bin=1 keep_snap=5 keep_bak=20 keep_tar=3
+    local what="${1:-all}" keep_bin=1 keep_snap=5 keep_bak=20 keep_tar=3 keep_big=2
     local before after f i k p
     local _keep=0
-    local -a bins=() rt=() snaps=() baks=() tars=() drop=()
+    local -a bins=() rt=() snaps=() baks=() bigs=() tars=() drop=()
+    local -A fbseen=()
     need_root
     init_dirs
     _CLEAN_N=0
@@ -4569,16 +4665,27 @@ cmd_clean() {
     done < <(ls -1t "$XHY_BACKUP"/xray-* 2>/dev/null || true)
     while IFS= read -r f; do [[ -e "$f" ]] && snaps+=("$f"); done \
         < <(ls -1t "$XHY_SNAPSHOTS"/state.*.tar.gz 2>/dev/null || true)
-    while IFS= read -r f; do [[ -e "$f" ]] && baks+=("$f"); done \
-        < <(ls -1t "$XHY_BACKUP"/*.bak 2>/dev/null || true)
+    while IFS= read -r f; do
+        [[ -e "$f" ]] || continue
+        # 大体积 .bak（geoip.dat / geosite.dat 这类十几 MB 的数据文件）单独算：
+        # 「.bak 留 20 份」对它们等于永不清理，一次 geodata 更新就留 30 MB。
+        # 而它们本来就能重新下载，留最新 2 份足够回退。
+        if (( $(file_kb "$f") >= 2048 )); then
+            bigs+=("$f")
+        else
+            baks+=("$f")
+        fi
+    done < <(ls -1t "$XHY_BACKUP"/*.bak 2>/dev/null || true)
     while IFS= read -r f; do [[ -e "$f" ]] && tars+=("$f"); done \
         < <(ls -1t "$XHY_BACKUP"/xhy-backup-*.tar.gz "$XHY_BACKUP"/pre-restore-* 2>/dev/null || true)
 
     printf '\n清理前：根分区剩余 %s MB\n' "$before"
     printf '  备份目录 %s / 快照目录 %s\n' \
         "$(human_kb "$(file_kb "$XHY_BACKUP")")" "$(human_kb "$(file_kb "$XHY_SNAPSHOTS")")"
-    printf '  二进制备份 %d 个 / 临时副本 %d 个 / 状态快照 %d 个 / 打包备份 %d 个 / .bak %d 个\n' \
-        "${#bins[@]}" "${#rt[@]}" "${#snaps[@]}" "${#tars[@]}" "${#baks[@]}"
+    printf '  二进制备份 %d 个 / 临时副本 %d 个 / 状态快照 %d 个 / 打包备份 %d 个\n' \
+        "${#bins[@]}" "${#rt[@]}" "${#snaps[@]}" "${#tars[@]}"
+    printf '  .bak 小文件 %d 个 / 大体积 .bak %d 个（%s）\n' \
+        "${#baks[@]}" "${#bigs[@]}" "$(human_kb "$(_clean_sum "${bigs[@]}")")"
 
     # ---- 临时副本：按定义就是可丢的，不看数量 ----
     if [[ "$what" == "tmp" || "$what" == "backups" || "$what" == "all" ]]; then
@@ -4623,6 +4730,25 @@ cmd_clean() {
         fi
         if (( ${#tars[@]} > 0 )); then
             info "保留 $(( ${#tars[@]} > keep_tar ? keep_tar : ${#tars[@]} )) 份打包备份（最新一份 $(human_kb "$(file_kb "${tars[0]}")")）"
+        fi
+    fi
+
+    # ---- 大体积 .bak：同名（去掉时间戳）留最新 keep_big 份 ----
+    # 47.88.102.45 上 63.8 MB 的备份目录里，29.5 MB 是 geoip.dat / geosite.dat 的旧
+    # 副本；它们掉进「.bak 留 20 份」就永远清不掉。
+    if [[ "$what" == "backups" || "$what" == "all" ]]; then
+        drop=()
+        for f in "${bigs[@]}"; do
+            k="$(basename "$f")"
+            k="${k%.bak}"; k="${k%.*}"      # geoip.dat.20261107092534 -> geoip.dat
+            fbseen[$k]=$(( ${fbseen[$k]:-0} + 1 ))
+            (( ${fbseen[$k]} > keep_big )) && drop+=("$f")
+        done
+        if (( ${#drop[@]} > 0 )); then
+            _clean_drop "旧大体积数据备份" "${drop[@]}"
+        fi
+        if (( ${#bigs[@]} > 0 )); then
+            info "大体积 .bak 每类保留最新 $keep_big 份（geoip/geosite 可重新下载）"
         fi
     fi
 
@@ -4744,18 +4870,25 @@ update_script() {
 update_core() {
     need_root
     init_dirs
-    local ver rollback=""
+    local ver rollback="" force="${1:-}"
+    [[ "$force" == "--force" ]] || force=""
     ver="$(xray_resolve_version)"
     info "版本通道 $(xray_channel) -> 目标 $ver"
-    # Keep the working binary so an incompatible new core can be rolled back
-    # automatically (idea borrowed from easyxray's version switch).
-    # 自动回滚副本同样要 ~30 MB。盘紧时放弃它：宁可少一层保险，也不能把
-    # 根分区塞满（盘满的第一个症状是 sshd 直接失去响应）。
-    if [[ -x "$XRAY_BIN" ]] && (( $(disk_free_mb "$XHY_BACKUP") >= 120 )); then
-        rollback="$(mktemp "$XHY_BACKUP/xray-rollback.XXXXXX" 2>/dev/null || true)"
-        if [[ -n "$rollback" ]] && cp -a "$XRAY_BIN" "$rollback"; then :; else rollback=""; fi
-    elif [[ -x "$XRAY_BIN" ]]; then
-        warn "磁盘余量不足 120 MB，跳过自动回滚副本（换版失败需手动重装旧版本）"
+
+    # 回滚副本是「换核这次事务」的临时保险，不是归档备份（归档备份已取消，
+    # 见 xray_install：36 MB 一份且可重下）。它只在换核期间存在，成功/失败都删。
+    # 没有副本就不开工 —— 换核是唯一会原地改生产二进制的操作。
+    if [[ -x "$XRAY_BIN" ]]; then
+        if (( $(disk_free_mb "$XHY_BACKUP") < 100 )); then
+            err "根分区余量 $(disk_free_mb "$XHY_BACKUP") MB，不足 100 MB，无法建立回滚副本"
+            err "先清理：xhy clean all"
+            [[ "$force" == "--force" ]] || die "拒绝在无退路的情况下换核（确要如此：xhy core update --force）"
+            warn "--force：跳过回滚副本，换核失败需手动重装旧版本"
+        else
+            rollback="$(mktemp "$XHY_BACKUP/xray-rollback.XXXXXX" 2>/dev/null || true)"
+            if [[ -n "$rollback" ]] && cp -a "$XRAY_BIN" "$rollback"; then :; else rollback=""; fi
+            [[ -n "$rollback" ]] || warn "回滚副本创建失败，继续安装（失败需手动重装旧版本）"
+        fi
     fi
     xray_install "$ver"
     if [[ -s "$XHY_ETC/config.json" ]] && ! xray_config_test >/dev/null 2>&1; then
@@ -4775,6 +4908,8 @@ update_geodata() {
     need_root
     local f
     install -d -m 0755 "$XRAY_ASSET"
+    # 两个 dat 解开后约 30 MB，还要余量给 .new。不足就别下，旧文件继续用。
+    disk_need 45 "更新 geodata（约 30 MB）" || die "已中止：现有 geo 数据继续生效"
     for f in geoip.dat geosite.dat; do
         info "更新 $f"
         if fetch "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/$f" "$XRAY_ASSET/$f.new"; then
@@ -4827,11 +4962,16 @@ self_check() {
     else
         printf '出口 IPv6: 无\n'
     fi
-    local _free
+    local _free _total _low _bk
     _free="$(disk_free_mb /)"
-    printf '磁盘余量 : %s MB（根分区剩余）\n' "$_free"
-    if (( _free < 200 )); then
-        warn "根分区余量不足 200 MB：盘满会让 sshd 写不了会话文件、SSH 直接连不上。先跑 xhy clean"
+    _total="$(df -Pm / 2>/dev/null | awk 'NR==2 {print $2+0}')"
+    _bk="$(human_kb "$(file_kb "$XHY_BACKUP")")"
+    # 阈值按机型自适应：427 MB 的机器满载工作也到不了 200 MB，固定阈值的唯一
+    # 后果是用户学会无视这行告警（狼来了）。
+    if (( _total > 0 && _total < 1024 )); then _low=80; else _low=200; fi
+    printf '磁盘余量 : %s MB / 总 %s MB（根分区；备份目录 %s）\n' "$_free" "$_total" "$_bk"
+    if (( _free < _low )); then
+        warn "根分区余量不足 ${_low} MB：盘满会让 sshd 写不了会话文件、SSH 直接连不上。先跑 xhy clean"
     fi
     printf '%s\n' "--------------------------------------"
     core_status
@@ -4922,15 +5062,21 @@ preflight_check() {
 
     mem_kb="$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)"
     disk_kb="$(df -Pk / 2>/dev/null | awk 'NR==2{print $4}' || true)"
+    local total_kb need_mb
+    total_kb="$(df -Pk / 2>/dev/null | awk 'NR==2{print $2}' || true)"
+    # 安装本身（xray 36 MB + geodata 30 MB + 包缓存）约需 90 MB 余量。
+    # 阈值不再写死 300 MB：427 MB 的机器永远到不了那个数，结果是常年「问题」，
+    # 用户学会无视预检 —— 比没有预检更糟。
+    if (( ${total_kb:-0} > 0 && ${total_kb:-0} < 1048576 )); then need_mb=90; else need_mb=300; fi
     if (( mem_kb < 131072 )); then
         printf '  [注意] 内存 %s MB 偏小，安装时会设置 GOMEMLIMIT\n' "$((mem_kb / 1024))"
     else
         printf '  [正常] 内存 %s MB\n' "$((mem_kb / 1024))"
     fi
-    if (( ${disk_kb:-0} < 307200 )); then
-        printf '  [问题] 可用磁盘不足 300 MB\n'
+    if (( ${disk_kb:-0} < need_mb * 1024 )); then
+        printf '  [问题] 可用磁盘 %s MB，安装至少需要 %s MB\n' "$(( ${disk_kb:-0} / 1024 ))" "$need_mb"
     else
-        printf '  [正常] 可用磁盘 %s MB\n' "$((disk_kb / 1024))"
+        printf '  [正常] 可用磁盘 %s MB（本机需 %s MB）\n' "$((disk_kb / 1024))" "$need_mb"
     fi
 
     kver="$(uname -r)"; kver="${kver%%-*}"
@@ -5240,7 +5386,7 @@ Usage: xhy <command> [options]
     terminals stay Chinese.
 
   Version & update
-    core [status|channel pinned|channel latest|channel vX.Y.Z|update]
+    core [status|channel pinned|channel latest|channel vX.Y.Z|update [--force]]
     update [script|core|geodata|config|all]
     update script --yes [--allow-major]   Non-interactive (major bump needs flag)
 
@@ -5351,7 +5497,7 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
     控制台终端自动切英文，普通 UTF-8 SSH 终端保持中文。
 
   版本与更新
-    core [status|channel pinned|channel latest|channel vX.Y.Z|update]
+    core [status|channel pinned|channel latest|channel vX.Y.Z|update [--force]]
     update [script|core|geodata|config|all]
     update script --yes [--allow-major]   非交互更新（跨主版本需 --allow-major）
 
@@ -5907,15 +6053,15 @@ main() {
         core)       case "${1:-status}" in
                         status)  core_status ;;
                         channel) xray_set_channel "${2:?需要 pinned/latest/vX.Y.Z}"; core_status ;;
-                        update)  update_core ;;
-                        *) die "用法: xhy core [status|channel <值>|update]" ;;
+                        update)  shift; update_core "$@" ;;
+                        *) die "用法: xhy core [status|channel <值>|update [--force]]" ;;
                     esac ;;
         update)     case "${1:-all}" in
                         all) update_all ;;
                         script) shift; update_script "$@" ;;
-                        core) update_core ;;
+                        core) shift; update_core "$@" ;;
                         geodata) update_geodata ;; config) update_config ;;
-                        *) die "用法: xhy update [all|script [--yes] [--allow-major]|core|geodata|config]" ;;
+                        *) die "用法: xhy update [all|script [--yes] [--allow-major]|core [--force]|geodata|config]" ;;
                     esac ;;
         service)    case "${1:-status}" in
                         start|stop|restart) "svc_$1" "$SVC_XRAY" ;;

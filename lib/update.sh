@@ -82,18 +82,25 @@ update_script() {
 update_core() {
     need_root
     init_dirs
-    local ver rollback=""
+    local ver rollback="" force="${1:-}"
+    [[ "$force" == "--force" ]] || force=""
     ver="$(xray_resolve_version)"
     info "版本通道 $(xray_channel) -> 目标 $ver"
-    # Keep the working binary so an incompatible new core can be rolled back
-    # automatically (idea borrowed from easyxray's version switch).
-    # 自动回滚副本同样要 ~30 MB。盘紧时放弃它：宁可少一层保险，也不能把
-    # 根分区塞满（盘满的第一个症状是 sshd 直接失去响应）。
-    if [[ -x "$XRAY_BIN" ]] && (( $(disk_free_mb "$XHY_BACKUP") >= 120 )); then
-        rollback="$(mktemp "$XHY_BACKUP/xray-rollback.XXXXXX" 2>/dev/null || true)"
-        if [[ -n "$rollback" ]] && cp -a "$XRAY_BIN" "$rollback"; then :; else rollback=""; fi
-    elif [[ -x "$XRAY_BIN" ]]; then
-        warn "磁盘余量不足 120 MB，跳过自动回滚副本（换版失败需手动重装旧版本）"
+
+    # 回滚副本是「换核这次事务」的临时保险，不是归档备份（归档备份已取消，
+    # 见 xray_install：36 MB 一份且可重下）。它只在换核期间存在，成功/失败都删。
+    # 没有副本就不开工 —— 换核是唯一会原地改生产二进制的操作。
+    if [[ -x "$XRAY_BIN" ]]; then
+        if (( $(disk_free_mb "$XHY_BACKUP") < 100 )); then
+            err "根分区余量 $(disk_free_mb "$XHY_BACKUP") MB，不足 100 MB，无法建立回滚副本"
+            err "先清理：xhy clean all"
+            [[ "$force" == "--force" ]] || die "拒绝在无退路的情况下换核（确要如此：xhy core update --force）"
+            warn "--force：跳过回滚副本，换核失败需手动重装旧版本"
+        else
+            rollback="$(mktemp "$XHY_BACKUP/xray-rollback.XXXXXX" 2>/dev/null || true)"
+            if [[ -n "$rollback" ]] && cp -a "$XRAY_BIN" "$rollback"; then :; else rollback=""; fi
+            [[ -n "$rollback" ]] || warn "回滚副本创建失败，继续安装（失败需手动重装旧版本）"
+        fi
     fi
     xray_install "$ver"
     if [[ -s "$XHY_ETC/config.json" ]] && ! xray_config_test >/dev/null 2>&1; then
@@ -113,6 +120,8 @@ update_geodata() {
     need_root
     local f
     install -d -m 0755 "$XRAY_ASSET"
+    # 两个 dat 解开后约 30 MB，还要余量给 .new。不足就别下，旧文件继续用。
+    disk_need 45 "更新 geodata（约 30 MB）" || die "已中止：现有 geo 数据继续生效"
     for f in geoip.dat geosite.dat; do
         info "更新 $f"
         if fetch "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/$f" "$XRAY_ASSET/$f.new"; then
@@ -165,11 +174,16 @@ self_check() {
     else
         printf '出口 IPv6: 无\n'
     fi
-    local _free
+    local _free _total _low _bk
     _free="$(disk_free_mb /)"
-    printf '磁盘余量 : %s MB（根分区剩余）\n' "$_free"
-    if (( _free < 200 )); then
-        warn "根分区余量不足 200 MB：盘满会让 sshd 写不了会话文件、SSH 直接连不上。先跑 xhy clean"
+    _total="$(df -Pm / 2>/dev/null | awk 'NR==2 {print $2+0}')"
+    _bk="$(human_kb "$(file_kb "$XHY_BACKUP")")"
+    # 阈值按机型自适应：427 MB 的机器满载工作也到不了 200 MB，固定阈值的唯一
+    # 后果是用户学会无视这行告警（狼来了）。
+    if (( _total > 0 && _total < 1024 )); then _low=80; else _low=200; fi
+    printf '磁盘余量 : %s MB / 总 %s MB（根分区；备份目录 %s）\n' "$_free" "$_total" "$_bk"
+    if (( _free < _low )); then
+        warn "根分区余量不足 ${_low} MB：盘满会让 sshd 写不了会话文件、SSH 直接连不上。先跑 xhy clean"
     fi
     printf '%s\n' "--------------------------------------"
     core_status
@@ -260,15 +274,21 @@ preflight_check() {
 
     mem_kb="$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)"
     disk_kb="$(df -Pk / 2>/dev/null | awk 'NR==2{print $4}' || true)"
+    local total_kb need_mb
+    total_kb="$(df -Pk / 2>/dev/null | awk 'NR==2{print $2}' || true)"
+    # 安装本身（xray 36 MB + geodata 30 MB + 包缓存）约需 90 MB 余量。
+    # 阈值不再写死 300 MB：427 MB 的机器永远到不了那个数，结果是常年「问题」，
+    # 用户学会无视预检 —— 比没有预检更糟。
+    if (( ${total_kb:-0} > 0 && ${total_kb:-0} < 1048576 )); then need_mb=90; else need_mb=300; fi
     if (( mem_kb < 131072 )); then
         printf '  [注意] 内存 %s MB 偏小，安装时会设置 GOMEMLIMIT\n' "$((mem_kb / 1024))"
     else
         printf '  [正常] 内存 %s MB\n' "$((mem_kb / 1024))"
     fi
-    if (( ${disk_kb:-0} < 307200 )); then
-        printf '  [问题] 可用磁盘不足 300 MB\n'
+    if (( ${disk_kb:-0} < need_mb * 1024 )); then
+        printf '  [问题] 可用磁盘 %s MB，安装至少需要 %s MB\n' "$(( ${disk_kb:-0} / 1024 ))" "$need_mb"
     else
-        printf '  [正常] 可用磁盘 %s MB\n' "$((disk_kb / 1024))"
+        printf '  [正常] 可用磁盘 %s MB（本机需 %s MB）\n' "$((disk_kb / 1024))" "$need_mb"
     fi
 
     kver="$(uname -r)"; kver="${kver%%-*}"

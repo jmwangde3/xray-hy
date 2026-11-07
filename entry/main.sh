@@ -216,7 +216,7 @@ Usage: xhy <command> [options]
     terminals stay Chinese.
 
   Version & update
-    core [status|channel pinned|channel latest|channel vX.Y.Z|update]
+    core [status|channel pinned|channel latest|channel vX.Y.Z|update [--force]]
     update [script|core|geodata|config|all]
     update script --yes [--allow-major]   Non-interactive (major bump needs flag)
 
@@ -327,7 +327,7 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
     控制台终端自动切英文，普通 UTF-8 SSH 终端保持中文。
 
   版本与更新
-    core [status|channel pinned|channel latest|channel vX.Y.Z|update]
+    core [status|channel pinned|channel latest|channel vX.Y.Z|update [--force]]
     update [script|core|geodata|config|all]
     update script --yes [--allow-major]   非交互更新（跨主版本需 --allow-major）
 
@@ -883,15 +883,15 @@ main() {
         core)       case "${1:-status}" in
                         status)  core_status ;;
                         channel) xray_set_channel "${2:?需要 pinned/latest/vX.Y.Z}"; core_status ;;
-                        update)  update_core ;;
-                        *) die "用法: xhy core [status|channel <值>|update]" ;;
+                        update)  shift; update_core "$@" ;;
+                        *) die "用法: xhy core [status|channel <值>|update [--force]]" ;;
                     esac ;;
         update)     case "${1:-all}" in
                         all) update_all ;;
                         script) shift; update_script "$@" ;;
-                        core) update_core ;;
+                        core) shift; update_core "$@" ;;
                         geodata) update_geodata ;; config) update_config ;;
-                        *) die "用法: xhy update [all|script [--yes] [--allow-major]|core|geodata|config]" ;;
+                        *) die "用法: xhy update [all|script [--yes] [--allow-major]|core [--force]|geodata|config]" ;;
                     esac ;;
         service)    case "${1:-status}" in
                         start|stop|restart) "svc_$1" "$SVC_XRAY" ;;
