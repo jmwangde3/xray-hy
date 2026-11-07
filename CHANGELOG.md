@@ -2,6 +2,12 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.7.3 — 2026-11-07
+
+- fix(clean): 事故期手工装的 `/etc/periodic/daily/xhy-backup-prune` 会被自动摘掉并原地改名留档（含 `.` 的名字 run-parts 不执行，回滚一条 `mv`）。它的策略是「二进制留 1 份」，与新默认值 0 直接冲突，留着半夜就把 35 MB 搬回来
+- feat(check): `xhy check` 检测到该遗留钩子时告警，并说明 `xhy clean all` 会处理
+- feat(clean): 新增 `XHY_PERIODIC_DIR` 以便测试重定向；`disk-test.sh` 扩到 80 项
+
 ## v1.7.2 — 2026-11-07
 
 - `xhy clean` 默认不再保留二进制备份：`xray` 也是「能上网重新下载」的东西，留一份就是 35 MB。想留保险设 `XHY_BACKUP_CORE=1`（只留最新 1 份）

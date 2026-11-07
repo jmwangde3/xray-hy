@@ -185,6 +185,11 @@ self_check() {
     if (( _free < _low )); then
         warn "根分区余量不足 ${_low} MB：盘满会让 sshd 写不了会话文件、SSH 直接连不上。先跑 xhy clean"
     fi
+    # 事故期的手工定时钩子会按旧策略把 35 MB 二进制搬回来，和当前策略打架。
+    if [[ -f "$(legacy_prune_hook)" ]]; then
+        warn "发现遗留定时任务 $(legacy_prune_hook)（旧策略会保留 1 份二进制）"
+        warn "它已被 xhy clean 取代；跑一次 xhy clean all 会自动把它移到 /root 留档"
+    fi
     printf '%s\n' "--------------------------------------"
     core_status
     local inst mptcp v6rules

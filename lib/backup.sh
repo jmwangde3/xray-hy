@@ -183,6 +183,25 @@ _clean_drop() {
     return 0
 }
 
+# 11-07 事故当晚手工装的 /etc/periodic/daily/xhy-backup-prune 已被 xhy clean 取代。
+# 它的保留策略是「二进制留 1 份」，与新策略（默认 0 份）直接冲突 —— 留着会让
+# 35 MB 的旧二进制永远爬回来。移进 /root 而不是删除，留一条回头路。
+_clean_legacy_hook() {
+    local h dst
+    h="$(legacy_prune_hook)"
+    [[ -f "$h" ]] || return 0
+    # 就放在原地改名：run-parts 会跳过含 '.' 的条目，它从此不会再被执行，
+    # 想回滚只需 mv 回去（放到 /root 反而要跨目录搬 2 KB）。
+    dst="$(dirname "$h")/xhy-backup-prune.retired-$(date +%Y%m%d%H%M%S)"
+    if mv "$h" "$dst" 2>/dev/null; then
+        ok "摘掉事故期遗留的定时任务 /etc/periodic/daily/xhy-backup-prune（已由 xhy clean 取代）"
+        info "如需回滚：mv $dst /etc/periodic/daily/xhy-backup-prune"
+    else
+        warn "遗留定时任务仍在：$h —— 它会把旧二进制留成 35 MB 常驻，建议手工删"
+    fi
+    return 0
+}
+
 cmd_clean() {
     local what="${1:-all}" keep_bin="${XHY_BACKUP_CORE:-0}" keep_snap=5 keep_bak=20 keep_tar=3 keep_big=2
     local before after f i k p
@@ -200,6 +219,8 @@ cmd_clean() {
     esac
 
     before="$(disk_free_mb /)"
+    # 清 anything 之前先摘掉过时的定时钩子，免得它半夜把二进制又搬回来。
+    [[ "$what" == "all" || "$what" == "backups" ]] && _clean_legacy_hook
 
     # 二进制备份 = xray-<版本>-<14 位时间戳>。
     # xray-rollback.* 是 update_core 的临时副本，中断时会留零字节文件；它同样匹配

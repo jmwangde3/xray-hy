@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.7.2}"
+XHY_VERSION="${XHY_VERSION:-1.7.3}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -146,6 +146,11 @@ atomic_write() {
 
 # 根分区剩余 MB。df -Pm 是 POSIX 格式，BusyBox 也支持；-m 直接给 MB，
 # 免得自己拿 1K 块换算。取不到时返回 0（调用方按"没空间"处理更安全）。
+# 11-07 事故当晚手工装的清理钩子。路径做成变量，测试才能指到临时目录。
+legacy_prune_hook() {
+    printf '%s/xhy-backup-prune' "${XHY_PERIODIC_DIR:-/etc/periodic/daily}"
+}
+
 disk_free_mb() {
     local p="${1:-$XHY_ETC}" v
     v="$(df -Pm "$p" 2>/dev/null | awk 'NR==2 {print $4; exit}')"

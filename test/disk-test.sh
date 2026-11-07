@@ -74,6 +74,9 @@ chk "分发表有 clean"               'grep -q "clean)      cmd_clean" entry/ma
 chk "菜单 16 支持 clean"           'grep -q "clean)  cmd_clean all" entry/main.sh'
 chk "中文帮助有 clean"             'grep -Fq "clean [backups|snapshots|tarballs|tmp|all]  清理旧核心二进制" entry/main.sh'
 chk "英文帮助有 clean"             'grep -Fq "clean [backups|snapshots|tarballs|tmp|all]  Drop old core backups" entry/main.sh'
+chk "定义 legacy_prune_hook"        'grep -q "^legacy_prune_hook()" lib/common.sh'
+chk "clean 调用 _clean_legacy_hook" 'grep -q "_clean_legacy_hook" lib/backup.sh'
+chk "self_check 检测遗留钩子"       'grep -q "发现遗留定时任务" lib/update.sh'
 chk "帮助说明 tarballs 含义"       'grep -Fq "tarballs = xhy backup 产物" entry/main.sh'
 
 echo "=== file_kb / human_kb ==="
@@ -190,6 +193,26 @@ chk "余量 0 时安装失败"        '[[ $rc -ne 0 ]]'
 chk "原二进制逐字节未变"       '[[ "$(sha256sum "$TEST_TMP/bin/xray" | awk "{print \$1}")" == "$old_sum" ]]'
 chk "报错点名磁盘余量不足"     'grep -q "至少需要 90 MB" <<<"$out"'
 chk "没有下载就被拦下"         '! grep -q "下载 Xray" <<<"$out"'
+
+echo "=== 遗留定时钩子：自动摘掉并留档 ==="
+# 11-07 事故当晚手工装了 /etc/periodic/daily/xhy-backup-prune，保留策略是
+# 「二进制留 1 份」，与 v1.7.2 的「默认 0 份」直接冲突 —— 留着半夜就把 35 MB
+# 搬回来。cmd_clean 负责把它移进 /root 而不是删除（留一条回头路）。
+export XHY_PERIODIC_DIR="$TEST_TMP/periodic"
+mkdir -p "$XHY_PERIODIC_DIR"
+printf '#!/bin/sh\n# legacy\n' >"$XHY_PERIODIC_DIR/xhy-backup-prune"
+chk "legacy_prune_hook 可被重定向" '[[ "$(legacy_prune_hook)" == "$TEST_TMP/periodic/xhy-backup-prune" ]]'
+out="$(cmd_clean backups 2>&1)"
+chk "钩子已被移走"             '[[ ! -f "$XHY_PERIODIC_DIR/xhy-backup-prune" ]]'
+chk "移走时给出提示"           'grep -q "摘掉事故期遗留的定时任务" <<<"$out"'
+chk "给出回滚命令"             'grep -q "如需回滚：mv $TEST_TMP/periodic/xhy-backup-prune.retired-" <<<"$out"'
+chk "改名文件不会再被 run-parts 执行" 'case "$(basename "$(ls -1 "$XHY_PERIODIC_DIR"/xhy-backup-prune.retired-* | head -1)")" in *.*) true ;; *) false ;; esac'
+chk "留档而不是删除"           'ls -1 "$XHY_PERIODIC_DIR"/xhy-backup-prune.retired-* >/dev/null 2>&1'
+chk "第二次跑不再重复提示"      '! grep -q "摘掉事故期遗留" <<<"$(cmd_clean backups 2>&1)"'
+printf '#!/bin/sh\n' >"$XHY_PERIODIC_DIR/xhy-backup-prune"
+cmd_clean snapshots >/dev/null 2>&1
+chk "snapshots 不碰该钩子"      '[[ -f "$XHY_PERIODIC_DIR/xhy-backup-prune" ]]'
+rm -rf "$XHY_PERIODIC_DIR"; unset XHY_PERIODIC_DIR
 
 echo "=== 防火墙快照：空表不存，同类留 3 份 ==="
 chk "定义 _fw_snapshot"        'grep -q "^_fw_snapshot()" lib/hardening.sh'
