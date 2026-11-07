@@ -135,8 +135,8 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.7.3"
-XHY_BUILD="e5cd61e7a6f3"
+XHY_VERSION="1.7.4"
+XHY_BUILD="43e7464349f9"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -154,7 +154,7 @@ fi
 # ===================== lib/common.sh =====================
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.7.3}"
+XHY_VERSION="${XHY_VERSION:-1.7.4}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -5009,7 +5009,7 @@ self_check() {
     # 事故期的手工定时钩子会按旧策略把 35 MB 二进制搬回来，和当前策略打架。
     if [[ -f "$(legacy_prune_hook)" ]]; then
         warn "发现遗留定时任务 $(legacy_prune_hook)（旧策略会保留 1 份二进制）"
-        warn "它已被 xhy clean 取代；跑一次 xhy clean all 会自动把它移到 /root 留档"
+        warn "它已被 xhy clean 取代；跑一次 xhy clean all 会自动停用它（原地改名，留一条 mv 回滚）"
     fi
     printf '%s\n' "--------------------------------------"
     core_status

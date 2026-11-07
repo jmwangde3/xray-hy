@@ -2,6 +2,11 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.7.4 — 2026-11-07
+
+- fix(check): 遗留钩子告警文案与实际行为对齐 —— 是**原地改名**（`xhy-backup-prune.retired-<ts>`，含 `.` 故 run-parts 不再执行），不是搬到 `/root`；告警里给出的回滚命令随之正确
+- 现网实测：`xhy check` 打出告警 → `xhy clean all` 打印「摘掉事故期遗留的定时任务」+ 一条 `mv` 回滚 → `/etc/periodic/daily/` 只剩 `logrotate` 与改名后的留档
+
 ## v1.7.3 — 2026-11-07
 
 - fix(clean): 事故期手工装的 `/etc/periodic/daily/xhy-backup-prune` 会被自动摘掉并原地改名留档（含 `.` 的名字 run-parts 不执行，回滚一条 `mv`）。它的策略是「二进制留 1 份」，与新默认值 0 直接冲突，留着半夜就把 35 MB 搬回来

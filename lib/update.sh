@@ -188,7 +188,7 @@ self_check() {
     # 事故期的手工定时钩子会按旧策略把 35 MB 二进制搬回来，和当前策略打架。
     if [[ -f "$(legacy_prune_hook)" ]]; then
         warn "发现遗留定时任务 $(legacy_prune_hook)（旧策略会保留 1 份二进制）"
-        warn "它已被 xhy clean 取代；跑一次 xhy clean all 会自动把它移到 /root 留档"
+        warn "它已被 xhy clean 取代；跑一次 xhy clean all 会自动停用它（原地改名，留一条 mv 回滚）"
     fi
     printf '%s\n' "--------------------------------------"
     core_status
