@@ -139,3 +139,71 @@ backup_restore() {
     config_reload || warn "配置已写入，但服务重启失败（尚未 install？可 xhy service start 手动起）"
     ok "还原完成（配置已按 nodes 重建并通过 xray -test）"
 }
+
+# ---------------------------------------------------------------------------
+# xhy clean — 小盘 VPS 的救命命令
+# ---------------------------------------------------------------------------
+# 根分区 400-500 MB 的机型（阿里云/腾讯云的入门配置很常见）最容易被这里塞满：
+# 切一次 `xhy core channel` 就多一个 ~30 MB 的旧二进制副本，再叠加手工备份，
+# 盘一满 sshd 就写不了会话文件 —— 症状是「SSH 突然连不上、但代理还能用」。
+# 只保留最近若干份，其余删除。
+
+cmd_clean() {
+    local what="${1:-all}" keep_bin=1 keep_snap=5 keep_bak=20
+    local before after n=0 f i
+    local -a bins=() snaps=() baks=()
+    need_root
+    init_dirs
+    before="$(disk_free_mb /)"
+
+    while IFS= read -r f; do bins+=("$f"); done < <(ls -1t "$XHY_BACKUP"/xray-* 2>/dev/null || true)
+    while IFS= read -r f; do snaps+=("$f"); done < <(ls -1t "$XHY_SNAPSHOTS"/state.*.tar.gz 2>/dev/null || true)
+    while IFS= read -r f; do baks+=("$f"); done < <(ls -1t "$XHY_BACKUP"/*.bak 2>/dev/null || true)
+
+    printf '\n清理前：根分区剩余 %s MB\n' "$before"
+    printf '  二进制备份 %d 个 / 状态快照 %d 个 / .bak %d 个\n' \
+        "${#bins[@]}" "${#snaps[@]}" "${#baks[@]}"
+    du -sh "$XHY_BACKUP" "$XHY_SNAPSHOTS" 2>/dev/null | sed 's/^/  /' || true
+
+    case "$what" in
+        backups|all)
+            if (( ${#bins[@]} > keep_bin )); then
+                for (( i = keep_bin; i < ${#bins[@]}; i++ )); do
+                    if rm -f "${bins[$i]}"; then n=$((n + 1)); fi
+                done
+                ok "删除旧二进制备份 $(( ${#bins[@]} - keep_bin )) 个（保留最新 $keep_bin 个）"
+            else
+                info "二进制备份只有 ${#bins[@]} 个，无需清理"
+            fi ;;
+    esac
+
+    case "$what" in
+        snapshots|all)
+            if (( ${#snaps[@]} > keep_snap )); then
+                for (( i = keep_snap; i < ${#snaps[@]}; i++ )); do
+                    if rm -f "${snaps[$i]}"; then n=$((n + 1)); fi
+                done
+                ok "删除旧状态快照 $(( ${#snaps[@]} - keep_snap )) 个（保留最新 $keep_snap 个，xhy rollback 仍可用）"
+            else
+                info "状态快照只有 ${#snaps[@]} 个，无需清理"
+            fi ;;
+    esac
+
+    case "$what" in
+        backups|all)
+            if (( ${#baks[@]} > keep_bak )); then
+                for (( i = keep_bak; i < ${#baks[@]}; i++ )); do
+                    if rm -f "${baks[$i]}"; then n=$((n + 1)); fi
+                done
+                ok "删除旧 .bak $(( ${#baks[@]} - keep_bak )) 个（保留最新 $keep_bak 个）"
+            fi ;;
+    esac
+
+    after="$(disk_free_mb /)"
+    printf '\n清理后：根分区剩余 %s MB（释放 %s MB，删除 %d 个文件）\n' \
+        "$after" "$(( after - before ))" "$n"
+    if (( after < 200 )); then
+        warn "余量仍不足 200 MB。可再清：$XHY_BACKUP 里的手工大文件、apt/apk 缓存、/var/log"
+    fi
+    return 0
+}

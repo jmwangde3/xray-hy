@@ -135,8 +135,8 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.6.0"
-XHY_BUILD="8f1fd209823a"
+XHY_VERSION="1.6.1"
+XHY_BUILD="220d6e6e5bf8"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -154,7 +154,7 @@ fi
 # ===================== lib/common.sh =====================
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.6.0}"
+XHY_VERSION="${XHY_VERSION:-1.6.1}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -295,6 +295,16 @@ atomic_write() {
     # failed write (that produced misleading "配置生成失败" aborts).
     rm -f "$tmp" || true
     return 0
+}
+
+# 根分区剩余 MB。df -Pm 是 POSIX 格式，BusyBox 也支持；-m 直接给 MB，
+# 免得自己拿 1K 块换算。取不到时返回 0（调用方按"没空间"处理更安全）。
+disk_free_mb() {
+    local p="${1:-$XHY_ETC}" v
+    v="$(df -Pm "$p" 2>/dev/null | awk 'NR==2 {print $4; exit}')"
+    # 路径不存在 / df 不支持 -m 时都会得到空串；调用方按 0 处理更安全。
+    [[ "$v" =~ ^[0-9]+$ ]] || v=0
+    printf '%s' "$v"
 }
 
 backup_file() {
@@ -480,44 +490,49 @@ verify_release_digest() {
 # 不带 declare：本文件是在 load_libs() 函数内被 source 的，显式 declare 会创建
 # 局部变量，函数返回后数组就丢了（同一个坑 scanner.sh 的 XHY_TFO_CACHE 踩过）。
 XHY_T_ZH=(
-    "扫描范围默认是本机公网 IP 所在 /24；无合格站点、或强制 TFO 时没找到支持 TFO 的站，会自动扩到 /21 再扫一次" "当前网段内没有支持被动 TFO 的候选（每个站点后已标注 TFO 结果）；将自动扩大到 /21 再扫一次" "安装完成。现在可用 xhy add reality 添加第一个节点，或直接输入 xhy 打开菜单。"
-    "  xhy lang en    强制英文（纯 ASCII；云 VNC 控制台中文是小方块时用）" "已按新的端口 / SNI 重签 Hysteria2 证书，客户端的 pinSHA256 需要更新" "节点参数已写入但未生效，可用 xhy snapshots + xhy rollback 回退"
-    "TFO 只省首连 1 个 RTT，伪装站又不承载正常代理流量，不值得为它牺牲站点质量。" "  单次强制：XHY_LANG=en xhy  或  XHY_ASCII=1 xhy" "当前没有 REALITY 节点，新伪装站已记为默认 target，下次新建节点会用"
-    "现在用 xhy add reality 添加第一个节点，或输入 xhy 打开菜单" "缓存里没有支持被动 TFO 的站点；自动扩大网段再扫一次（不重复扫同一 /24）" "  xhy lang auto  按终端 / locale 自动判定（默认）"
-    "TFO auto/on/off（auto = 按新 target 重新探测）" "  10) 防火墙                11) BBR / 内核" "  12) 服务管理              13) Xray 版本通道"
-    "1) 自动扫描本机机房网段，选最优站点（推荐；有缓存直接复用，不重复扫）" "（safe 模式：SSH 防爆破 + 放行节点端口，不改动现有规则）" "   3) 节点列表               4) 导出分享链接"
+    "扫描范围默认是本机公网 IP 所在 /24；无合格站点、或强制 TFO 时没找到支持 TFO 的站，会自动扩到 /21 再扫一次" "根分区余量不足 200 MB：盘满会让 sshd 写不了会话文件、SSH 直接连不上。先跑 xhy clean" "当前网段内没有支持被动 TFO 的候选（每个站点后已标注 TFO 结果）；将自动扩大到 /21 再扫一次"
+    "安装完成。现在可用 xhy add reality 添加第一个节点，或直接输入 xhy 打开菜单。" "  xhy lang en    强制英文（纯 ASCII；云 VNC 控制台中文是小方块时用）" "已按新的端口 / SNI 重签 Hysteria2 证书，客户端的 pinSHA256 需要更新"
+    "节点参数已写入但未生效，可用 xhy snapshots + xhy rollback 回退" "TFO 只省首连 1 个 RTT，伪装站又不承载正常代理流量，不值得为它牺牲站点质量。" "  单次强制：XHY_LANG=en xhy  或  XHY_ASCII=1 xhy"
+    "当前没有 REALITY 节点，新伪装站已记为默认 target，下次新建节点会用" "现在用 xhy add reality 添加第一个节点，或输入 xhy 打开菜单" "缓存里没有支持被动 TFO 的站点；自动扩大网段再扫一次（不重复扫同一 /24）"
+    "  xhy lang auto  按终端 / locale 自动判定（默认）" "TFO auto/on/off（auto = 按新 target 重新探测）" "  10) 防火墙                11) BBR / 内核"
+    "  12) 服务管理              13) Xray 版本通道" "1) 自动扫描本机机房网段，选最优站点（推荐；有缓存直接复用，不重复扫）" "磁盘余量不足 120 MB，跳过自动回滚副本（换版失败需手动重装旧版本）"
+    "backup / restore / clean（清理旧备份释放磁盘）" "（safe 模式：SSH 防爆破 + 放行节点端口，不改动现有规则）" "   3) 节点列表               4) 导出分享链接"
     "本机网段（/24 与同机房 /21）都没有支持被动 TFO 的站点。" "自动扫描没有找到可用站点，可改用 1) 按地区，或 3) 手动指定" "TLS 1.3 / H2 / 无跳转 / 非 CDN（源站直连）"
     "   1) 添加节点               2) 编辑节点" "  14) 更新                  15) 卸载" "  7) 扫描本机机房网段挑站（可强制 TFO，可替换已有节点）"
     "是否只选支持 TFO 的伪装站？(y/N，回车=不强制): " "；scanner_pick 会自动扩大到 /21 再扫一次。" "   6) 完整安装 / 重装        7) 环境自检"
     "非交互环境：安装完成，下次直接运行 xhy 即可打开菜单。" "候选伪装站（按质量排序；TFO=目标是否支持被动 TFO）" "选哪个 \[1-%d\]（回车=1，0=自动取最高分）: "
-    "尚未安装 Xray，请先运行: xhy install" "（未强制 TFO；列表里也可能含支持 TFO 的站点）" "   8) 配置（路由/DNS/日志）  9) 伪装站"
-    "shortId（输入 new 重新生成，客户端需同步）" "编辑已有节点；省略参数时列出编号选择（回车=不改）" "伪装站 target（IP:端口 或 域名:端口）"
+    "只支持 backup / restore / clean" "尚未安装 Xray，请先运行: xhy install" "（未强制 TFO；列表里也可能含支持 TFO 的站点）"
+    "   8) 配置（路由/DNS/日志）  9) 伪装站" "shortId（输入 new 重新生成，客户端需同步）" "编辑已有节点；省略参数时列出编号选择（回车=不改）"
+    "伪装站 target（IP:端口 或 域名:端口）" "清理旧的核心二进制备份 / 旧快照（小硬盘必用）" "根分区满时 sshd 会连不上、而代理仍在工作；"
     "每个候选后面都标注「TFO 支持 / 不支持」" "选择地区编号（也可直接输入地区代码，回车取消）" "替换哪些（all / 1,3 / 回车=不换）"
-    "（这一步最慢；卡住多半是软件源，见文末提示）" "（下次运行生效；本次可用 XHY_LANG=" "2) 内置地区库（按 VPS 出口国家匹配）"
-    "SNI（target 是 IP 时必填域名）" "去掉 --require-tfo 按质量选" "伪装站（target / dest）来源："
-    "  xhy lang zh    强制中文" "里没有支持被动 TFO 的站点，自动扩大到" "  2) 指定地区（列出现有地区与候选数）"
-    "Brutal 上行 Mbps（空=不启用）" "Brutal 下行 Mbps（空=不启用）" "只有 REALITY 节点有伪装站（当前 "
-    "伪装站（target / dest）来源" "3) 手动指定 target / SNI" "内置地区库（按 VPS 出口国家匹配）"
-    "  已存在的 REALITY 节点：" "UUID（输入 new 重新生成）" "伪装模式 string/proxy"
-    "自动扫描本机机房网段，选最优站点" "脚本本体已就位（本次启动已落地）" "（已按「必须支持 TFO」过滤）"
-    "改为不强制 TFO、按质量重选？" "已完成 %s 个节点的伪装站替换" "客户端连接地址(域名或 IP)"
-    "（回车=1，0=自动取最高分）" "前 个候选都不支持被动 TFO" "SNI（改这个会重签自签证书）"
-    "或换 --cidr 网段再试" "可改用 xhy target" "最优伪装站: target="
-    "固定下来（新建节点直接用）？" "没有匹配的编号，未做任何替换" "配置（路由/DNS/日志）"
-    "  16) 备份 / 恢复" "保持原 target 不变" "建议套 CDN / 反代"
-    "---- 节点 ----" "---- 系统 ----" "---- 维护 ----"
-    "上面每个站点后已标注结果" "选择类型 \[3\]: " "直接回车 = 保持原值。"
-    "连接地址（域名或 IP）" "扫描范围默认是本机公网" "扫描完成但没有可用站点"
-    "非 CDN（源站直连）" "安装脚本本体与命令入口" "路径 (回车随机生成)"
-    "缓存里的候选都已失效" "内核网络优化与防火墙" "选择 \[0\]: "
-    "选择 \[1\]: " "   5) 删除节点" "当前 target:"
-    "没有新的伪装站可应用" "不需要公网入站端口" "完整安装 / 重装"
-    "Xray 版本通道" "尚未安装 Xray" "安装服务与开机自启"
-    "渲染配置并启动服务" "每个候选后面都标注" "BBR / 内核"
-    "支持被动 TFO" "无结果会自动扩到" "   0) 退出"
-    "指纹 / TFO" "备份 / 恢复" "客户端连接地址"
+    "磁盘余量不足 120 MB，跳过旧二进制备份（" "（这一步最慢；卡住多半是软件源，见文末提示）" "（下次运行生效；本次可用 XHY_LANG="
+    "2) 内置地区库（按 VPS 出口国家匹配）" "SNI（target 是 IP 时必填域名）" "去掉 --require-tfo 按质量选"
+    "伪装站（target / dest）来源：" "  xhy lang zh    强制中文" "里没有支持被动 TFO 的站点，自动扩大到"
+    "  2) 指定地区（列出现有地区与候选数）" "Brutal 上行 Mbps（空=不启用）" "Brutal 下行 Mbps（空=不启用）"
+    "只有 REALITY 节点有伪装站（当前 " "伪装站（target / dest）来源" "3) 手动指定 target / SNI"
+    "xhy check 里有「磁盘余量」一行" "内置地区库（按 VPS 出口国家匹配）" "  已存在的 REALITY 节点："
+    "UUID（输入 new 重新生成）" "伪装模式 string/proxy" "自动扫描本机机房网段，选最优站点"
+    "脚本本体已就位（本次启动已落地）" "（已按「必须支持 TFO」过滤）" "改为不强制 TFO、按质量重选？"
+    "已完成 %s 个节点的伪装站替换" "客户端连接地址(域名或 IP)" "（回车=1，0=自动取最高分）"
+    "前 个候选都不支持被动 TFO" "SNI（改这个会重签自签证书）" "或换 --cidr 网段再试"
+    "可改用 xhy target" "最优伪装站: target=" "固定下来（新建节点直接用）？"
+    "没有匹配的编号，未做任何替换" "配置（路由/DNS/日志）" "  16) 备份 / 恢复"
+    "保持原 target 不变" "建议套 CDN / 反代" "---- 节点 ----"
+    "---- 系统 ----" "---- 维护 ----" "上面每个站点后已标注结果"
+    "选择类型 \[3\]: " "直接回车 = 保持原值。" "连接地址（域名或 IP）"
+    "扫描范围默认是本机公网" "扫描完成但没有可用站点" "非 CDN（源站直连）"
+    "安装脚本本体与命令入口" "路径 (回车随机生成)" "缓存里的候选都已失效"
+    "内核网络优化与防火墙" "选择 \[0\]: " "选择 \[1\]: "
+    "   5) 删除节点" "当前 target:" "没有新的伪装站可应用"
+    "不需要公网入站端口" "完整安装 / 重装" "Xray 版本通道"
+    "尚未安装 Xray" "安装服务与开机自启" "渲染配置并启动服务"
+    "每个候选后面都标注" "清理前：根分区剩余" "清理后：根分区剩余"
+    "BBR / 内核" "支持被动 TFO" "无结果会自动扩到"
+    "   0) 退出" "指纹 / TFO" "删除旧二进制备份"
+    "删除旧 .bak" "备份 / 恢复" "客户端连接地址"
     "依赖检查与安装" "当前语言 : " "TFO 不支持"
-    "结果已缓存: " "个可用候选（共" "导出分享链接"
+    "结果已缓存: " "个可用候选（共" "磁盘余量 : "
+    "（根分区剩余）" "删除旧状态快照" "导出分享链接"
     "内核网络优化" "自动扫描失败" "创建数据目录"
     "已设置语言为" "TFO 支持" "使用扫描缓存"
     "扫描伪装站" "结果已缓存" "最优伪装站"
@@ -576,44 +591,49 @@ XHY_T_ZH=(
 )
 
 XHY_T_EN=(
-    "Default scan range is this host's /24; with no usable site (or no TFO-capable site when required) it auto-widens to /21 and rescans" "No TFO-capable candidate in this subnet (each site above is labelled); auto-widening to /21 and rescanning" "Install complete. Run xhy add reality to add the first node, or just xhy for the menu."
-    "  xhy lang en    force English (pure ASCII; use when a cloud VNC shows boxes)" "Hysteria2 cert re-issued for the new port/SNI; update pinSHA256 on clients" "Node updated but not active; use xhy snapshots + xhy rollback to revert"
-    "TFO only saves 1 RTT on the first connect and the target carries no proxy traffic; not worth trading site quality for." "  one-shot: XHY_LANG=en xhy   or  XHY_ASCII=1 xhy" "No REALITY node yet; the new site is saved as the default target for the next node"
-    "Now run xhy add reality to add the first node, or just xhy for the menu" "No TFO-capable site in cache; auto-widening the subnet to rescan (not the same /24)" "  xhy lang auto  detect from terminal / locale (default)"
-    "TFO auto/on/off (auto = re-probe the new target)" "  10) Firewall              11) BBR / kernel" "  12) Service               13) Xray channel"
-    "1) Auto-scan this datacenter subnet and pick the best site (recommended; cache reused, no rescan)" " (safe mode: SSH brute-force guard + allow node ports, no changes to existing rules)" "   3) List nodes             4) Export links"
+    "Default scan range is this host's /24; with no usable site (or no TFO-capable site when required) it auto-widens to /21 and rescans" "Root filesystem has <200 MB free. A full disk makes sshd unable to write session files, so SSH stops responding while the proxy keeps running. Run xhy clean first" "No TFO-capable candidate in this subnet (each site above is labelled); auto-widening to /21 and rescanning"
+    "Install complete. Run xhy add reality to add the first node, or just xhy for the menu." "  xhy lang en    force English (pure ASCII; use when a cloud VNC shows boxes)" "Hysteria2 cert re-issued for the new port/SNI; update pinSHA256 on clients"
+    "Node updated but not active; use xhy snapshots + xhy rollback to revert" "TFO only saves 1 RTT on the first connect and the target carries no proxy traffic; not worth trading site quality for." "  one-shot: XHY_LANG=en xhy   or  XHY_ASCII=1 xhy"
+    "No REALITY node yet; the new site is saved as the default target for the next node" "Now run xhy add reality to add the first node, or just xhy for the menu" "No TFO-capable site in cache; auto-widening the subnet to rescan (not the same /24)"
+    "  xhy lang auto  detect from terminal / locale (default)" "TFO auto/on/off (auto = re-probe the new target)" "  10) Firewall              11) BBR / kernel"
+    "  12) Service               13) Xray channel" "1) Auto-scan this datacenter subnet and pick the best site (recommended; cache reused, no rescan)" "Disk free <120 MB, skipping the rollback copy (a failed switch needs a manual reinstall)"
+    "backup / restore / clean (free disk space)" " (safe mode: SSH brute-force guard + allow node ports, no changes to existing rules)" "   3) List nodes             4) Export links"
     "No passive-TFO site in this subnet (/24) or the same rack (/21)." "Scan found no usable site; use 1) by region or 3) specify manually" "TLS 1.3 / H2 / no redirect / not CDN (origin direct)"
     "   1) Add node               2) Edit node" "  14) Update                15) Uninstall" "  7) Scan this rack's subnet (optional TFO, optional node retarget)"
     "Only TFO-capable sites? (y/N, Enter = no): " "; scanner_pick auto-widens to /21 and rescans." "   6) Full install           7) Self check"
     "Non-interactive shell: install complete, run xhy later to open the menu." "Candidate sites (by quality; TFO = target supports passive TFO)" "Pick [1-%d] (Enter=1, 0=best score): "
-    "Xray is not installed, run: xhy install" " (TFO not required; the list may still contain TFO sites)" "   8) Config (routing/DNS)   9) Camouflage site"
-    "shortId (type new to regenerate; clients must update)" "Edit a node; no args = pick by number (Enter = keep)" "Target site (IP:port or domain:port)"
+    "Only backup / restore / clean" "Xray is not installed, run: xhy install" " (TFO not required; the list may still contain TFO sites)"
+    "   8) Config (routing/DNS)   9) Camouflage site" "shortId (type new to regenerate; clients must update)" "Edit a node; no args = pick by number (Enter = keep)"
+    "Target site (IP:port or domain:port)" "Drop old core backups / snapshots (needed on small disks)" "A full root fs makes sshd unreachable while the proxy keeps working; "
     "each candidate is labelled TFO: yes / no" "Region number (or code, Enter = cancel)" "Replace which (all / 1,3 / Enter = none)"
-    " (this is the slowest step; stalls are usually the package mirror)" " (effective next run; use XHY_LANG=" "2) Built-in region library (match VPS egress country)"
-    "SNI (required when target is an IP)" "drop --require-tfo to pick by quality" "Camouflage site (target / dest) source:"
-    "  xhy lang zh    force Chinese" " has no TFO-capable site, auto-widening to " "  2) Pick a region (shows regions and candidate counts)"
-    "Brutal up Mbps (empty = off)" "Brutal down Mbps (empty = off)" "Only REALITY nodes have a target site (current "
-    "Camouflage site (target / dest) source" "3) Specify target / SNI manually" "Built-in region library (match VPS egress country)"
-    "  Existing REALITY nodes:" "UUID (type new to regenerate)" "Masquerade mode string/proxy"
-    "Auto-scan this datacenter subnet and pick the best site" "Script and command entry already installed (this run)" " (filtered: TFO required)"
-    "Retry without requiring TFO (pick by quality)? " "%s node(s) retargeted" "Client address (domain or IP)"
-    "(Enter=1, 0=best score)" "no TFO-capable candidates" "SNI (changing it re-issues the self-signed cert)"
-    "or try another --cidr subnet" "fall back to xhy target" "Best camouflage site: target="
-    "Pin it (new nodes use it)? " "No matching number; nothing replaced" "Config (routing/DNS/log)"
-    "  16) Backup / restore" "Keeping the current target" "put it behind a CDN / reverse proxy"
-    "---- Nodes ----" "---- System ----" "---- Maintenance ----"
-    "each site above is labelled" "Select type [3]: " "Press Enter to keep the current value."
-    "Client address (domain or IP)" "Default scan range is the public" "Scan finished but no usable site"
-    "not CDN (origin direct)" "Install script and command entry" "Path (Enter = random)"
-    "all cached candidates are stale" "Kernel network tuning and firewall" "Select [0]: "
-    "Select [1]: " "   5) Delete node" "Current target: "
-    "No new camouflage site to apply" "no public inbound port needed" "Full install / reinstall"
-    "Xray version channel" "Xray is not installed" "Install service and enable at boot"
-    "Render config and start service" "each candidate is labelled with" "BBR / kernel"
-    "supports passive TFO" "auto-widens to" "   0) Exit"
-    "Fingerprint / TFO" "Backup / restore" "Client address"
+    "Disk free <120 MB, skipping the core backup (" " (this is the slowest step; stalls are usually the package mirror)" " (effective next run; use XHY_LANG="
+    "2) Built-in region library (match VPS egress country)" "SNI (required when target is an IP)" "drop --require-tfo to pick by quality"
+    "Camouflage site (target / dest) source:" "  xhy lang zh    force Chinese" " has no TFO-capable site, auto-widening to "
+    "  2) Pick a region (shows regions and candidate counts)" "Brutal up Mbps (empty = off)" "Brutal down Mbps (empty = off)"
+    "Only REALITY nodes have a target site (current " "Camouflage site (target / dest) source" "3) Specify target / SNI manually"
+    "xhy check shows the free-space line" "Built-in region library (match VPS egress country)" "  Existing REALITY nodes:"
+    "UUID (type new to regenerate)" "Masquerade mode string/proxy" "Auto-scan this datacenter subnet and pick the best site"
+    "Script and command entry already installed (this run)" " (filtered: TFO required)" "Retry without requiring TFO (pick by quality)? "
+    "%s node(s) retargeted" "Client address (domain or IP)" "(Enter=1, 0=best score)"
+    "no TFO-capable candidates" "SNI (changing it re-issues the self-signed cert)" "or try another --cidr subnet"
+    "fall back to xhy target" "Best camouflage site: target=" "Pin it (new nodes use it)? "
+    "No matching number; nothing replaced" "Config (routing/DNS/log)" "  16) Backup / restore"
+    "Keeping the current target" "put it behind a CDN / reverse proxy" "---- Nodes ----"
+    "---- System ----" "---- Maintenance ----" "each site above is labelled"
+    "Select type [3]: " "Press Enter to keep the current value." "Client address (domain or IP)"
+    "Default scan range is the public" "Scan finished but no usable site" "not CDN (origin direct)"
+    "Install script and command entry" "Path (Enter = random)" "all cached candidates are stale"
+    "Kernel network tuning and firewall" "Select [0]: " "Select [1]: "
+    "   5) Delete node" "Current target: " "No new camouflage site to apply"
+    "no public inbound port needed" "Full install / reinstall" "Xray version channel"
+    "Xray is not installed" "Install service and enable at boot" "Render config and start service"
+    "each candidate is labelled with" "Before: root filesystem free" "After: root filesystem free"
+    "BBR / kernel" "supports passive TFO" "auto-widens to"
+    "   0) Exit" "Fingerprint / TFO" "Removed old core backups: "
+    "Removed old .bak files: " "Backup / restore" "Client address"
     "Dependency check and install" "Language : " "TFO: no"
-    "Results cached: " " usable candidates (of " "Export share links"
+    "Results cached: " " usable candidates (of " "Disk free : "
+    " (root filesystem)" "Removed old snapshots: " "Export share links"
     "kernel network tuning" "Auto-scan failed" "Create data directories"
     "Language set to" "TFO: yes" "Using scan cache"
     "Scan camouflage sites" "Results cached" "Best camouflage site"
@@ -1188,7 +1208,16 @@ xray_install() {
     if [[ -x "$XRAY_BIN" ]]; then
         oldver="$(xray_installed_version)"
         install -d -m 0700 "$XHY_BACKUP"
-        cp -a "$XRAY_BIN" "$XHY_BACKUP/xray-${oldver//[^0-9A-Za-z._-]/_}-$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
+        # 一个静态二进制约 32 MB。小硬盘 VPS（很多 40 GB 以内的机型根分区只有
+        # 400-500 MB）切几次 channel 就能把盘塞满，而盘满会让 sshd 直接失联。
+        # 余量不够就跳过备份：备份是便利，不是必需品。
+        if (( $(disk_free_mb "$XHY_BACKUP") < 120 )); then
+            warn "磁盘余量不足 120 MB，跳过旧二进制备份（$XHY_BACKUP）"
+            warn "切回旧版本需要重新下载；可先 xhy clean 清理历史备份"
+        else
+            cp -a "$XRAY_BIN" "$XHY_BACKUP/xray-${oldver//[^0-9A-Za-z._-]/_}-$(date +%Y%m%d%H%M%S)" 2>/dev/null \
+                || warn "旧二进制备份失败（磁盘？），继续安装"
+        fi
     fi
     asset="Xray-linux-${XHY_ARCH}.zip"
     tmp="$(mktemp -d)" || die "无法创建临时目录"
@@ -4460,6 +4489,74 @@ backup_restore() {
     ok "还原完成（配置已按 nodes 重建并通过 xray -test）"
 }
 
+# ---------------------------------------------------------------------------
+# xhy clean — 小盘 VPS 的救命命令
+# ---------------------------------------------------------------------------
+# 根分区 400-500 MB 的机型（阿里云/腾讯云的入门配置很常见）最容易被这里塞满：
+# 切一次 `xhy core channel` 就多一个 ~30 MB 的旧二进制副本，再叠加手工备份，
+# 盘一满 sshd 就写不了会话文件 —— 症状是「SSH 突然连不上、但代理还能用」。
+# 只保留最近若干份，其余删除。
+
+cmd_clean() {
+    local what="${1:-all}" keep_bin=1 keep_snap=5 keep_bak=20
+    local before after n=0 f i
+    local -a bins=() snaps=() baks=()
+    need_root
+    init_dirs
+    before="$(disk_free_mb /)"
+
+    while IFS= read -r f; do bins+=("$f"); done < <(ls -1t "$XHY_BACKUP"/xray-* 2>/dev/null || true)
+    while IFS= read -r f; do snaps+=("$f"); done < <(ls -1t "$XHY_SNAPSHOTS"/state.*.tar.gz 2>/dev/null || true)
+    while IFS= read -r f; do baks+=("$f"); done < <(ls -1t "$XHY_BACKUP"/*.bak 2>/dev/null || true)
+
+    printf '\n清理前：根分区剩余 %s MB\n' "$before"
+    printf '  二进制备份 %d 个 / 状态快照 %d 个 / .bak %d 个\n' \
+        "${#bins[@]}" "${#snaps[@]}" "${#baks[@]}"
+    du -sh "$XHY_BACKUP" "$XHY_SNAPSHOTS" 2>/dev/null | sed 's/^/  /' || true
+
+    case "$what" in
+        backups|all)
+            if (( ${#bins[@]} > keep_bin )); then
+                for (( i = keep_bin; i < ${#bins[@]}; i++ )); do
+                    if rm -f "${bins[$i]}"; then n=$((n + 1)); fi
+                done
+                ok "删除旧二进制备份 $(( ${#bins[@]} - keep_bin )) 个（保留最新 $keep_bin 个）"
+            else
+                info "二进制备份只有 ${#bins[@]} 个，无需清理"
+            fi ;;
+    esac
+
+    case "$what" in
+        snapshots|all)
+            if (( ${#snaps[@]} > keep_snap )); then
+                for (( i = keep_snap; i < ${#snaps[@]}; i++ )); do
+                    if rm -f "${snaps[$i]}"; then n=$((n + 1)); fi
+                done
+                ok "删除旧状态快照 $(( ${#snaps[@]} - keep_snap )) 个（保留最新 $keep_snap 个，xhy rollback 仍可用）"
+            else
+                info "状态快照只有 ${#snaps[@]} 个，无需清理"
+            fi ;;
+    esac
+
+    case "$what" in
+        backups|all)
+            if (( ${#baks[@]} > keep_bak )); then
+                for (( i = keep_bak; i < ${#baks[@]}; i++ )); do
+                    if rm -f "${baks[$i]}"; then n=$((n + 1)); fi
+                done
+                ok "删除旧 .bak $(( ${#baks[@]} - keep_bak )) 个（保留最新 $keep_bak 个）"
+            fi ;;
+    esac
+
+    after="$(disk_free_mb /)"
+    printf '\n清理后：根分区剩余 %s MB（释放 %s MB，删除 %d 个文件）\n' \
+        "$after" "$(( after - before ))" "$n"
+    if (( after < 200 )); then
+        warn "余量仍不足 200 MB。可再清：$XHY_BACKUP 里的手工大文件、apt/apk 缓存、/var/log"
+    fi
+    return 0
+}
+
 # ===================== lib/update.sh =====================
 # xray-hy / script, core, geodata and configuration updates.
 
@@ -4549,9 +4646,13 @@ update_core() {
     info "版本通道 $(xray_channel) -> 目标 $ver"
     # Keep the working binary so an incompatible new core can be rolled back
     # automatically (idea borrowed from easyxray's version switch).
-    if [[ -x "$XRAY_BIN" ]]; then
+    # 自动回滚副本同样要 ~30 MB。盘紧时放弃它：宁可少一层保险，也不能把
+    # 根分区塞满（盘满的第一个症状是 sshd 直接失去响应）。
+    if [[ -x "$XRAY_BIN" ]] && (( $(disk_free_mb "$XHY_BACKUP") >= 120 )); then
         rollback="$(mktemp "$XHY_BACKUP/xray-rollback.XXXXXX" 2>/dev/null || true)"
         if [[ -n "$rollback" ]] && cp -a "$XRAY_BIN" "$rollback"; then :; else rollback=""; fi
+    elif [[ -x "$XRAY_BIN" ]]; then
+        warn "磁盘余量不足 120 MB，跳过自动回滚副本（换版失败需手动重装旧版本）"
     fi
     xray_install "$ver"
     if [[ -s "$XHY_ETC/config.json" ]] && ! xray_config_test >/dev/null 2>&1; then
@@ -4621,6 +4722,12 @@ self_check() {
         printf '出口 IPv6: %s（REALITY/hy2 客户端可直接用它做双栈连接）\n' "$_ip6"
     else
         printf '出口 IPv6: 无\n'
+    fi
+    local _free
+    _free="$(disk_free_mb /)"
+    printf '磁盘余量 : %s MB（根分区剩余）\n' "$_free"
+    if (( _free < 200 )); then
+        warn "根分区余量不足 200 MB：盘满会让 sshd 写不了会话文件、SSH 直接连不上。先跑 xhy clean"
     fi
     printf '%s\n' "--------------------------------------"
     core_status
@@ -5033,9 +5140,12 @@ Usage: xhy <command> [options]
     update [script|core|geodata|config|all]
     update script --yes [--allow-major]   Non-interactive (major bump needs flag)
 
-  Backup & export
+  Backup, export & disk
     backup [--out FILE]         Back up /etc/xray-hy (per-file SHA256 list)
     restore <file>              Verify then restore (auto rollback on failure)
+    clean [backups|snapshots|all]  Drop old core backups / snapshots (small disks)
+                                A full root fs makes sshd unreachable while the
+                                proxy keeps working; check `xhy check` disk line
     export clash|singbox [--out F]  Export mihomo/Clash or sing-box configs
 
   Service & uninstall
@@ -5140,9 +5250,12 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
     update [script|core|geodata|config|all]
     update script --yes [--allow-major]   非交互更新（跨主版本需 --allow-major）
 
-  备份与导出
+  备份、导出与磁盘
     backup [--out FILE]              备份 /etc/xray-hy（内含逐文件 SHA256 清单）
     restore <备份文件>               校验清单后还原（先备份现状，失败自动回滚）
+    clean [backups|snapshots|all]    清理旧核心二进制备份 / 旧快照（小硬盘必用）
+                                     根分区满时 sshd 会连不上、而代理仍在工作；
+                                     xhy check 里有「磁盘余量」一行
     export clash|singbox [--out F]   导出 mihomo/Clash 或 sing-box 节点配置
 
   服务与卸载
@@ -5549,11 +5662,12 @@ EOF
                esac ;;
            15) cmd_uninstall; return 0 ;;
            16) local ba
-               ba="$(ask 'backup / restore' 'backup')"
+               ba="$(ask 'backup / restore / clean（清理旧备份释放磁盘）' 'backup')"
                case "$ba" in
                    backup) backup_create ;;
                    restore) backup_restore "$(ask '备份文件路径' '')" ;;
-                   *) warn "只支持 backup 或 restore" ;;
+                   clean)  cmd_clean all ;;
+                   *) warn "只支持 backup / restore / clean" ;;
                esac ;;
             0) return 0 ;;
         esac
@@ -5670,6 +5784,7 @@ main() {
         rollback)   rollback_config "${1:-}" ;;
         target)     target_menu ;;
         edit)       node_edit "$@" ;;
+        clean)      cmd_clean "$@" ;;
         scan)       cmd_scan "$@" ;;
         firewall)   case "${1:-status}" in
                         # --quiet is passed by the boot unit; forward it so boot

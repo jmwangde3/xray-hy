@@ -87,9 +87,13 @@ update_core() {
     info "版本通道 $(xray_channel) -> 目标 $ver"
     # Keep the working binary so an incompatible new core can be rolled back
     # automatically (idea borrowed from easyxray's version switch).
-    if [[ -x "$XRAY_BIN" ]]; then
+    # 自动回滚副本同样要 ~30 MB。盘紧时放弃它：宁可少一层保险，也不能把
+    # 根分区塞满（盘满的第一个症状是 sshd 直接失去响应）。
+    if [[ -x "$XRAY_BIN" ]] && (( $(disk_free_mb "$XHY_BACKUP") >= 120 )); then
         rollback="$(mktemp "$XHY_BACKUP/xray-rollback.XXXXXX" 2>/dev/null || true)"
         if [[ -n "$rollback" ]] && cp -a "$XRAY_BIN" "$rollback"; then :; else rollback=""; fi
+    elif [[ -x "$XRAY_BIN" ]]; then
+        warn "磁盘余量不足 120 MB，跳过自动回滚副本（换版失败需手动重装旧版本）"
     fi
     xray_install "$ver"
     if [[ -s "$XHY_ETC/config.json" ]] && ! xray_config_test >/dev/null 2>&1; then
@@ -159,6 +163,12 @@ self_check() {
         printf '出口 IPv6: %s（REALITY/hy2 客户端可直接用它做双栈连接）\n' "$_ip6"
     else
         printf '出口 IPv6: 无\n'
+    fi
+    local _free
+    _free="$(disk_free_mb /)"
+    printf '磁盘余量 : %s MB（根分区剩余）\n' "$_free"
+    if (( _free < 200 )); then
+        warn "根分区余量不足 200 MB：盘满会让 sshd 写不了会话文件、SSH 直接连不上。先跑 xhy clean"
     fi
     printf '%s\n' "--------------------------------------"
     core_status

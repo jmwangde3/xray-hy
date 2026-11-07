@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.6.0}"
+XHY_VERSION="${XHY_VERSION:-1.6.1}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -142,6 +142,16 @@ atomic_write() {
     # failed write (that produced misleading "配置生成失败" aborts).
     rm -f "$tmp" || true
     return 0
+}
+
+# 根分区剩余 MB。df -Pm 是 POSIX 格式，BusyBox 也支持；-m 直接给 MB，
+# 免得自己拿 1K 块换算。取不到时返回 0（调用方按"没空间"处理更安全）。
+disk_free_mb() {
+    local p="${1:-$XHY_ETC}" v
+    v="$(df -Pm "$p" 2>/dev/null | awk 'NR==2 {print $4; exit}')"
+    # 路径不存在 / df 不支持 -m 时都会得到空串；调用方按 0 处理更安全。
+    [[ "$v" =~ ^[0-9]+$ ]] || v=0
+    printf '%s' "$v"
 }
 
 backup_file() {

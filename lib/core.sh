@@ -68,7 +68,16 @@ xray_install() {
     if [[ -x "$XRAY_BIN" ]]; then
         oldver="$(xray_installed_version)"
         install -d -m 0700 "$XHY_BACKUP"
-        cp -a "$XRAY_BIN" "$XHY_BACKUP/xray-${oldver//[^0-9A-Za-z._-]/_}-$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
+        # 一个静态二进制约 32 MB。小硬盘 VPS（很多 40 GB 以内的机型根分区只有
+        # 400-500 MB）切几次 channel 就能把盘塞满，而盘满会让 sshd 直接失联。
+        # 余量不够就跳过备份：备份是便利，不是必需品。
+        if (( $(disk_free_mb "$XHY_BACKUP") < 120 )); then
+            warn "磁盘余量不足 120 MB，跳过旧二进制备份（$XHY_BACKUP）"
+            warn "切回旧版本需要重新下载；可先 xhy clean 清理历史备份"
+        else
+            cp -a "$XRAY_BIN" "$XHY_BACKUP/xray-${oldver//[^0-9A-Za-z._-]/_}-$(date +%Y%m%d%H%M%S)" 2>/dev/null \
+                || warn "旧二进制备份失败（磁盘？），继续安装"
+        fi
     fi
     asset="Xray-linux-${XHY_ARCH}.zip"
     tmp="$(mktemp -d)" || die "无法创建临时目录"

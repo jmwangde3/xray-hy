@@ -220,9 +220,12 @@ Usage: xhy <command> [options]
     update [script|core|geodata|config|all]
     update script --yes [--allow-major]   Non-interactive (major bump needs flag)
 
-  Backup & export
+  Backup, export & disk
     backup [--out FILE]         Back up /etc/xray-hy (per-file SHA256 list)
     restore <file>              Verify then restore (auto rollback on failure)
+    clean [backups|snapshots|all]  Drop old core backups / snapshots (small disks)
+                                A full root fs makes sshd unreachable while the
+                                proxy keeps working; check `xhy check` disk line
     export clash|singbox [--out F]  Export mihomo/Clash or sing-box configs
 
   Service & uninstall
@@ -327,9 +330,12 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
     update [script|core|geodata|config|all]
     update script --yes [--allow-major]   非交互更新（跨主版本需 --allow-major）
 
-  备份与导出
+  备份、导出与磁盘
     backup [--out FILE]              备份 /etc/xray-hy（内含逐文件 SHA256 清单）
     restore <备份文件>               校验清单后还原（先备份现状，失败自动回滚）
+    clean [backups|snapshots|all]    清理旧核心二进制备份 / 旧快照（小硬盘必用）
+                                     根分区满时 sshd 会连不上、而代理仍在工作；
+                                     xhy check 里有「磁盘余量」一行
     export clash|singbox [--out F]   导出 mihomo/Clash 或 sing-box 节点配置
 
   服务与卸载
@@ -736,11 +742,12 @@ EOF
                esac ;;
            15) cmd_uninstall; return 0 ;;
            16) local ba
-               ba="$(ask 'backup / restore' 'backup')"
+               ba="$(ask 'backup / restore / clean（清理旧备份释放磁盘）' 'backup')"
                case "$ba" in
                    backup) backup_create ;;
                    restore) backup_restore "$(ask '备份文件路径' '')" ;;
-                   *) warn "只支持 backup 或 restore" ;;
+                   clean)  cmd_clean all ;;
+                   *) warn "只支持 backup / restore / clean" ;;
                esac ;;
             0) return 0 ;;
         esac
@@ -857,6 +864,7 @@ main() {
         rollback)   rollback_config "${1:-}" ;;
         target)     target_menu ;;
         edit)       node_edit "$@" ;;
+        clean)      cmd_clean "$@" ;;
         scan)       cmd_scan "$@" ;;
         firewall)   case "${1:-status}" in
                         # --quiet is passed by the boot unit; forward it so boot
