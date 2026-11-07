@@ -135,8 +135,8 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.11.0"
-XHY_BUILD="8d78cdba0111"
+XHY_VERSION="1.11.1"
+XHY_BUILD="a97546cc9217"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -154,7 +154,7 @@ fi
 # ===================== lib/common.sh =====================
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.11.0}"
+XHY_VERSION="${XHY_VERSION:-1.11.1}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -5778,18 +5778,23 @@ relay_target_tag() {
 # entry 路由规则：输出「逗号分隔的 rule 对象」，无外层方括号（钩子约定）。
 # 顺序有意义：域名规则在前、geoip:us 在后，域名命中就不再解析 IP。
 relay_routing_rules_json() {
-    local c out="" doms="" sep="" tgt
+    local c out="" doms="" sep="" tgt key
     tgt="$(relay_target_tag)"
+    # Xray 26.x：routing 规则指向 balancer 必须用 balancerTag；写成 outboundTag
+    # 会被 dispatcher 当成一个不存在的出站（non existing outTag: us-relay-lb）
+    # 直接丢包，AI 分类流量全 000。回落关掉时指裸出站，仍用 outboundTag。
+    key="outboundTag"
+    if relay_fallback_on; then key="balancerTag"; fi
     for c in ${RELAY_CATEGORIES//,/ }; do
         [[ -n "$c" ]] || continue
         doms+="${sep}\"geosite:${c}\""; sep=","
     done
     if [[ -n "$doms" ]]; then
-        out="{\"type\":\"field\",\"domain\":[${doms}],\"outboundTag\":\"${tgt}\"}"
+        out="{\"type\":\"field\",\"domain\":[${doms}],\"${key}\":\"${tgt}\"}"
     fi
     if [[ "${RELAY_GEOIP_US:-on}" != "off" ]]; then
         [[ -n "$out" ]] && out+=","
-        out+="{\"type\":\"field\",\"ip\":[\"geoip:us\"],\"outboundTag\":\"${tgt}\"}"
+        out+="{\"type\":\"field\",\"ip\":[\"geoip:us\"],\"${key}\":\"${tgt}\"}"
     fi
     printf '%s' "$out"
 }

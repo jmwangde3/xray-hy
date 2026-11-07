@@ -69,7 +69,7 @@ rules_order_ok() {
 import json,sys
 cfg=json.load(open(sys.argv[1]))
 rules=cfg["routing"]["rules"]
-relay=[i for i,r in enumerate(rules) if r.get("outboundTag","").startswith("us-relay")]
+relay=[i for i,r in enumerate(rules) if r.get("outboundTag", r.get("balancerTag","")).startswith("us-relay")]
 block=[i for i,r in enumerate(rules) if r.get("outboundTag")=="block"]
 assert relay, "no relay rule"
 assert block, "no base block rule"
@@ -118,7 +118,7 @@ chk "sockopt 带 BBR"                  'grep -q "\"tcpcongestion\":\"bbr\"" "$XH
 echo "===== v1.11.0：失联回落（balancer + burstObservatory） ====="
 chk "config 含 balancers"             'grep -q "\"balancers\"" "$XHY_ETC/config.json"'
 chk "balancer 落在 routing 内"        'balancer_in_routing'
-chk "路由规则指向 balancer"           'grep -q "\"outboundTag\":\"us-relay-lb\"" "$XHY_ETC/config.json"'
+chk "路由规则指向 balancer"           'grep -q "\"balancerTag\":\"us-relay-lb\"" "$XHY_ETC/config.json"'
 chk "探活目标 gstatic 204"            'grep -q "generate_204" "$XHY_ETC/config.json"'
 chk "回落配置仍合法"                  'json_ok "$XHY_ETC/config.json"'
 chk "status 报回落 on"                'relay_status | grep -q "回落   : on"'

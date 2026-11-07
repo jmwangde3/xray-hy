@@ -2,6 +2,11 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.11.1 — 2026-11-08
+
+- fix(relay): routing 规则指向 balancer 必须用 balancerTag（Xray 26.x 把 outboundTag 当出站 tag 查，写 us-relay-lb 报 non existing outTag 并丢包，AI 分类流量全 000）
+- test(relay): 路由规则断言改认 balancerTag，rules_order_ok 兼容两种字段
+
 ## v1.11.0 — 2026-11-08
 
 - feat(relay): 中继这一跳恒为 security=none —— 两端自有机器 + 云厂商内网，客户端到目标站 TLS 已端到端，再套一层只多一次握手与落地机每字节一遍 AES。--tls/--sni/--pin 停用为兼容占位（不再产出任何 tlsSettings）；v1.10.x 的旧 relay.env 读入时自动降级为 none
