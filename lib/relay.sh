@@ -68,7 +68,7 @@ Usage: xhy relay <command> [options]
   entry    Forward AI/US traffic to the landing host.
            xhy relay entry --to <land-ip>:<port> [--uuid UUID]
                           [--categories a,b,c|ai|media|none] [--no-geoip-us]
-                          [--tls] [--sni NAME] [--pin BASE64] [--tag TAG]
+                          [--tls] [--sni NAME] [--pin HEX] [--tag TAG]
   reapply  Re-inject after the config was rebuilt / restored from a snapshot.
   status   Show this host's role, port, upstream and live checks.
   test     Self-check: config shape, listening port, firewall rule, TCP reachability.
@@ -89,7 +89,7 @@ EOF
   entry    把 AI / 美区流量转发到落地机。
            xhy relay entry --to <落地机IP>:<端口> [--uuid UUID]
                           [--categories a,b,c|ai|media|none] [--no-geoip-us]
-                          [--tls] [--sni NAME] [--pin BASE64] [--tag TAG]
+                          [--tls] [--sni NAME] [--pin HEX] [--tag TAG]
   reapply  配置被重建 / 从快照还原后重新注入（改造后一般用不到了，留作兜底）
   status   看本机角色、端口、上游与实时检查
   test     自检：配置形状、端口监听、防火墙规则、TCP 连通性与往返耗时
@@ -190,17 +190,39 @@ relay_out_tag() { printf '%s' "${RELAY_TAG:-$RELAY_DEFAULT_TAG}"; }
 # JSON 片段
 # ---------------------------------------------------------------------------
 
+# 证书 pin 统一成小写 64 位 hex：Xray 26.x 的 pinnedPeerCertSha256 只吃 hex。
+# 入参可以是 hex（大小写均可，含冒号分隔的都认）或旧版的 base64；空入参返回空。
+relay_pin_hex() {
+    local pin="${1:-}" hex
+    pin="${pin//[[:space:]]/}"; pin="${pin//:/}"
+    [[ -n "$pin" ]] || return 0
+    if [[ "$pin" =~ ^[0-9a-fA-F]{64}$ ]]; then
+        printf '%s' "${pin,,}"
+        return 0
+    fi
+    hex="$(printf '%s' "$pin" | base64 -d 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n' || true)"
+    if [[ ! "$hex" =~ ^[0-9a-f]{64}$ ]]; then
+        relay_say err "证书 pin 无法识别（要 64 位 hex，或旧版 base64）：${pin:0:16}…" \
+                      "unrecognised certificate pin (want 64 hex chars, or legacy base64)"
+        return 1
+    fi
+    printf '%s' "$hex"
+}
+
 # $1 = 上游地址（SNI 缺省用它）
 relay_stream_client_json() {
     local host="${1:-}"
     if [[ "$RELAY_SECURITY" == "tls" ]]; then
-        local extra="" sni
+        local extra="" sni pin
         sni="${RELAY_SNI:-$host}"
-        if [[ -n "$RELAY_PIN" ]]; then
-            # 自签证书 + 证书链 pin：不需要 CA，也不怕中间人（pin 对不上就断）
-            extra=",\"pinnedPeerCertificateChainSha256\":[\"$RELAY_PIN\"]"
+        # Xray 26.x 移除了 allowInsecure：有 pin 用 pinnedPeerCertSha256（单证书指纹），
+        # 没 pin 用 verifyPeerCertByName（按 SAN 校验名字，证书必须带 SAN）。
+        pin="$(relay_pin_hex "$RELAY_PIN")" || return 1
+        if [[ -n "$pin" ]]; then
+            # 自签证书 + 证书指纹 pin：不依赖 CA，也不怕中间人（pin 对不上就断）
+            extra=",\"pinnedPeerCertSha256\":\"$pin\""
         else
-            extra=",\"allowInsecure\":true"
+            extra=",\"verifyPeerCertByName\":\"$sni\""
         fi
         printf '{"network":"tcp","security":"tls","tlsSettings":{"serverName":"%s"%s}}' "$sni" "$extra"
     else
@@ -233,12 +255,14 @@ EOF
 
 # entry 出站（转发到落地机中继端口）
 relay_outbound_json() {
-    local hp host port
+    local hp host port ss
     hp="$(relay_split_upstream "$RELAY_UPSTREAM")" || return 1
     host="${hp% *}"; port="${hp##* }"
     [[ "$host" == "$RELAY_UPSTREAM" ]] && return 1
+    # 流传输片段单独取，失败就别产出半截 JSON（坏 JSON 会让 xray 起不来）
+    ss="$(relay_stream_client_json "$host")" || { relay_say err "中继出站片段生成失败" "failed to build relay outbound stream"; return 1; }
     printf '{"protocol":"vless","tag":"%s","settings":{"vnext":[{"address":"%s","port":%s,"users":[{"id":"%s","encryption":"none"}]}]},"streamSettings":%s}' \
-        "$(relay_out_tag)" "$host" "$port" "$RELAY_UUID" "$(relay_stream_client_json "$host")"
+        "$(relay_out_tag)" "$host" "$port" "$RELAY_UUID" "$ss"
 }
 
 # entry 路由规则：输出「逗号分隔的 rule 对象」，无外层方括号（钩子约定）。
@@ -366,11 +390,14 @@ relay_fw_present() {
 # 裸奔。加 TLS 后即使源 IP 限制被绕开，没有 pin 也连不上。
 # ---------------------------------------------------------------------------
 relay_tls_pin_of() {
-    local crt="$1"
+    # Xray >= 26.x 的 pinnedPeerCertSha256 只吃「hex」，不是 base64。
+    # 旧版用 base64 会导致 x509: certificate signed by unknown authority。
+    local crt="$1" raw
     have_cmd openssl || return 1
-    openssl x509 -in "$crt" -outform DER 2>/dev/null \
-        | openssl dgst -sha256 -binary 2>/dev/null \
-        | openssl base64 2>/dev/null | tr -d '\r\n'
+    raw="$(openssl x509 -in "$crt" -outform DER 2>/dev/null \
+        | openssl dgst -sha256 -hex 2>/dev/null)"
+    [[ -n "$raw" ]] || return 1
+    printf '%s' "${raw##* }" | tr -d '\r\n' | tr 'A-F' 'a-f'
 }
 
 relay_tls_ensure() {
@@ -391,9 +418,18 @@ relay_tls_ensure() {
     crt="$XHY_CERTS/relay_${port}.crt"
     key="$XHY_CERTS/relay_${port}.key"
     RELAY_SNI="${sni:-relay-${port}}"
+    # 历史版本只写了 CN 没写 SAN，Go 1.27 / Xray 26.x 会直接拒
+    # （x509: certificate relies on legacy Common Name field, use SANs instead）。
+    # 遇到这种旧证书就地重签，别让用户手动删。
+    if [[ -s "$crt" ]] && ! openssl x509 -in "$crt" -noout -text 2>/dev/null \
+            | grep -q "Subject Alternative Name"; then
+        relay_say info "旧证书缺 SAN，重签：$crt" "legacy cert lacks SAN, re-issuing: $crt"
+        rm -f "$crt" "$key"
+    fi
     if [[ ! -s "$crt" || ! -s "$key" ]]; then
         openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
             -subj "/CN=${RELAY_SNI:-relay}" \
+            -addext "subjectAltName=DNS:${RELAY_SNI:-relay}" \
             -keyout "$key" -out "$crt" >/dev/null 2>&1 \
             || { relay_say err "自签证书生成失败" "self-signed certificate generation failed"; return 1; }
         chmod 600 "$key" 2>/dev/null || true
@@ -576,8 +612,18 @@ relay_entry() {
     RELAY_TAG="$tag"
     if (( tls )); then
         RELAY_SECURITY="tls"
-        RELAY_SNI="${sni:-$host}"
-        RELAY_PIN="$pin"
+        # pin 一律归一成 64 位小写 hex 存进 relay.env（对端命令 / export 直接可用）
+        RELAY_PIN="$(relay_pin_hex "$pin")" || return 1
+        if [[ -n "$sni" ]]; then
+            RELAY_SNI="$sni"
+        elif [[ -n "$RELAY_PIN" ]]; then
+            # 有 pin 就只验指纹，serverName 只是握手时发出去的 SNI，用落地地址即可
+            RELAY_SNI="$host"
+        else
+            # 无 pin 时 Xray 走 verifyPeerCertByName —— 校验的名字必须等于落地证书的 SAN。
+            # 落地端自签时 SAN 是 relay-<port>，默认对齐它，别拿 IP 去比（必失败）。
+            RELAY_SNI="relay-$p"
+        fi
     else
         RELAY_SECURITY="none"
         RELAY_SNI=""
@@ -607,14 +653,20 @@ relay_export() {
         relay_say info "在入口机执行：" "run on the entry host:"
         relay_entry_hint "$ip"
     else
-        local allow
+        local allow lp lextra="" lquery=""
         allow="$(public_ip)"
+        lp="${RELAY_UPSTREAM##*:}"
         relay_say info "在落地机执行（源 IP 用本机公网 IP）：" \
                       "run on the landing host (allow this host's public IP):"
-        printf '    xhy relay land --allow %s --port %s --uuid %s\n' \
-            "$allow" "${RELAY_UPSTREAM##*:}" "$RELAY_UUID"
-        printf 'vless://%s@%s?encryption=none&security=%s&type=tcp#relay-land\n' \
-            "$RELAY_UUID" "$RELAY_UPSTREAM" "$RELAY_SECURITY"
+        if [[ "$RELAY_SECURITY" == "tls" ]]; then
+            # 落地端要自己 --tls 产证书；SNI 必须与入口端一致，否则名字校验过不去
+            lextra=" --tls --sni ${RELAY_SNI:-relay-${lp}}"
+            lquery="&sni=${RELAY_SNI:-relay-${lp}}"
+        fi
+        printf '    xhy relay land --allow %s --port %s --uuid %s%s\n' \
+            "$allow" "$lp" "$RELAY_UUID" "$lextra"
+        printf 'vless://%s@%s?encryption=none&security=%s&type=tcp%s#relay-land\n' \
+            "$RELAY_UUID" "$RELAY_UPSTREAM" "$RELAY_SECURITY" "$lquery"
     fi
     return 0
 }

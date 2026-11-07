@@ -149,6 +149,52 @@ chk "relay.env 记 tls"                'grep -q "^RELAY_SECURITY=tls$" "$XHY_NOD
 chk "relay.env 记 sni"                'grep -q "^RELAY_SNI=relay.example.com$" "$XHY_NODES/relay.env"'
 chk "tls 片段仍是合法 JSON"           'json_ok "$XHY_CONFDIR/relay_in_14430.json"'
 
+echo "===== 证书 pin 归一：hex / 大写 / 冒号 / 旧 base64 ====="
+PIN_HEX="$("$PY" -c 'print(bytes(range(32)).hex())')"
+PIN_UP="$("$PY" -c 'print(bytes(range(32)).hex().upper())')"
+PIN_COLON="$("$PY" -c 'print(":".join("%02x" % b for b in range(32)))')"
+PIN_B64="$("$PY" -c 'import base64;print(base64.b64encode(bytes(range(32))).decode())')"
+chk "小写 hex 原样通过"               '[ "$(relay_pin_hex "$PIN_HEX")" = "$PIN_HEX" ]'
+chk "大写 hex 转小写"                 '[ "$(relay_pin_hex "$PIN_UP")" = "$PIN_HEX" ]'
+chk "冒号分隔 hex 去冒号"             '[ "$(relay_pin_hex "$PIN_COLON")" = "$PIN_HEX" ]'
+chk "旧 base64 pin 转 hex"            '[ "$(relay_pin_hex "$PIN_B64")" = "$PIN_HEX" ]'
+chk "空 pin 返回空（不报错）"         '[ -z "$(relay_pin_hex "")" ]'
+chk "非法 pin 必须报错"               '! relay_pin_hex "not-a-pin" 2>/dev/null'
+
+echo "===== entry --tls：pin 走 pinnedPeerCertSha256（Xray 26 只认 hex） ====="
+relay_entry --to 203.0.113.10:14430 --uuid tls-uuid-0000 \
+    --tls --sni relay.example.com --pin "$PIN_B64" >/dev/null
+chk "出站带 pinnedPeerCertSha256"     "grep -q '\"pinnedPeerCertSha256\":\"$PIN_HEX\"' \"\$XHY_ETC/config.json\""
+chk "出站不含 allowInsecure"          '! grep -q "allowInsecure" "$XHY_ETC/config.json"'
+chk "出站不带 base64 原值"            "! grep -q '$PIN_B64' \"\$XHY_ETC/config.json\""
+chk "tls 出站仍是合法 JSON"           'json_ok "$XHY_ETC/config.json"'
+
+echo "===== entry --tls 无 pin：退回 verifyPeerCertByName（按 SAN 校验） ====="
+relay_entry --to 203.0.113.10:14430 --uuid tls-uuid-0000 \
+    --tls --sni relay.example.com >/dev/null
+chk "改用 verifyPeerCertByName"       'grep -q "\"verifyPeerCertByName\":\"relay.example.com\"" "$XHY_ETC/config.json"'
+chk "无 pin 时不出 pinnedPeerCert"    '! grep -q "pinnedPeerCertSha256" "$XHY_ETC/config.json"'
+chk "无 pin 配置仍合法"               'json_ok "$XHY_ETC/config.json"'
+
+echo "===== entry --tls 无 pin 无 sni：SNI 自动对齐落地自签 SAN ====="
+relay_entry --to 203.0.113.10:14430 --uuid tls-uuid-0000 --tls >/dev/null
+chk "verifyPeerCertByName 用 relay-14430" 'grep -q "\"verifyPeerCertByName\":\"relay-14430\"" "$XHY_ETC/config.json"'
+chk "serverName 也是 relay-14430"     'grep -q "\"serverName\":\"relay-14430\"" "$XHY_ETC/config.json"'
+chk "relay.env 记下对齐后的 SNI"      'grep -q "^RELAY_SNI=relay-14430$" "$XHY_NODES/relay.env"'
+chk "SNI 对齐后配置仍合法"            'json_ok "$XHY_ETC/config.json"'
+
+echo "===== 旧证书缺 SAN：自签分支就地重签 ====="
+mkdir -p "$XHY_CERTS"
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+    -subj "/CN=relay-14430" -keyout "$XHY_CERTS/relay_14430.key" \
+    -out "$XHY_CERTS/relay_14430.crt" >/dev/null 2>&1
+chk "旧证书确实没有 SAN"              '! openssl x509 -in "$XHY_CERTS/relay_14430.crt" -noout -text 2>/dev/null | grep -q "Subject Alternative Name"'
+relay_land --allow 198.51.100.20 --uuid land-uuid-0000 --tls --sni relay.example.com >/dev/null 2>&1
+chk "缺 SAN 的证书被重签"             'openssl x509 -in "$XHY_CERTS/relay_14430.crt" -noout -text 2>/dev/null | grep -q "Subject Alternative Name"'
+chk "重签后 relay.env 记 hex pin"     'grep -qE "^RELAY_PIN=[0-9a-f]{64}$" "$XHY_NODES/relay.env"'
+chk "重签后 SAN = sni"                'openssl x509 -in "$XHY_CERTS/relay_14430.crt" -noout -text 2>/dev/null | grep -q "DNS:relay.example.com"'
+chk "重签后配置仍合法"                'json_ok "$XHY_ETC/config.json"'
+
 echo "===== 同机换角色：land → entry ====="
 relay_entry --to 203.0.113.10:14430 --uuid switch-uuid-0000 --categories openai >/dev/null
 chk "换角色后入站片段被摘掉"          '! ls "$XHY_CONFDIR"/relay_in_*.json >/dev/null 2>&1'

@@ -2,6 +2,14 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.10.1 — 2026-11-08
+
+- fix(relay): Xray 26.x 移除了 `allowInsecure`、`pinnedPeerCertificateChainSha256` 也只吃 hex —— TLS 出站改用 `pinnedPeerCertSha256`（64 位小写 hex）+ 无 pin 时 `verifyPeerCertByName`；旧 relay.env 里的 base64 pin 自动转 hex，非法 pin 直接报错不静默降级
+- fix(relay): 自签证书补 `subjectAltName`（Go 1.27 拒绝只带 CN 的证书）；历史证书缺 SAN 时就地重签，不用手工删文件
+- fix(relay): entry 无 pin 时 SNI 默认 `relay-<port>` 而不是落地 IP —— 否则 verifyPeerCertByName 拿 IP 比证书 SAN 必然失败（入口 `--tls` 不带参数即可通）
+- feat(relay): `relay export` 反向命令补 `--tls --sni`、vless:// 链接补 `sni`；`--pin` 帮助文本改 HEX 并说明兼容旧 base64
+- test(relay): 55 → **77** 项（pin 归一 hex/大写/冒号/base64、pinnedPeerCertSha256、verifyPeerCertByName、SNI 自动对齐、缺 SAN 证书重签）
+
 ## v1.10.0 — 2026-11-07
 
 - feat(relay): 收编进基础管线 —— nodes.sh 新增 extra_outbounds_json / extra_routing_rules_json 两个空钩子，relay 覆盖它们；xhy add/edit/del/config set 触发的基础 rebuild 不再冲掉 relay 出站与前置路由（v1.9.3 的「已知限制 1」消除）

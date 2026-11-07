@@ -112,4 +112,4 @@ fi
 echo
 echo "版本 $new 已就绪。下一步："
 echo "  git add -A && git commit -m \"chore(release): v$new\" && git push"
-echo "  （方式 A 安装的机器要等 release 发布；方式 B 直接 git pull）"
+echo "  （发布的机器升级只走 xhy update script；git 安装模式自 v1.9.1 已移除）"
