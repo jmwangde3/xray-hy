@@ -545,8 +545,299 @@ node_add() {
     link_from_env "$envf"
 }
 
+# ---------------------------------------------------------------------------
+# node editing
+# ---------------------------------------------------------------------------
+
+# node_env_update <env-file> KEY=VALUE...
+# 就地改写注册表：命中的键替换，其余行（含注释与将来新增的字段）原样保留，
+# 新键追加到末尾。不要「重新拼一遍 pairs」——那样会顺手丢掉后来加的键。
+node_env_update() {
+    local f="$1"; shift
+    local -A kv=()
+    local pair k line
+    local -a out=()
+    for pair in "$@"; do kv["${pair%%=*}"]="${pair#*=}"; done
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^([A-Z_][A-Z0-9_]*)= ]]; then
+            k="${BASH_REMATCH[1]}"
+            if [[ -n "${kv[$k]+x}" ]]; then
+                out+=("$k=${kv[$k]}")
+                unset 'kv[$k]'
+                continue
+            fi
+        fi
+        out+=("$line")
+    done <"$f"
+    for k in "${!kv[@]}"; do out+=("$k=${kv[$k]}"); done
+    printf '%s\n' "${out[@]}" | atomic_write "$f" 0600
+}
+
+# node_edit_apply MODE PORT KEY=VALUE...
+# 落盘 + 重建 + 校验 + 重启。改端口等于重命名注册表文件；hy2 改端口或 SNI
+# 必须重签证书（文件名带端口、SAN 带 SNI），否则客户端的 pinSHA256 会失配。
+node_edit_apply() {
+    local mode="$1" port="$2"; shift 2
+    local old_envf new_envf new_mode="$mode" new_port="$port"
+    local o_sni="" o_cert="" o_key="" pair clash=""
+    need_root
+    init_dirs
+    old_envf="$(node_file "$mode" "$port")"
+    [[ -f "$old_envf" ]] || die "节点不存在: ${mode}_${port}"
+    node_load "$old_envf"
+    o_sni="$SNI"; o_cert="$CERT_FILE"; o_key="$KEY_FILE"
+
+    for pair in "$@"; do
+        case "${pair%%=*}" in
+            PORT) new_port="${pair#*=}" ;;
+            MODE) new_mode="${pair#*=}" ;;
+        esac
+    done
+    valid_port "$new_port" || die "端口不合法: $new_port"
+    if [[ "$new_port" != "$port" ]]; then
+        clash="$(port_used_by_node "$new_port")" || true
+        if [[ -n "$clash" && "$clash" != "${mode}_${port}" ]]; then
+            die "端口 $new_port 已被节点 $clash 占用（不同模式也不能共用端口）"
+        fi
+        if port_busy "$new_port"; then
+            warn "端口 $new_port 已被其它进程占用（可能是旧进程尚未退出）"
+            confirm "仍要继续？" "n" || return 1
+        fi
+    fi
+
+    backup_file "$old_envf"
+    snapshot_state
+    node_env_update "$old_envf" "$@"
+
+    if [[ "$new_port" != "$port" ]]; then
+        new_envf="$(node_file "$new_mode" "$new_port")"
+        mv -f "$old_envf" "$new_envf"
+        rm -f "$(node_frag "$mode" "$port")"
+    else
+        new_envf="$old_envf"
+    fi
+
+    node_load "$new_envf"
+    if [[ "$MODE" == "hy2" ]]; then
+        if [[ "$PORT" != "$port" ]] || [[ "$SNI" != "$o_sni" ]]; then
+            local crt key pin64 pinhex
+            read -r crt key pin64 pinhex <<<"$(hy2_gen_cert "$PORT" "$SNI")" || return 1
+            node_env_update "$new_envf" "CERT_FILE=$crt" "KEY_FILE=$key" \
+                "PIN_B64=$pin64" "PIN_HEX=$pinhex"
+            if [[ -n "$o_cert" && "$o_cert" != "$crt" && -f "$o_cert" ]]; then
+                rm -f "$o_cert" "$o_key"
+            fi
+            info "已按新的端口 / SNI 重签 Hysteria2 证书，客户端的 pinSHA256 需要更新"
+        fi
+    fi
+
+    if ! write_fragment "$new_envf"; then
+        err "inbound 配置生成失败；节点参数已写入，可用 xhy snapshots + xhy rollback 回退"
+        return 1
+    fi
+    if ! XHY_SKIP_SNAPSHOT=1 rebuild_config || ! xray_config_test; then
+        err "配置校验失败；节点参数已写入但未生效，可用 xhy snapshots + xhy rollback 回退"
+        return 1
+    fi
+    config_reload || warn "配置已写入，但服务重启失败（可 xhy service restart 重试）"
+    if [[ "$(state_get FIREWALL_MODE off)" != "off" ]]; then
+        firewall_apply "$(state_get FIREWALL_MODE safe)" --quiet
+    fi
+    ok "节点 ${new_mode}_${new_port} 已更新"
+    link_from_env "$new_envf" 2>/dev/null || true
+    return 0
+}
+
+# node_edit [MODE PORT]
+# 交互式编辑：先列出全部当前值，逐项回车即保持。只对相关模式询问相关字段。
+node_edit() {
+    local mode="${1:-}" port="${2:-}"
+    need_root
+    init_dirs
+    if [[ -z "$mode" || -z "$port" ]]; then
+        node_pick || return 1
+        mode="$MODE"; port="$PORT"
+    fi
+    local envf
+    envf="$(node_file "$mode" "$port")"
+    [[ -f "$envf" ]] || die "节点不存在: ${mode}_${port}"
+    node_load "$envf"
+
+    local o_port="$PORT" o_uuid="$UUID" o_path="$NODE_PATH" o_host="$NODE_HOST"
+    local o_sni="$SNI" o_tgt="$TARGET" o_fp="$FP" o_sec="$SECURITY" o_sid="$SHORT_ID"
+    local o_masq="$MASQ_URL" o_masqmode="$MASQ_MODE" o_up="$BRUTAL_UP" o_down="$BRUTAL_DOWN"
+    local -a changes=()
+    local v cur_tfo tfo_choice="" new_tgt new_sni pair
+
+    cur_tfo="false"; [[ "$TFO" == "1" ]] && cur_tfo="true"
+    printf '\n'
+    printf '节点 %s_%s（%s）\n' "$mode" "$port" "${o_sec:-none}"
+    printf '  %-14s %s\n' '连接地址' "${o_host:-?}"
+    printf '  %-14s %s\n' 'UUID' "${o_uuid:-?}"
+    printf '  %-14s %s\n' '路径' "${o_path:-?}"
+    if [[ "$o_sec" == "reality" ]]; then
+        printf '  %-14s %s\n' 'target' "${o_tgt:-?}"
+        printf '  %-14s %s\n' 'SNI' "${o_sni:-?}"
+        printf '  %-14s %s\n' 'shortId' "${o_sid:-?}"
+        printf '  %-14s %s（当前 tcpFastOpen=%s）\n' '指纹 / TFO' "${o_fp:-chrome}" "$cur_tfo"
+    elif [[ "$o_sec" == "tls" ]]; then
+        printf '  %-14s %s\n' 'SNI' "${o_sni:-?}"
+        printf '  %-14s %s（%s）\n' '伪装' "${o_masq:-?}" "${o_masqmode:-string}"
+        printf '  %-14s up=%s down=%s\n' 'Brutal' "${o_up:-off}" "${o_down:-off}"
+    fi
+    printf '\n直接回车 = 保持原值。\n'
+
+    v="$(ask '端口' "$o_port")"
+    [[ "$v" != "$o_port" ]] && changes+=("PORT=$v")
+    v="$(ask '连接地址（域名或 IP）' "$o_host")"
+    [[ "$v" != "$o_host" ]] && changes+=("NODE_HOST=$v")
+    v="$(ask 'UUID（输入 new 重新生成）' "$o_uuid")"
+    if [[ "$v" == "new" ]]; then changes+=("UUID=$(uuid_gen)")
+    elif [[ "$v" != "$o_uuid" ]]; then changes+=("UUID=$v"); fi
+    v="$(ask '路径' "$o_path")"
+    if [[ -n "$v" && "$v" != "$o_path" ]]; then
+        [[ "$v" == /* ]] || v="/$v"
+        changes+=("NODE_PATH=$v")
+    fi
+
+    case "$o_sec" in
+        reality)
+            v="$(ask '伪装站 target（IP:端口 或 域名:端口）' "$o_tgt")"
+            [[ "$v" != "$o_tgt" ]] && changes+=("TARGET=$v")
+            v="$(ask 'SNI（target 是 IP 时必填域名）' "$o_sni")"
+            [[ "$v" != "$o_sni" ]] && changes+=("SNI=$v")
+            v="$(ask 'shortId（输入 new 重新生成，客户端需同步）' "$o_sid")"
+            if [[ "$v" == "new" ]]; then changes+=("SHORT_ID=$(rand_hex 8)")
+            elif [[ "$v" != "$o_sid" ]]; then changes+=("SHORT_ID=$v"); fi
+            v="$(ask '指纹 fp' "$o_fp")"
+            [[ "$v" != "$o_fp" ]] && changes+=("FP=$v")
+            tfo_choice="$(ask 'TFO auto/on/off（auto = 按新 target 重新探测）' 'auto')" ;;
+        tls)
+            v="$(ask 'SNI（改这个会重签自签证书）' "$o_sni")"
+            [[ "$v" != "$o_sni" ]] && changes+=("SNI=$v")
+            v="$(ask '伪装 URL' "$o_masq")"
+            [[ "$v" != "$o_masq" ]] && changes+=("MASQ_URL=$v")
+            v="$(ask '伪装模式 string/proxy' "$o_masqmode")"
+            [[ "$v" != "$o_masqmode" ]] && changes+=("MASQ_MODE=$v")
+            v="$(ask 'Brutal 上行 Mbps（空=不启用）' "$o_up")"
+            [[ "$v" != "$o_up" ]] && changes+=("BRUTAL_UP=$v")
+            v="$(ask 'Brutal 下行 Mbps（空=不启用）' "$o_down")"
+            [[ "$v" != "$o_down" ]] && changes+=("BRUTAL_DOWN=$v") ;;
+    esac
+
+    if (( ${#changes[@]} == 0 )); then
+        info "没有改动"
+        return 0
+    fi
+
+    # TFO 必须在 TARGET/SNI 定稿之后再算：auto 要探测的是新目标，不是旧的。
+    if [[ "$o_sec" == "reality" ]]; then
+        new_tgt="$o_tgt"; new_sni="$o_sni"
+        for pair in "${changes[@]}"; do
+            case "${pair%%=*}" in
+                TARGET) new_tgt="${pair#*=}" ;;
+                SNI)    new_sni="${pair#*=}" ;;
+            esac
+        done
+        case "$tfo_choice" in
+            on)   changes+=("TFO=1") ;;
+            off)  changes+=("TFO=0") ;;
+            auto) changes+=("TFO=$(tfo_decide auto "${new_tgt%%:*}" "${new_tgt##*:}" "$new_sni")") ;;
+        esac
+    fi
+
+    printf '\n将要修改：\n'
+    for pair in "${changes[@]}"; do printf '  %s\n' "$pair"; done
+    confirm "确认应用？" "y" || return 1
+    node_edit_apply "$mode" "$port" "${changes[@]}"
+}
+
+# node_retarget MODE PORT TARGET SNI [auto|on|off]
+# 换伪装站：REALITY 私钥与 shortId 不受影响，只换 TARGET/SNI 并重判 TFO。
+node_retarget() {
+    local mode="$1" port="$2" tgt="$3" sni="$4" tfo_opt="${5:-auto}"
+    local envf tfo_val
+    envf="$(node_file "$mode" "$port")"
+    [[ -f "$envf" ]] || { err "节点不存在: ${mode}_${port}"; return 1; }
+    node_load "$envf"
+    [[ "$SECURITY" == "reality" ]] || { err "只有 REALITY 节点有伪装站（当前 $SECURITY）"; return 1; }
+    [[ -n "$tgt" ]] || { err "target 为空"; return 1; }
+    [[ "$tgt" == *:* ]] || tgt="${tgt}:443"
+    sni="${sni:-${tgt%%:*}}"
+    tfo_val="$(tfo_decide "$tfo_opt" "${tgt%%:*}" "${tgt##*:}" "$sni")"
+    info "${mode}_${port}: target=${tgt} SNI=${sni} TFO=${tfo_val}"
+    node_edit_apply "$mode" "$port" "TARGET=$tgt" "SNI=$sni" "TFO=$tfo_val"
+}
+
+# node_retarget_menu TARGET SNI
+# 扫描出更好的伪装站之后，问要不要套用到已有的 REALITY 节点上。
+# 支持 all / 逗号分隔的多选 / 单个编号；回车 = 一个都不换。
+node_retarget_menu() {
+    local tgt="$1" sni="$2"
+    local -a modes=() ports=() tgts=() snis=()
+    local f i=0 pick item
+    local -a sel=()
+    if [[ -z "$tgt" ]]; then
+        info "没有新的伪装站可应用"
+        return 0
+    fi
+    for f in "$XHY_NODES"/*.env; do
+        [[ -f "$f" ]] || continue
+        node_load "$f"
+        [[ "$SECURITY" == "reality" ]] || continue
+        modes+=("$MODE"); ports+=("$PORT"); tgts+=("$TARGET"); snis+=("$SNI")
+    done
+    if (( ${#ports[@]} == 0 )); then
+        info "当前没有 REALITY 节点，新伪装站已记为默认 target，下次新建节点会用"
+        return 0
+    fi
+
+    printf '\n  新伪装站: target=%s SNI=%s\n' "$tgt" "$sni"
+    printf '  已存在的 REALITY 节点：\n'
+    printf '  %-3s %-16s %-34s %s\n' "#" "节点" "当前 target" "当前 SNI"
+    printf '  %s\n' "--------------------------------------------------------------------------"
+    for (( i = 0; i < ${#ports[@]}; i++ )); do
+        printf '  %-3s %-16s %-34s %s\n' "$((i + 1))" "${modes[$i]}_${ports[$i]}" \
+            "${tgts[$i]:-?}" "${snis[$i]:-?}"
+    done
+    pick="$(ask '替换哪些（all / 1,3 / 回车=不换）' '')"
+    [[ -n "$pick" ]] || { info "保持原 target 不变"; return 0; }
+
+    if [[ "$pick" == "all" ]]; then
+        for (( i = 0; i < ${#ports[@]}; i++ )); do sel+=("$i"); done
+    else
+        local IFS_BAK="$IFS"
+        IFS=','
+        for item in $pick; do
+            item="${item// /}"
+            if [[ "$item" =~ ^[0-9]+$ ]] && (( item >= 1 && item <= ${#ports[@]} )); then
+                sel+=("$((item - 1))")
+            fi
+        done
+        IFS="$IFS_BAK"
+    fi
+    if (( ${#sel[@]} == 0 )); then
+        warn "没有匹配的编号，未做任何替换"
+        return 0
+    fi
+
+    local rc=0
+    for i in "${sel[@]}"; do
+        printf '\n'
+        info "替换 ${modes[$i]}_${ports[$i]} 的伪装站…"
+        node_retarget "${modes[$i]}" "${ports[$i]}" "$tgt" "$sni" auto || {
+            warn "${modes[$i]}_${ports[$i]} 替换失败，已跳过"
+            rc=1
+        }
+    done
+    if (( rc == 0 )); then
+        ok "已完成 ${#sel[@]} 个节点的伪装站替换"
+    fi
+    return "$rc"
+}
+
 # 交互式选择节点：列出编号 → 选中后把该节点的字段载入全局 MODE/PORT 等。
-# 供菜单「删除节点」与不带参数的 `xhy del` 使用；取消返回 1。
+# 供菜单「编辑 / 删除节点」与不带参数的 `xhy del` 使用；取消返回 1。
 node_pick() {
     local -a files=()
     local f i=0 pick

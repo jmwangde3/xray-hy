@@ -133,6 +133,7 @@ Usage: xhy <command> [options]
 
   Node management
     add <mode> [--port N] [opts]  Add a node
+    edit [mode] [port]            Edit a node; no args = pick by number
     list                          List nodes
     link [--all|--uri|--qr]       Export vless:// links
     del [mode] [port]             Delete node; no args = pick by number
@@ -176,7 +177,7 @@ Usage: xhy <command> [options]
                    SNI allowlist and must be covered by the target certificate.
     Behind a CDN?  dest = origin IP, SNI stays the domain:
         xhy add reality --port 443 --target 1.2.3.4:443 --sni www.example.com
-    Menu 8) -> 3) manual accepts the same form (1.2.3.4:443,sni=www.example.com);
+    Menu 9) -> 3) manual accepts the same form (1.2.3.4:443,sni=www.example.com);
     validation uses --resolve to hit that IP and verify the cert covers the name.
     Or just xhy scan: auto-scan this rack's subnet and pick the best site (cached).
 
@@ -248,6 +249,7 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
 
   节点管理
     add <mode> [--port N] [选项] 添加节点
+    edit [mode] [port]          编辑已有节点；省略参数时列出编号选择（回车=不改）
     list                        列出所有节点
     link [--all|--uri|--qr]     导出 vless:// 链接
     del [mode] [port]           删除节点；省略参数时列出编号选择
@@ -287,7 +289,7 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
                   必须被 target 的证书覆盖。
     目标站挂在 CDN 后面时，dest 要写「源站 IP」、SNI 仍写域名，例如：
         xhy add reality --port 443 --target 1.2.3.4:443 --sni www.example.com
-    交互菜单 8) 伪装站 → 3) 手动指定 支持同一写法（1.2.3.4:443,sni=www.example.com），
+    交互菜单 9) 伪装站 → 3) 手动指定 支持同一写法（1.2.3.4:443,sni=www.example.com），
     校验会用 --resolve 打该 IP，测证书是否真的覆盖这个域名。
     不想手挑就用 xhy scan：自动扫本机机房网段并选最优站点（结果缓存复用）。
 
@@ -566,7 +568,7 @@ cmd_scan() {
                 if (( require == 1 )); then
                     err "自动扫描失败：/24 与 /21 里都没有支持被动 TFO 的候选"
                     err "可去掉 --require-tfo 按质量选，或 xhy scan --cidr <其它网段> --require-tfo"
-                    err "也可改用 xhy target → 1) 内置地区库，或 3) 手动指定"
+                    err "也可改用 xhy target → 2) 指定地区，或 3) 手动指定"
                 else
                     err "自动扫描失败；可改用 xhy target → 1) 内置地区库，或 3) 手动指定"
                 fi
@@ -681,32 +683,34 @@ cmd_menu() {
         printf '  %s / %s / Xray %s / 节点 %s 个\n' "$XHY_DISTRO" "$XHY_INIT" "$(xray_installed_version)" "$(node_count)"
         xhy_t <<'EOF'
   ---- 节点 ----
-   1) 添加节点               2) 节点列表
-   3) 导出分享链接           4) 删除节点
+   1) 添加节点               2) 编辑节点
+   3) 节点列表               4) 导出分享链接
+   5) 删除节点
   ---- 系统 ----
-   5) 完整安装 / 重装        6) 环境自检
-   7) 配置（路由/DNS/日志）  8) 伪装站
-   9) 防火墙                10) BBR / 内核
+   6) 完整安装 / 重装        7) 环境自检
+   8) 配置（路由/DNS/日志）  9) 伪装站
+  10) 防火墙                11) BBR / 内核
   ---- 维护 ----
-  11) 服务管理              12) Xray 版本通道
-  13) 更新                  14) 卸载
-  15) 备份 / 恢复           16) 扫描伪装站
+  12) 服务管理              13) Xray 版本通道
+  14) 更新                  15) 卸载
+  16) 备份 / 恢复
    0) 退出
 EOF
         case "$(ask '选择' '0')" in
             1) cmd_add_interactive ;;
-            2) node_list; ask '按回车继续' '' ;;
-            3) link_all; ask '按回车继续' '' ;;
-            4) if node_pick; then
+            2) node_edit ;;
+            3) node_list; ask '按回车继续' '' ;;
+            4) link_all; ask '按回车继续' '' ;;
+            5) if node_pick; then
                    if confirm "确认删除节点 ${MODE}_${PORT}？恢复需 xhy rollback" "n"; then
                        node_del "$MODE" "$PORT"
                    fi
                fi ;;
-            5) cmd_install ;;
-            6) self_check ;;
-            7) cmd_config_menu ;;
-            8) target_menu ;;
-            9) local fa
+            6) cmd_install ;;
+            7) self_check ;;
+            8) cmd_config_menu ;;
+            9) target_menu ;;
+           10) local fa
                fa="$(ask 'apply / strict / off / status' 'status')"
                case "$fa" in
                    apply)  firewall_apply safe ;;
@@ -715,33 +719,82 @@ EOF
                    off)    firewall_off ;;
                    *)      firewall_status ;;
                esac ;;
-           10) [[ "$(ask 'on / status' 'status')" == "on" ]] && tune_bbr || bbr_status ;;
-           11) local sa
+           11) if [[ "$(ask 'on / status' 'status')" == "on" ]]; then tune_bbr; else bbr_status; fi ;;
+           12) local sa
                sa="$(ask 'start / stop / restart / status' 'status')"
                case "$sa" in
                    start|stop|restart) "svc_$sa" "$SVC_XRAY" ;;
                    *) svc_status "$SVC_XRAY" ;;
                esac ;;
-           12) core_status
+           13) core_status
                local ch; ch="$(ask 'pinned / latest / vX.Y.Z（回车不改）' '')"
-               [[ -n "$ch" ]] && { xray_set_channel "$ch"; core_status; } ;;
-           13) local ua; ua="$(ask 'all / script / core / geodata / config' 'all')"
+               if [[ -n "$ch" ]]; then xray_set_channel "$ch"; core_status; fi ;;
+           14) local ua; ua="$(ask 'all / script / core / geodata / config' 'all')"
                case "$ua" in
                    all) update_all ;; script) update_script ;; core) update_core ;;
                    geodata) update_geodata ;; config) update_config ;;
                esac ;;
-           14) cmd_uninstall; return 0 ;;
-           15) local ba
+           15) cmd_uninstall; return 0 ;;
+           16) local ba
                ba="$(ask 'backup / restore' 'backup')"
                case "$ba" in
                    backup) backup_create ;;
                    restore) backup_restore "$(ask '备份文件路径' '')" ;;
                    *) warn "只支持 backup 或 restore" ;;
                esac ;;
-           16) cmd_scan ;;
             0) return 0 ;;
         esac
     done
+}
+
+cmd_link() {
+    local what="${1:---all}" f
+    case "$what" in
+        --uri)
+            for f in "$XHY_NODES"/*.env; do
+                [[ -f "$f" ]] || continue
+                link_uri "$f"
+            done
+            return 0 ;;
+        --all|"") link_all; return ;;
+        --qr)
+            local n=0; for f in "$XHY_NODES"/*.env; do [[ -f "$f" ]] || continue; link_qr "$f"; n=1; done
+            (( n == 1 )) || warn "暂无节点"; return ;;
+    esac
+    # link <mode> <port>
+    f="$(node_file "$what" "${2:-}")"
+    [[ -f "$f" ]] || die "节点不存在: ${what}_${2:-}"
+    link_from_env "$f"
+}
+
+cmd_uninstall() {
+    need_root
+    warn "这将停止 Xray / cloudflared 服务并移除 xray-hy 的开机项与防火墙链。"
+    confirm "确定卸载？" "n" || { info "已取消"; return 0; }
+    svc_stop "$SVC_CF"; svc_stop "$SVC_XRAY"
+    svc_disable "$SVC_CF"; svc_disable "$SVC_XRAY"
+    remove_cf_service 2>/dev/null || true
+    firewall_off
+    rm -f /etc/systemd/system/xray-hy.service /etc/systemd/system/xray-hy-firewall.service \
+          /etc/init.d/xray-hy /etc/init.d/xray-hy-firewall \
+          /usr/local/lib/xray-hy/tunnel-run /usr/local/bin/xhy \
+          "$XHY_SELF" /etc/sysctl.d/90-xray-hy.conf /etc/modules-load.d/xray-hy.conf
+    # 扫描器是下载来的独立工具，不在 git 工作树里，卸载时单独清。
+    rm -rf "$XHY_TOOLS_DIR"
+    # 仓库内运行时 XHY_APP_DIR 就是工作树：只删入口，不碰 conf/ 和目录本身。
+    if [[ "${XHY_DEV:-0}" != "1" ]]; then
+        rm -rf "$XHY_APP_DIR/conf"
+        rmdir "$XHY_APP_DIR" 2>/dev/null || true
+    fi
+    [[ "$XHY_INIT" == "systemd" ]] && systemctl daemon-reload
+    if confirm "同时删除 Xray 二进制与所有节点配置/凭证？" "n"; then
+        rm -f "$XRAY_BIN" "$CF_BIN"
+        rm -rf "$XRAY_ASSET" "$XHY_ETC"
+        ok "配置与凭证已删除"
+    else
+        ok "已保留 $XHY_ETC（内含节点凭证，权限 0600/0700）"
+    fi
+    ok "卸载完成"
 }
 
 main() {
@@ -803,6 +856,7 @@ main() {
         snapshots)  list_snapshots ;;
         rollback)   rollback_config "${1:-}" ;;
         target)     target_menu ;;
+        edit)       node_edit "$@" ;;
         scan)       cmd_scan "$@" ;;
         firewall)   case "${1:-status}" in
                         # --quiet is passed by the boot unit; forward it so boot

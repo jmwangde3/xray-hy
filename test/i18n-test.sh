@@ -23,8 +23,8 @@ echo "=== xhy_t 英文模式 ==="
 en="$(XHY_LANG_EFFECTIVE=en xhy_t '---- 节点 ----')"
 chk "菜单标题译成英文"   '[[ "$en" == *Nodes* ]]'
 chk "菜单标题纯 ASCII"   '! printf "%s" "$en" | LC_ALL=C grep -q "[^ -~]"'
-en="$(XHY_LANG_EFFECTIVE=en xhy_t '1) 添加节点               2) 节点列表')"
-chk "菜单项译成英文"     '[[ "$en" == *"Add node"* && "$en" == *"List nodes"* ]]'
+en="$(XHY_LANG_EFFECTIVE=en xhy_t '   1) 添加节点               2) 编辑节点')"
+chk "菜单项译成英文"     '[[ "$en" == *"Add node"* && "$en" == *"Edit node"* ]]'
 en="$(XHY_LANG_EFFECTIVE=en xhy_t '[ok]   www.easeus.com @ 47.88.102.65 : TLS 1.3 / H2 / 无跳转 / 非 CDN（源站直连） / TFO 不支持')"
 chk "校验行译成英文"     '[[ "$en" == *"no redirect"* && "$en" == *"TFO: no"* ]]'
 chk "校验行纯 ASCII"     '! printf "%s" "$en" | LC_ALL=C grep -q "[^ -~]"'

@@ -241,27 +241,123 @@ target_show() {
     fi
 }
 
+# 「指定地区」不该让人背地区代码：列出序号 / 地区 / 国家 / 候选数 / 首个候选。
+target_region_table() {
+    target_rows | awk -F'|' '
+        NF >= 4 && $1 != "" {
+            n[$1]++
+            if (!($1 in first)) { first[$1] = $4; cc[$1] = $2 }
+        }
+        END { for (r in n) printf "%s|%s|%d|%s\n", r, cc[r], n[r], first[r] }
+    ' | sort
+}
+
+# 扫描 → 选出候选 → 可选固定为默认 target → 可选套用到已有 REALITY 节点。
+# require_tfo=1 时，若 /24 与同机房 /21 都没有支持被动 TFO 的站点，问一次
+# 是否改成不强制重选：支持被动 TFO 的站本来就少，把「扫不到」变成一次选择，
+# 而不是让用户回到菜单再猜该去掉哪个开关。
+target_scan_flow() {
+    local require="${1:-0}" refresh="${2:-0}"
+    local -a args=() plain=()
+    local sp st ss a
+    (( refresh == 1 )) && args+=(--refresh)
+    (( require == 1 )) && args+=(--require-tfo)
+
+    if sp="$(scanner_pick ${args[@]+"${args[@]}"})"; then
+        read -r st ss _ <<<"$sp"
+        ok "最优站点: target=$st SNI=$ss"
+        if confirm "固定为当前 target（新建节点直接使用）？" "y"; then
+            state_set TARGET_CUSTOM "$st"; state_set TARGET_SNI "$ss"
+            ok "已固定 target=$st SNI=$ss"
+        fi
+        node_retarget_menu "$st" "$ss"
+        return 0
+    fi
+
+    if (( require == 1 )); then
+        warn "本机网段（/24 与同机房 /21）都没有支持被动 TFO 的站点。"
+        info "TFO 只省首连 1 个 RTT，伪装站又不承载正常代理流量，不值得为它牺牲站点质量。"
+        if confirm "改为不强制 TFO、按质量重选？" "y"; then
+            for a in "${args[@]}"; do
+                [[ "$a" == "--require-tfo" ]] || plain+=("$a")
+            done
+            if sp="$(scanner_pick ${plain[@]+"${plain[@]}"})"; then
+                read -r st ss _ <<<"$sp"
+                ok "最优站点: target=$st SNI=$ss"
+                if confirm "固定为当前 target（新建节点直接使用）？" "y"; then
+                    state_set TARGET_CUSTOM "$st"; state_set TARGET_SNI "$ss"
+                    ok "已固定 target=$st SNI=$ss"
+                fi
+                node_retarget_menu "$st" "$ss"
+                return 0
+            fi
+        fi
+    fi
+    warn "自动扫描没有找到可用站点，可改用 1) 按地区，或 3) 手动指定"
+    return 1
+}
+
 target_menu() {
     while true; do
         printf '\n'
         target_show
         xhy_t <<'EOF'
   1) 按地区自动匹配（按 VPS 出口国家）
-  2) 指定地区
+  2) 指定地区（列出现有地区与候选数）
   3) 手动指定 target / SNI
   4) 清除自定义设置
   5) 校验指定域名或 IP+SNI
   6) 名词说明（target / dest / SNI / serverNames）
-  7) 自动扫描本机机房网段，挑最优站点（结果缓存，可复用）
+  7) 扫描本机机房网段挑站（可强制 TFO，可替换已有节点）
   8) 查看 / 复核 / 清除扫描缓存
   0) 返回
 EOF
         case "$(ask '选择' '0')" in
             1) state_del TARGET_CUSTOM; state_del TARGET_SNI; state_set TARGET_REGION auto
-               info "已设为自动匹配"; pick_target ;;
-            2) local r; r="$(ask '地区代码' "$(target_region)")"
-               target_rows | grep -q "^${r}|" || { warn "可用地区: $(target_list_regions)"; continue; }
-               state_del TARGET_CUSTOM; state_del TARGET_SNI; state_set TARGET_REGION "$r"; pick_target ;;
+               info "已设为自动匹配"
+               if picked="$(pick_target)"; then
+                   read -r pt ps pl <<<"$picked"
+                   ok "当前 target: $pt SNI=$ps（来源 $pl）"
+               fi ;;
+            2) local -a regs=()
+               local line idx=0 sel r c n t picked pt ps pl
+               mapfile -t regs < <(target_region_table)
+               if (( ${#regs[@]} == 0 )); then
+                   err "伪装站数据文件里没有候选：$TARGETS_FILE"
+                   continue
+               fi
+               printf '\n  %-3s %-8s %-6s %-6s %s\n' "#" "地区" "国家" "候选" "首个候选"
+               printf '  %s\n' "----------------------------------------------------------------------"
+               for line in "${regs[@]}"; do
+                   idx=$((idx + 1))
+                   IFS='|' read -r r c n t <<<"$line"
+                   printf '  %-3s %-8s %-6s %-6s %s\n' "$idx" "$r" "${c:--}" "$n" "${t:--}"
+               done
+               printf '\n'
+               sel="$(ask '选择地区编号（也可直接输入地区代码，回车取消）' '')"
+               [[ -n "$sel" ]] || continue
+               if [[ "$sel" =~ ^[0-9]+$ ]]; then
+                   if (( sel < 1 || sel > ${#regs[@]} )); then
+                       err "编号超出范围（1-${#regs[@]}）"; continue
+                   fi
+                   IFS='|' read -r r c n t <<<"${regs[$((sel - 1))]}"
+               else
+                   line="$(target_region_table | grep -m1 -F "${sel}|" || true)"
+                   if [[ -z "$line" ]]; then
+                       err "没有这个地区：$sel（可用：$(target_list_regions)）"; continue
+                   fi
+                   IFS='|' read -r r c n t <<<"$line"
+               fi
+               state_del TARGET_CUSTOM; state_del TARGET_SNI; state_set TARGET_REGION "$r"
+               ok "地区已设为 $r（国家 ${c:--}，$n 个候选）"
+               if picked="$(pick_target)"; then
+                   read -r pt ps pl <<<"$picked"
+                   ok "当前 target: $pt SNI=$ps（来源 $pl）"
+                   if confirm "固定下来（新建节点直接用）？" "y"; then
+                       state_set TARGET_CUSTOM "$pt"; state_set TARGET_SNI "$ps"
+                       ok "已固定 target=$pt SNI=$ps"
+                   fi
+               fi ;;
             3) local h s
                xhy_t <<'EOF'
   输入格式（三种都行）：
@@ -282,7 +378,7 @@ EOF
                target_validate "$h" "$s" || confirm '校验未完全通过，仍要使用？' 'n' || continue
                state_set TARGET_CUSTOM "$h"; state_set TARGET_SNI "$s"
                ok "已固定 target=$h SNI=$s"
-               info "已存在的 REALITY 节点不会自动套用新 target：需 xhy del 后重新 add" ;;
+               node_retarget_menu "$h" "$s" ;;
             4) state_del TARGET_CUSTOM; state_del TARGET_SNI; state_set TARGET_REGION auto; ok "已清除" ;;
             5) local v vs
                xhy_t <<'EOF'
@@ -299,24 +395,16 @@ EOF
                vs="${vs:-${v%%:*}}"
                target_validate "$v" "$vs" && ok "校验通过" || warn "校验未完全通过（见上面每条原因）" ;;
             6) target_help; ask '按回车继续' '' ;;
-            7) local sp st ss extra=()
+            7) local req=0 ref=0
                if [[ -s "$SCANNER_CACHE" ]] && scanner_cache_valid; then
-                   confirm "已有 $(scanner_cache_age_h) 小时前的扫描缓存，重新扫描？" "n" \
-                       && extra+=(--refresh)
+                   if confirm "已有 $(scanner_cache_age_h) 小时前的扫描缓存，重新扫描？" "n"; then
+                       ref=1
+                   fi
                fi
                if confirm "是否只选支持 TFO 的伪装站？（不强制则按质量选）" "n"; then
-                   extra+=(--require-tfo)
+                   req=1
                fi
-               if sp="$(scanner_pick ${extra[@]+"${extra[@]}"})"; then
-                   read -r st ss _ <<<"$sp"
-                   ok "最优站点: target=$st SNI=$ss"
-                   if confirm "把它固定为当前 target（新建节点直接使用）？" "y"; then
-                       state_set TARGET_CUSTOM "$st"; state_set TARGET_SNI "$ss"
-                       ok "已固定 target=$st SNI=$ss"
-                   fi
-               else
-                   warn "自动扫描没有找到可用站点，可改用 1) 内置地区库或 3) 手动指定"
-               fi ;;
+               target_scan_flow "$req" "$ref" ;;
             8) local ca
                ca="$(ask 'list 查看 / verify 复核 / clear 清除' 'list')"
                case "$ca" in

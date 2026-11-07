@@ -135,8 +135,8 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.5.0"
-XHY_BUILD="d254b16a9fe1"
+XHY_VERSION="1.6.0"
+XHY_BUILD="8f1fd209823a"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -154,7 +154,7 @@ fi
 # ===================== lib/common.sh =====================
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.5.0}"
+XHY_VERSION="${XHY_VERSION:-1.6.0}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -481,27 +481,41 @@ verify_release_digest() {
 # 局部变量，函数返回后数组就丢了（同一个坑 scanner.sh 的 XHY_TFO_CACHE 踩过）。
 XHY_T_ZH=(
     "扫描范围默认是本机公网 IP 所在 /24；无合格站点、或强制 TFO 时没找到支持 TFO 的站，会自动扩到 /21 再扫一次" "当前网段内没有支持被动 TFO 的候选（每个站点后已标注 TFO 结果）；将自动扩大到 /21 再扫一次" "安装完成。现在可用 xhy add reality 添加第一个节点，或直接输入 xhy 打开菜单。"
-    "  xhy lang en    强制英文（纯 ASCII；云 VNC 控制台中文是小方块时用）" "  单次强制：XHY_LANG=en xhy  或  XHY_ASCII=1 xhy" "现在用 xhy add reality 添加第一个节点，或输入 xhy 打开菜单"
-    "缓存里没有支持被动 TFO 的站点；自动扩大网段再扫一次（不重复扫同一 /24）" "  xhy lang auto  按终端 / locale 自动判定（默认）" "1) 自动扫描本机机房网段，选最优站点（推荐；有缓存直接复用，不重复扫）"
-    "（safe 模式：SSH 防爆破 + 放行节点端口，不改动现有规则）" "TLS 1.3 / H2 / 无跳转 / 非 CDN（源站直连）" "是否只选支持 TFO 的伪装站？(y/N，回车=不强制): "
-    "；scanner_pick 会自动扩大到 /21 再扫一次。" "非交互环境：安装完成，下次直接运行 xhy 即可打开菜单。" "候选伪装站（按质量排序；TFO=目标是否支持被动 TFO）"
-    "选哪个 \[1-%d\]（回车=1，0=自动取最高分）: " "尚未安装 Xray，请先运行: xhy install" "（未强制 TFO；列表里也可能含支持 TFO 的站点）"
-    "每个候选后面都标注「TFO 支持 / 不支持」" "（这一步最慢；卡住多半是软件源，见文末提示）" "（下次运行生效；本次可用 XHY_LANG="
-    "2) 内置地区库（按 VPS 出口国家匹配）" "去掉 --require-tfo 按质量选" "伪装站（target / dest）来源："
-    "  xhy lang zh    强制中文" "里没有支持被动 TFO 的站点，自动扩大到" "伪装站（target / dest）来源"
-    "3) 手动指定 target / SNI" "内置地区库（按 VPS 出口国家匹配）" "自动扫描本机机房网段，选最优站点"
-    "脚本本体已就位（本次启动已落地）" "（已按「必须支持 TFO」过滤）" "客户端连接地址(域名或 IP)"
-    "（回车=1，0=自动取最高分）" "前 个候选都不支持被动 TFO" "或换 --cidr 网段再试"
-    "可改用 xhy target" "最优伪装站: target=" "配置（路由/DNS/日志）"
-    "建议套 CDN / 反代" "---- 节点 ----" "---- 系统 ----"
-    "---- 维护 ----" "上面每个站点后已标注结果" "选择类型 \[3\]: "
-    "扫描范围默认是本机公网" "扫描完成但没有可用站点" "非 CDN（源站直连）"
-    "安装脚本本体与命令入口" "路径 (回车随机生成)" "缓存里的候选都已失效"
-    "内核网络优化与防火墙" "选择 \[0\]: " "选择 \[1\]: "
-    "不需要公网入站端口" "完整安装 / 重装" "Xray 版本通道"
-    "尚未安装 Xray" "安装服务与开机自启" "渲染配置并启动服务"
-    "每个候选后面都标注" "BBR / 内核" "支持被动 TFO"
-    "无结果会自动扩到" "备份 / 恢复" "客户端连接地址"
+    "  xhy lang en    强制英文（纯 ASCII；云 VNC 控制台中文是小方块时用）" "已按新的端口 / SNI 重签 Hysteria2 证书，客户端的 pinSHA256 需要更新" "节点参数已写入但未生效，可用 xhy snapshots + xhy rollback 回退"
+    "TFO 只省首连 1 个 RTT，伪装站又不承载正常代理流量，不值得为它牺牲站点质量。" "  单次强制：XHY_LANG=en xhy  或  XHY_ASCII=1 xhy" "当前没有 REALITY 节点，新伪装站已记为默认 target，下次新建节点会用"
+    "现在用 xhy add reality 添加第一个节点，或输入 xhy 打开菜单" "缓存里没有支持被动 TFO 的站点；自动扩大网段再扫一次（不重复扫同一 /24）" "  xhy lang auto  按终端 / locale 自动判定（默认）"
+    "TFO auto/on/off（auto = 按新 target 重新探测）" "  10) 防火墙                11) BBR / 内核" "  12) 服务管理              13) Xray 版本通道"
+    "1) 自动扫描本机机房网段，选最优站点（推荐；有缓存直接复用，不重复扫）" "（safe 模式：SSH 防爆破 + 放行节点端口，不改动现有规则）" "   3) 节点列表               4) 导出分享链接"
+    "本机网段（/24 与同机房 /21）都没有支持被动 TFO 的站点。" "自动扫描没有找到可用站点，可改用 1) 按地区，或 3) 手动指定" "TLS 1.3 / H2 / 无跳转 / 非 CDN（源站直连）"
+    "   1) 添加节点               2) 编辑节点" "  14) 更新                  15) 卸载" "  7) 扫描本机机房网段挑站（可强制 TFO，可替换已有节点）"
+    "是否只选支持 TFO 的伪装站？(y/N，回车=不强制): " "；scanner_pick 会自动扩大到 /21 再扫一次。" "   6) 完整安装 / 重装        7) 环境自检"
+    "非交互环境：安装完成，下次直接运行 xhy 即可打开菜单。" "候选伪装站（按质量排序；TFO=目标是否支持被动 TFO）" "选哪个 \[1-%d\]（回车=1，0=自动取最高分）: "
+    "尚未安装 Xray，请先运行: xhy install" "（未强制 TFO；列表里也可能含支持 TFO 的站点）" "   8) 配置（路由/DNS/日志）  9) 伪装站"
+    "shortId（输入 new 重新生成，客户端需同步）" "编辑已有节点；省略参数时列出编号选择（回车=不改）" "伪装站 target（IP:端口 或 域名:端口）"
+    "每个候选后面都标注「TFO 支持 / 不支持」" "选择地区编号（也可直接输入地区代码，回车取消）" "替换哪些（all / 1,3 / 回车=不换）"
+    "（这一步最慢；卡住多半是软件源，见文末提示）" "（下次运行生效；本次可用 XHY_LANG=" "2) 内置地区库（按 VPS 出口国家匹配）"
+    "SNI（target 是 IP 时必填域名）" "去掉 --require-tfo 按质量选" "伪装站（target / dest）来源："
+    "  xhy lang zh    强制中文" "里没有支持被动 TFO 的站点，自动扩大到" "  2) 指定地区（列出现有地区与候选数）"
+    "Brutal 上行 Mbps（空=不启用）" "Brutal 下行 Mbps（空=不启用）" "只有 REALITY 节点有伪装站（当前 "
+    "伪装站（target / dest）来源" "3) 手动指定 target / SNI" "内置地区库（按 VPS 出口国家匹配）"
+    "  已存在的 REALITY 节点：" "UUID（输入 new 重新生成）" "伪装模式 string/proxy"
+    "自动扫描本机机房网段，选最优站点" "脚本本体已就位（本次启动已落地）" "（已按「必须支持 TFO」过滤）"
+    "改为不强制 TFO、按质量重选？" "已完成 %s 个节点的伪装站替换" "客户端连接地址(域名或 IP)"
+    "（回车=1，0=自动取最高分）" "前 个候选都不支持被动 TFO" "SNI（改这个会重签自签证书）"
+    "或换 --cidr 网段再试" "可改用 xhy target" "最优伪装站: target="
+    "固定下来（新建节点直接用）？" "没有匹配的编号，未做任何替换" "配置（路由/DNS/日志）"
+    "  16) 备份 / 恢复" "保持原 target 不变" "建议套 CDN / 反代"
+    "---- 节点 ----" "---- 系统 ----" "---- 维护 ----"
+    "上面每个站点后已标注结果" "选择类型 \[3\]: " "直接回车 = 保持原值。"
+    "连接地址（域名或 IP）" "扫描范围默认是本机公网" "扫描完成但没有可用站点"
+    "非 CDN（源站直连）" "安装脚本本体与命令入口" "路径 (回车随机生成)"
+    "缓存里的候选都已失效" "内核网络优化与防火墙" "选择 \[0\]: "
+    "选择 \[1\]: " "   5) 删除节点" "当前 target:"
+    "没有新的伪装站可应用" "不需要公网入站端口" "完整安装 / 重装"
+    "Xray 版本通道" "尚未安装 Xray" "安装服务与开机自启"
+    "渲染配置并启动服务" "每个候选后面都标注" "BBR / 内核"
+    "支持被动 TFO" "无结果会自动扩到" "   0) 退出"
+    "指纹 / TFO" "备份 / 恢复" "客户端连接地址"
     "依赖检查与安装" "当前语言 : " "TFO 不支持"
     "结果已缓存: " "个可用候选（共" "导出分享链接"
     "内核网络优化" "自动扫描失败" "创建数据目录"
@@ -511,77 +525,93 @@ XHY_T_ZH=(
     "个去重候选" "下载并校验" "安装最新版"
     "配置防火墙" "不写入缓存" "不参与打分"
     "节点类型：" "立即切换）" "验证完成："
+    "地区已设为" "将要修改：" "确认应用？"
     "服务管理" "添加节点" "节点列表"
     "删除节点" "环境自检" "版本通道"
     "重新扫描" "完整安装" "手动指定"
     "自动扫描" "随机生成" "监听端口"
     "节点类型" "选择类型" "必须支持"
     "现场探测" "再扫一次" "本网段前"
-    "防火墙" "伪装站" "不支持"
-    "已清除" "已过期" "已失效"
-    "已跳过" "未启用" "未安装"
-    "已安装" "签发者" "小时前"
-    "个候选" "不合法" "未强制"
-    "列表里" "个站点" "硬过滤"
-    "同机房" "小方块" "控制台"
-    "选择 " "选哪个" "支持"
-    "握手" "分数" "缓存"
-    "候选" "扫描" "校验"
-    "复核" "查看" "清除"
-    "列出" "刷新" "扩容"
-    "扩大" "节点" "端口"
-    "地址" "域名" "证书"
-    "流量" "探测" "最优"
-    "质量" "结果" "来源"
-    "添加" "删除" "导出"
-    "列表" "配置" "路由"
-    "日志" "系统" "维护"
-    "更新" "卸载" "备份"
-    "恢复" "重装" "自检"
-    "服务" "管理" "环境"
-    "内核" "权限" "脚本"
-    "入口" "启用" "开启"
-    "关闭" "使用" "当前"
-    "选择" "返回" "继续"
-    "确认" "确定" "取消"
-    "输入" "示例" "格式"
-    "说明" "提示" "警告"
-    "错误" "失败" "成功"
-    "完成" "安装" "下载"
-    "检查" "启动" "停止"
-    "重启" "状态" "默认"
-    "有效" "保留" "剔除"
-    "需要" "运行" "命令"
-    "参数" "文件" "目录"
-    "版本" "缺少" "无法"
-    "必须" "可选" "回车"
-    "路径" "退出" "只选"
-    "中文" "英文" "终端"
+    "没有改动" "防火墙" "伪装站"
+    "不支持" "已清除" "已过期"
+    "已失效" "已跳过" "未启用"
+    "未安装" "已安装" "签发者"
+    "小时前" "个候选" "不合法"
+    "未强制" "列表里" "个站点"
+    "硬过滤" "同机房" "小方块"
+    "控制台" "选择 " "选哪个"
+    "支持" "握手" "分数"
+    "缓存" "候选" "扫描"
+    "校验" "复核" "查看"
+    "清除" "列出" "刷新"
+    "扩容" "扩大" "节点"
+    "端口" "地址" "域名"
+    "证书" "流量" "探测"
+    "最优" "质量" "结果"
+    "来源" "添加" "删除"
+    "导出" "列表" "配置"
+    "路由" "日志" "系统"
+    "维护" "更新" "卸载"
+    "备份" "恢复" "重装"
+    "自检" "服务" "管理"
+    "环境" "内核" "权限"
+    "脚本" "入口" "启用"
+    "开启" "关闭" "使用"
+    "当前" "选择" "返回"
+    "继续" "确认" "确定"
+    "取消" "输入" "示例"
+    "格式" "说明" "提示"
+    "警告" "错误" "失败"
+    "成功" "完成" "安装"
+    "下载" "检查" "启动"
+    "停止" "重启" "状态"
+    "默认" "有效" "保留"
+    "剔除" "需要" "运行"
+    "命令" "参数" "文件"
+    "目录" "版本" "缺少"
+    "无法" "必须" "可选"
+    "回车" "路径" "退出"
+    "只选" "中文" "英文"
+    "终端"
 )
 
 XHY_T_EN=(
     "Default scan range is this host's /24; with no usable site (or no TFO-capable site when required) it auto-widens to /21 and rescans" "No TFO-capable candidate in this subnet (each site above is labelled); auto-widening to /21 and rescanning" "Install complete. Run xhy add reality to add the first node, or just xhy for the menu."
-    "  xhy lang en    force English (pure ASCII; use when a cloud VNC shows boxes)" "  one-shot: XHY_LANG=en xhy   or  XHY_ASCII=1 xhy" "Now run xhy add reality to add the first node, or just xhy for the menu"
-    "No TFO-capable site in cache; auto-widening the subnet to rescan (not the same /24)" "  xhy lang auto  detect from terminal / locale (default)" "1) Auto-scan this datacenter subnet and pick the best site (recommended; cache reused, no rescan)"
-    " (safe mode: SSH brute-force guard + allow node ports, no changes to existing rules)" "TLS 1.3 / H2 / no redirect / not CDN (origin direct)" "Only TFO-capable sites? (y/N, Enter = no): "
-    "; scanner_pick auto-widens to /21 and rescans." "Non-interactive shell: install complete, run xhy later to open the menu." "Candidate sites (by quality; TFO = target supports passive TFO)"
-    "Pick [1-%d] (Enter=1, 0=best score): " "Xray is not installed, run: xhy install" " (TFO not required; the list may still contain TFO sites)"
-    "each candidate is labelled TFO: yes / no" " (this is the slowest step; stalls are usually the package mirror)" " (effective next run; use XHY_LANG="
-    "2) Built-in region library (match VPS egress country)" "drop --require-tfo to pick by quality" "Camouflage site (target / dest) source:"
-    "  xhy lang zh    force Chinese" " has no TFO-capable site, auto-widening to " "Camouflage site (target / dest) source"
-    "3) Specify target / SNI manually" "Built-in region library (match VPS egress country)" "Auto-scan this datacenter subnet and pick the best site"
-    "Script and command entry already installed (this run)" " (filtered: TFO required)" "Client address (domain or IP)"
-    "(Enter=1, 0=best score)" "no TFO-capable candidates" "or try another --cidr subnet"
-    "fall back to xhy target" "Best camouflage site: target=" "Config (routing/DNS/log)"
-    "put it behind a CDN / reverse proxy" "---- Nodes ----" "---- System ----"
-    "---- Maintenance ----" "each site above is labelled" "Select type [3]: "
-    "Default scan range is the public" "Scan finished but no usable site" "not CDN (origin direct)"
-    "Install script and command entry" "Path (Enter = random)" "all cached candidates are stale"
-    "Kernel network tuning and firewall" "Select [0]: " "Select [1]: "
-    "no public inbound port needed" "Full install / reinstall" "Xray version channel"
-    "Xray is not installed" "Install service and enable at boot" "Render config and start service"
-    "each candidate is labelled with" "BBR / kernel" "supports passive TFO"
-    "auto-widens to" "Backup / restore" "Client address"
+    "  xhy lang en    force English (pure ASCII; use when a cloud VNC shows boxes)" "Hysteria2 cert re-issued for the new port/SNI; update pinSHA256 on clients" "Node updated but not active; use xhy snapshots + xhy rollback to revert"
+    "TFO only saves 1 RTT on the first connect and the target carries no proxy traffic; not worth trading site quality for." "  one-shot: XHY_LANG=en xhy   or  XHY_ASCII=1 xhy" "No REALITY node yet; the new site is saved as the default target for the next node"
+    "Now run xhy add reality to add the first node, or just xhy for the menu" "No TFO-capable site in cache; auto-widening the subnet to rescan (not the same /24)" "  xhy lang auto  detect from terminal / locale (default)"
+    "TFO auto/on/off (auto = re-probe the new target)" "  10) Firewall              11) BBR / kernel" "  12) Service               13) Xray channel"
+    "1) Auto-scan this datacenter subnet and pick the best site (recommended; cache reused, no rescan)" " (safe mode: SSH brute-force guard + allow node ports, no changes to existing rules)" "   3) List nodes             4) Export links"
+    "No passive-TFO site in this subnet (/24) or the same rack (/21)." "Scan found no usable site; use 1) by region or 3) specify manually" "TLS 1.3 / H2 / no redirect / not CDN (origin direct)"
+    "   1) Add node               2) Edit node" "  14) Update                15) Uninstall" "  7) Scan this rack's subnet (optional TFO, optional node retarget)"
+    "Only TFO-capable sites? (y/N, Enter = no): " "; scanner_pick auto-widens to /21 and rescans." "   6) Full install           7) Self check"
+    "Non-interactive shell: install complete, run xhy later to open the menu." "Candidate sites (by quality; TFO = target supports passive TFO)" "Pick [1-%d] (Enter=1, 0=best score): "
+    "Xray is not installed, run: xhy install" " (TFO not required; the list may still contain TFO sites)" "   8) Config (routing/DNS)   9) Camouflage site"
+    "shortId (type new to regenerate; clients must update)" "Edit a node; no args = pick by number (Enter = keep)" "Target site (IP:port or domain:port)"
+    "each candidate is labelled TFO: yes / no" "Region number (or code, Enter = cancel)" "Replace which (all / 1,3 / Enter = none)"
+    " (this is the slowest step; stalls are usually the package mirror)" " (effective next run; use XHY_LANG=" "2) Built-in region library (match VPS egress country)"
+    "SNI (required when target is an IP)" "drop --require-tfo to pick by quality" "Camouflage site (target / dest) source:"
+    "  xhy lang zh    force Chinese" " has no TFO-capable site, auto-widening to " "  2) Pick a region (shows regions and candidate counts)"
+    "Brutal up Mbps (empty = off)" "Brutal down Mbps (empty = off)" "Only REALITY nodes have a target site (current "
+    "Camouflage site (target / dest) source" "3) Specify target / SNI manually" "Built-in region library (match VPS egress country)"
+    "  Existing REALITY nodes:" "UUID (type new to regenerate)" "Masquerade mode string/proxy"
+    "Auto-scan this datacenter subnet and pick the best site" "Script and command entry already installed (this run)" " (filtered: TFO required)"
+    "Retry without requiring TFO (pick by quality)? " "%s node(s) retargeted" "Client address (domain or IP)"
+    "(Enter=1, 0=best score)" "no TFO-capable candidates" "SNI (changing it re-issues the self-signed cert)"
+    "or try another --cidr subnet" "fall back to xhy target" "Best camouflage site: target="
+    "Pin it (new nodes use it)? " "No matching number; nothing replaced" "Config (routing/DNS/log)"
+    "  16) Backup / restore" "Keeping the current target" "put it behind a CDN / reverse proxy"
+    "---- Nodes ----" "---- System ----" "---- Maintenance ----"
+    "each site above is labelled" "Select type [3]: " "Press Enter to keep the current value."
+    "Client address (domain or IP)" "Default scan range is the public" "Scan finished but no usable site"
+    "not CDN (origin direct)" "Install script and command entry" "Path (Enter = random)"
+    "all cached candidates are stale" "Kernel network tuning and firewall" "Select [0]: "
+    "Select [1]: " "   5) Delete node" "Current target: "
+    "No new camouflage site to apply" "no public inbound port needed" "Full install / reinstall"
+    "Xray version channel" "Xray is not installed" "Install service and enable at boot"
+    "Render config and start service" "each candidate is labelled with" "BBR / kernel"
+    "supports passive TFO" "auto-widens to" "   0) Exit"
+    "Fingerprint / TFO" "Backup / restore" "Client address"
     "Dependency check and install" "Language : " "TFO: no"
     "Results cached: " " usable candidates (of " "Export share links"
     "kernel network tuning" "Auto-scan failed" "Create data directories"
@@ -591,52 +621,54 @@ XHY_T_EN=(
     "unique candidates" "Download and verify" "Install latest"
     "Configure firewall" "not written to cache" "not part of the score"
     "Node type:" " for this run)" "Verified: "
+    "Region set to" "Changes to apply:" "Apply these changes? "
     "Service control" "Add node" "List nodes"
     "Delete node" "Environment check" "version channel"
     "Rescanning" "full install" "specify manually"
     "auto scan" "random" "Listen port"
     "Node type" "Select type" "must support"
     "live probe" " and rescanning" "Among the first "
-    "Firewall" "camouflage site" "does not support"
-    "cleared" "expired" "stale"
-    "skipped" "not enabled" "not installed"
-    "installed" "Issuer" "hours ago"
-    "candidates" "invalid" "not required"
-    "the list" "sites" "hard filter"
-    "same rack" "boxes" "console"
-    "Select " "Pick" "supports"
-    "Handshake" "Score" "cache"
-    "candidate" "scan" "validate"
-    "reverify" "show" "clear"
-    "list" "refresh" "widen"
-    "widen" "node" "port"
-    "address" "domain" "certificate"
-    "traffic" "probe" "best"
-    "quality" "result" "source"
-    "add" "delete" "export"
-    "list" "config" "routing"
-    "log" "system" "maintenance"
-    "update" "uninstall" "backup"
-    "restore" "reinstall" "check"
-    "service" "manage" "environment"
-    "kernel" "privileges" "script"
-    "entry" "enable" "on"
-    "off" "use" "current"
-    "select" "back" "continue"
-    "confirm" "confirm" "cancel"
-    "input" "example" "format"
-    "notes" "hint" "warning"
-    "error" "failed" "success"
-    "done" "install" "download"
-    "check" "start" "stop"
-    "restart" "status" "default"
-    "valid" "keep" "drop"
-    "needs" "run" "command"
-    "option" "file" "directory"
-    "version" "missing" "unable"
-    "must" "optional" "Enter"
-    "Path" "Exit" "only"
-    "Chinese" "English" "terminal"
+    "No changes" "Firewall" "camouflage site"
+    "does not support" "cleared" "expired"
+    "stale" "skipped" "not enabled"
+    "not installed" "installed" "Issuer"
+    "hours ago" "candidates" "invalid"
+    "not required" "the list" "sites"
+    "hard filter" "same rack" "boxes"
+    "console" "Select " "Pick"
+    "supports" "Handshake" "Score"
+    "cache" "candidate" "scan"
+    "validate" "reverify" "show"
+    "clear" "list" "refresh"
+    "widen" "widen" "node"
+    "port" "address" "domain"
+    "certificate" "traffic" "probe"
+    "best" "quality" "result"
+    "source" "add" "delete"
+    "export" "list" "config"
+    "routing" "log" "system"
+    "maintenance" "update" "uninstall"
+    "backup" "restore" "reinstall"
+    "check" "service" "manage"
+    "environment" "kernel" "privileges"
+    "script" "entry" "enable"
+    "on" "off" "use"
+    "current" "select" "back"
+    "continue" "confirm" "confirm"
+    "cancel" "input" "example"
+    "format" "notes" "hint"
+    "warning" "error" "failed"
+    "success" "done" "install"
+    "download" "check" "start"
+    "stop" "restart" "status"
+    "default" "valid" "keep"
+    "drop" "needs" "run"
+    "command" "option" "file"
+    "directory" "version" "missing"
+    "unable" "must" "optional"
+    "Enter" "Path" "Exit"
+    "only" "Chinese" "English"
+    "terminal"
 )
 
 
@@ -2185,27 +2217,123 @@ target_show() {
     fi
 }
 
+# 「指定地区」不该让人背地区代码：列出序号 / 地区 / 国家 / 候选数 / 首个候选。
+target_region_table() {
+    target_rows | awk -F'|' '
+        NF >= 4 && $1 != "" {
+            n[$1]++
+            if (!($1 in first)) { first[$1] = $4; cc[$1] = $2 }
+        }
+        END { for (r in n) printf "%s|%s|%d|%s\n", r, cc[r], n[r], first[r] }
+    ' | sort
+}
+
+# 扫描 → 选出候选 → 可选固定为默认 target → 可选套用到已有 REALITY 节点。
+# require_tfo=1 时，若 /24 与同机房 /21 都没有支持被动 TFO 的站点，问一次
+# 是否改成不强制重选：支持被动 TFO 的站本来就少，把「扫不到」变成一次选择，
+# 而不是让用户回到菜单再猜该去掉哪个开关。
+target_scan_flow() {
+    local require="${1:-0}" refresh="${2:-0}"
+    local -a args=() plain=()
+    local sp st ss a
+    (( refresh == 1 )) && args+=(--refresh)
+    (( require == 1 )) && args+=(--require-tfo)
+
+    if sp="$(scanner_pick ${args[@]+"${args[@]}"})"; then
+        read -r st ss _ <<<"$sp"
+        ok "最优站点: target=$st SNI=$ss"
+        if confirm "固定为当前 target（新建节点直接使用）？" "y"; then
+            state_set TARGET_CUSTOM "$st"; state_set TARGET_SNI "$ss"
+            ok "已固定 target=$st SNI=$ss"
+        fi
+        node_retarget_menu "$st" "$ss"
+        return 0
+    fi
+
+    if (( require == 1 )); then
+        warn "本机网段（/24 与同机房 /21）都没有支持被动 TFO 的站点。"
+        info "TFO 只省首连 1 个 RTT，伪装站又不承载正常代理流量，不值得为它牺牲站点质量。"
+        if confirm "改为不强制 TFO、按质量重选？" "y"; then
+            for a in "${args[@]}"; do
+                [[ "$a" == "--require-tfo" ]] || plain+=("$a")
+            done
+            if sp="$(scanner_pick ${plain[@]+"${plain[@]}"})"; then
+                read -r st ss _ <<<"$sp"
+                ok "最优站点: target=$st SNI=$ss"
+                if confirm "固定为当前 target（新建节点直接使用）？" "y"; then
+                    state_set TARGET_CUSTOM "$st"; state_set TARGET_SNI "$ss"
+                    ok "已固定 target=$st SNI=$ss"
+                fi
+                node_retarget_menu "$st" "$ss"
+                return 0
+            fi
+        fi
+    fi
+    warn "自动扫描没有找到可用站点，可改用 1) 按地区，或 3) 手动指定"
+    return 1
+}
+
 target_menu() {
     while true; do
         printf '\n'
         target_show
         xhy_t <<'EOF'
   1) 按地区自动匹配（按 VPS 出口国家）
-  2) 指定地区
+  2) 指定地区（列出现有地区与候选数）
   3) 手动指定 target / SNI
   4) 清除自定义设置
   5) 校验指定域名或 IP+SNI
   6) 名词说明（target / dest / SNI / serverNames）
-  7) 自动扫描本机机房网段，挑最优站点（结果缓存，可复用）
+  7) 扫描本机机房网段挑站（可强制 TFO，可替换已有节点）
   8) 查看 / 复核 / 清除扫描缓存
   0) 返回
 EOF
         case "$(ask '选择' '0')" in
             1) state_del TARGET_CUSTOM; state_del TARGET_SNI; state_set TARGET_REGION auto
-               info "已设为自动匹配"; pick_target ;;
-            2) local r; r="$(ask '地区代码' "$(target_region)")"
-               target_rows | grep -q "^${r}|" || { warn "可用地区: $(target_list_regions)"; continue; }
-               state_del TARGET_CUSTOM; state_del TARGET_SNI; state_set TARGET_REGION "$r"; pick_target ;;
+               info "已设为自动匹配"
+               if picked="$(pick_target)"; then
+                   read -r pt ps pl <<<"$picked"
+                   ok "当前 target: $pt SNI=$ps（来源 $pl）"
+               fi ;;
+            2) local -a regs=()
+               local line idx=0 sel r c n t picked pt ps pl
+               mapfile -t regs < <(target_region_table)
+               if (( ${#regs[@]} == 0 )); then
+                   err "伪装站数据文件里没有候选：$TARGETS_FILE"
+                   continue
+               fi
+               printf '\n  %-3s %-8s %-6s %-6s %s\n' "#" "地区" "国家" "候选" "首个候选"
+               printf '  %s\n' "----------------------------------------------------------------------"
+               for line in "${regs[@]}"; do
+                   idx=$((idx + 1))
+                   IFS='|' read -r r c n t <<<"$line"
+                   printf '  %-3s %-8s %-6s %-6s %s\n' "$idx" "$r" "${c:--}" "$n" "${t:--}"
+               done
+               printf '\n'
+               sel="$(ask '选择地区编号（也可直接输入地区代码，回车取消）' '')"
+               [[ -n "$sel" ]] || continue
+               if [[ "$sel" =~ ^[0-9]+$ ]]; then
+                   if (( sel < 1 || sel > ${#regs[@]} )); then
+                       err "编号超出范围（1-${#regs[@]}）"; continue
+                   fi
+                   IFS='|' read -r r c n t <<<"${regs[$((sel - 1))]}"
+               else
+                   line="$(target_region_table | grep -m1 -F "${sel}|" || true)"
+                   if [[ -z "$line" ]]; then
+                       err "没有这个地区：$sel（可用：$(target_list_regions)）"; continue
+                   fi
+                   IFS='|' read -r r c n t <<<"$line"
+               fi
+               state_del TARGET_CUSTOM; state_del TARGET_SNI; state_set TARGET_REGION "$r"
+               ok "地区已设为 $r（国家 ${c:--}，$n 个候选）"
+               if picked="$(pick_target)"; then
+                   read -r pt ps pl <<<"$picked"
+                   ok "当前 target: $pt SNI=$ps（来源 $pl）"
+                   if confirm "固定下来（新建节点直接用）？" "y"; then
+                       state_set TARGET_CUSTOM "$pt"; state_set TARGET_SNI "$ps"
+                       ok "已固定 target=$pt SNI=$ps"
+                   fi
+               fi ;;
             3) local h s
                xhy_t <<'EOF'
   输入格式（三种都行）：
@@ -2226,7 +2354,7 @@ EOF
                target_validate "$h" "$s" || confirm '校验未完全通过，仍要使用？' 'n' || continue
                state_set TARGET_CUSTOM "$h"; state_set TARGET_SNI "$s"
                ok "已固定 target=$h SNI=$s"
-               info "已存在的 REALITY 节点不会自动套用新 target：需 xhy del 后重新 add" ;;
+               node_retarget_menu "$h" "$s" ;;
             4) state_del TARGET_CUSTOM; state_del TARGET_SNI; state_set TARGET_REGION auto; ok "已清除" ;;
             5) local v vs
                xhy_t <<'EOF'
@@ -2243,24 +2371,16 @@ EOF
                vs="${vs:-${v%%:*}}"
                target_validate "$v" "$vs" && ok "校验通过" || warn "校验未完全通过（见上面每条原因）" ;;
             6) target_help; ask '按回车继续' '' ;;
-            7) local sp st ss extra=()
+            7) local req=0 ref=0
                if [[ -s "$SCANNER_CACHE" ]] && scanner_cache_valid; then
-                   confirm "已有 $(scanner_cache_age_h) 小时前的扫描缓存，重新扫描？" "n" \
-                       && extra+=(--refresh)
+                   if confirm "已有 $(scanner_cache_age_h) 小时前的扫描缓存，重新扫描？" "n"; then
+                       ref=1
+                   fi
                fi
                if confirm "是否只选支持 TFO 的伪装站？（不强制则按质量选）" "n"; then
-                   extra+=(--require-tfo)
+                   req=1
                fi
-               if sp="$(scanner_pick ${extra[@]+"${extra[@]}"})"; then
-                   read -r st ss _ <<<"$sp"
-                   ok "最优站点: target=$st SNI=$ss"
-                   if confirm "把它固定为当前 target（新建节点直接使用）？" "y"; then
-                       state_set TARGET_CUSTOM "$st"; state_set TARGET_SNI "$ss"
-                       ok "已固定 target=$st SNI=$ss"
-                   fi
-               else
-                   warn "自动扫描没有找到可用站点，可改用 1) 内置地区库或 3) 手动指定"
-               fi ;;
+               target_scan_flow "$req" "$ref" ;;
             8) local ca
                ca="$(ask 'list 查看 / verify 复核 / clear 清除' 'list')"
                case "$ca" in
@@ -3523,8 +3643,299 @@ node_add() {
     link_from_env "$envf"
 }
 
+# ---------------------------------------------------------------------------
+# node editing
+# ---------------------------------------------------------------------------
+
+# node_env_update <env-file> KEY=VALUE...
+# 就地改写注册表：命中的键替换，其余行（含注释与将来新增的字段）原样保留，
+# 新键追加到末尾。不要「重新拼一遍 pairs」——那样会顺手丢掉后来加的键。
+node_env_update() {
+    local f="$1"; shift
+    local -A kv=()
+    local pair k line
+    local -a out=()
+    for pair in "$@"; do kv["${pair%%=*}"]="${pair#*=}"; done
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^([A-Z_][A-Z0-9_]*)= ]]; then
+            k="${BASH_REMATCH[1]}"
+            if [[ -n "${kv[$k]+x}" ]]; then
+                out+=("$k=${kv[$k]}")
+                unset 'kv[$k]'
+                continue
+            fi
+        fi
+        out+=("$line")
+    done <"$f"
+    for k in "${!kv[@]}"; do out+=("$k=${kv[$k]}"); done
+    printf '%s\n' "${out[@]}" | atomic_write "$f" 0600
+}
+
+# node_edit_apply MODE PORT KEY=VALUE...
+# 落盘 + 重建 + 校验 + 重启。改端口等于重命名注册表文件；hy2 改端口或 SNI
+# 必须重签证书（文件名带端口、SAN 带 SNI），否则客户端的 pinSHA256 会失配。
+node_edit_apply() {
+    local mode="$1" port="$2"; shift 2
+    local old_envf new_envf new_mode="$mode" new_port="$port"
+    local o_sni="" o_cert="" o_key="" pair clash=""
+    need_root
+    init_dirs
+    old_envf="$(node_file "$mode" "$port")"
+    [[ -f "$old_envf" ]] || die "节点不存在: ${mode}_${port}"
+    node_load "$old_envf"
+    o_sni="$SNI"; o_cert="$CERT_FILE"; o_key="$KEY_FILE"
+
+    for pair in "$@"; do
+        case "${pair%%=*}" in
+            PORT) new_port="${pair#*=}" ;;
+            MODE) new_mode="${pair#*=}" ;;
+        esac
+    done
+    valid_port "$new_port" || die "端口不合法: $new_port"
+    if [[ "$new_port" != "$port" ]]; then
+        clash="$(port_used_by_node "$new_port")" || true
+        if [[ -n "$clash" && "$clash" != "${mode}_${port}" ]]; then
+            die "端口 $new_port 已被节点 $clash 占用（不同模式也不能共用端口）"
+        fi
+        if port_busy "$new_port"; then
+            warn "端口 $new_port 已被其它进程占用（可能是旧进程尚未退出）"
+            confirm "仍要继续？" "n" || return 1
+        fi
+    fi
+
+    backup_file "$old_envf"
+    snapshot_state
+    node_env_update "$old_envf" "$@"
+
+    if [[ "$new_port" != "$port" ]]; then
+        new_envf="$(node_file "$new_mode" "$new_port")"
+        mv -f "$old_envf" "$new_envf"
+        rm -f "$(node_frag "$mode" "$port")"
+    else
+        new_envf="$old_envf"
+    fi
+
+    node_load "$new_envf"
+    if [[ "$MODE" == "hy2" ]]; then
+        if [[ "$PORT" != "$port" ]] || [[ "$SNI" != "$o_sni" ]]; then
+            local crt key pin64 pinhex
+            read -r crt key pin64 pinhex <<<"$(hy2_gen_cert "$PORT" "$SNI")" || return 1
+            node_env_update "$new_envf" "CERT_FILE=$crt" "KEY_FILE=$key" \
+                "PIN_B64=$pin64" "PIN_HEX=$pinhex"
+            if [[ -n "$o_cert" && "$o_cert" != "$crt" && -f "$o_cert" ]]; then
+                rm -f "$o_cert" "$o_key"
+            fi
+            info "已按新的端口 / SNI 重签 Hysteria2 证书，客户端的 pinSHA256 需要更新"
+        fi
+    fi
+
+    if ! write_fragment "$new_envf"; then
+        err "inbound 配置生成失败；节点参数已写入，可用 xhy snapshots + xhy rollback 回退"
+        return 1
+    fi
+    if ! XHY_SKIP_SNAPSHOT=1 rebuild_config || ! xray_config_test; then
+        err "配置校验失败；节点参数已写入但未生效，可用 xhy snapshots + xhy rollback 回退"
+        return 1
+    fi
+    config_reload || warn "配置已写入，但服务重启失败（可 xhy service restart 重试）"
+    if [[ "$(state_get FIREWALL_MODE off)" != "off" ]]; then
+        firewall_apply "$(state_get FIREWALL_MODE safe)" --quiet
+    fi
+    ok "节点 ${new_mode}_${new_port} 已更新"
+    link_from_env "$new_envf" 2>/dev/null || true
+    return 0
+}
+
+# node_edit [MODE PORT]
+# 交互式编辑：先列出全部当前值，逐项回车即保持。只对相关模式询问相关字段。
+node_edit() {
+    local mode="${1:-}" port="${2:-}"
+    need_root
+    init_dirs
+    if [[ -z "$mode" || -z "$port" ]]; then
+        node_pick || return 1
+        mode="$MODE"; port="$PORT"
+    fi
+    local envf
+    envf="$(node_file "$mode" "$port")"
+    [[ -f "$envf" ]] || die "节点不存在: ${mode}_${port}"
+    node_load "$envf"
+
+    local o_port="$PORT" o_uuid="$UUID" o_path="$NODE_PATH" o_host="$NODE_HOST"
+    local o_sni="$SNI" o_tgt="$TARGET" o_fp="$FP" o_sec="$SECURITY" o_sid="$SHORT_ID"
+    local o_masq="$MASQ_URL" o_masqmode="$MASQ_MODE" o_up="$BRUTAL_UP" o_down="$BRUTAL_DOWN"
+    local -a changes=()
+    local v cur_tfo tfo_choice="" new_tgt new_sni pair
+
+    cur_tfo="false"; [[ "$TFO" == "1" ]] && cur_tfo="true"
+    printf '\n'
+    printf '节点 %s_%s（%s）\n' "$mode" "$port" "${o_sec:-none}"
+    printf '  %-14s %s\n' '连接地址' "${o_host:-?}"
+    printf '  %-14s %s\n' 'UUID' "${o_uuid:-?}"
+    printf '  %-14s %s\n' '路径' "${o_path:-?}"
+    if [[ "$o_sec" == "reality" ]]; then
+        printf '  %-14s %s\n' 'target' "${o_tgt:-?}"
+        printf '  %-14s %s\n' 'SNI' "${o_sni:-?}"
+        printf '  %-14s %s\n' 'shortId' "${o_sid:-?}"
+        printf '  %-14s %s（当前 tcpFastOpen=%s）\n' '指纹 / TFO' "${o_fp:-chrome}" "$cur_tfo"
+    elif [[ "$o_sec" == "tls" ]]; then
+        printf '  %-14s %s\n' 'SNI' "${o_sni:-?}"
+        printf '  %-14s %s（%s）\n' '伪装' "${o_masq:-?}" "${o_masqmode:-string}"
+        printf '  %-14s up=%s down=%s\n' 'Brutal' "${o_up:-off}" "${o_down:-off}"
+    fi
+    printf '\n直接回车 = 保持原值。\n'
+
+    v="$(ask '端口' "$o_port")"
+    [[ "$v" != "$o_port" ]] && changes+=("PORT=$v")
+    v="$(ask '连接地址（域名或 IP）' "$o_host")"
+    [[ "$v" != "$o_host" ]] && changes+=("NODE_HOST=$v")
+    v="$(ask 'UUID（输入 new 重新生成）' "$o_uuid")"
+    if [[ "$v" == "new" ]]; then changes+=("UUID=$(uuid_gen)")
+    elif [[ "$v" != "$o_uuid" ]]; then changes+=("UUID=$v"); fi
+    v="$(ask '路径' "$o_path")"
+    if [[ -n "$v" && "$v" != "$o_path" ]]; then
+        [[ "$v" == /* ]] || v="/$v"
+        changes+=("NODE_PATH=$v")
+    fi
+
+    case "$o_sec" in
+        reality)
+            v="$(ask '伪装站 target（IP:端口 或 域名:端口）' "$o_tgt")"
+            [[ "$v" != "$o_tgt" ]] && changes+=("TARGET=$v")
+            v="$(ask 'SNI（target 是 IP 时必填域名）' "$o_sni")"
+            [[ "$v" != "$o_sni" ]] && changes+=("SNI=$v")
+            v="$(ask 'shortId（输入 new 重新生成，客户端需同步）' "$o_sid")"
+            if [[ "$v" == "new" ]]; then changes+=("SHORT_ID=$(rand_hex 8)")
+            elif [[ "$v" != "$o_sid" ]]; then changes+=("SHORT_ID=$v"); fi
+            v="$(ask '指纹 fp' "$o_fp")"
+            [[ "$v" != "$o_fp" ]] && changes+=("FP=$v")
+            tfo_choice="$(ask 'TFO auto/on/off（auto = 按新 target 重新探测）' 'auto')" ;;
+        tls)
+            v="$(ask 'SNI（改这个会重签自签证书）' "$o_sni")"
+            [[ "$v" != "$o_sni" ]] && changes+=("SNI=$v")
+            v="$(ask '伪装 URL' "$o_masq")"
+            [[ "$v" != "$o_masq" ]] && changes+=("MASQ_URL=$v")
+            v="$(ask '伪装模式 string/proxy' "$o_masqmode")"
+            [[ "$v" != "$o_masqmode" ]] && changes+=("MASQ_MODE=$v")
+            v="$(ask 'Brutal 上行 Mbps（空=不启用）' "$o_up")"
+            [[ "$v" != "$o_up" ]] && changes+=("BRUTAL_UP=$v")
+            v="$(ask 'Brutal 下行 Mbps（空=不启用）' "$o_down")"
+            [[ "$v" != "$o_down" ]] && changes+=("BRUTAL_DOWN=$v") ;;
+    esac
+
+    if (( ${#changes[@]} == 0 )); then
+        info "没有改动"
+        return 0
+    fi
+
+    # TFO 必须在 TARGET/SNI 定稿之后再算：auto 要探测的是新目标，不是旧的。
+    if [[ "$o_sec" == "reality" ]]; then
+        new_tgt="$o_tgt"; new_sni="$o_sni"
+        for pair in "${changes[@]}"; do
+            case "${pair%%=*}" in
+                TARGET) new_tgt="${pair#*=}" ;;
+                SNI)    new_sni="${pair#*=}" ;;
+            esac
+        done
+        case "$tfo_choice" in
+            on)   changes+=("TFO=1") ;;
+            off)  changes+=("TFO=0") ;;
+            auto) changes+=("TFO=$(tfo_decide auto "${new_tgt%%:*}" "${new_tgt##*:}" "$new_sni")") ;;
+        esac
+    fi
+
+    printf '\n将要修改：\n'
+    for pair in "${changes[@]}"; do printf '  %s\n' "$pair"; done
+    confirm "确认应用？" "y" || return 1
+    node_edit_apply "$mode" "$port" "${changes[@]}"
+}
+
+# node_retarget MODE PORT TARGET SNI [auto|on|off]
+# 换伪装站：REALITY 私钥与 shortId 不受影响，只换 TARGET/SNI 并重判 TFO。
+node_retarget() {
+    local mode="$1" port="$2" tgt="$3" sni="$4" tfo_opt="${5:-auto}"
+    local envf tfo_val
+    envf="$(node_file "$mode" "$port")"
+    [[ -f "$envf" ]] || { err "节点不存在: ${mode}_${port}"; return 1; }
+    node_load "$envf"
+    [[ "$SECURITY" == "reality" ]] || { err "只有 REALITY 节点有伪装站（当前 $SECURITY）"; return 1; }
+    [[ -n "$tgt" ]] || { err "target 为空"; return 1; }
+    [[ "$tgt" == *:* ]] || tgt="${tgt}:443"
+    sni="${sni:-${tgt%%:*}}"
+    tfo_val="$(tfo_decide "$tfo_opt" "${tgt%%:*}" "${tgt##*:}" "$sni")"
+    info "${mode}_${port}: target=${tgt} SNI=${sni} TFO=${tfo_val}"
+    node_edit_apply "$mode" "$port" "TARGET=$tgt" "SNI=$sni" "TFO=$tfo_val"
+}
+
+# node_retarget_menu TARGET SNI
+# 扫描出更好的伪装站之后，问要不要套用到已有的 REALITY 节点上。
+# 支持 all / 逗号分隔的多选 / 单个编号；回车 = 一个都不换。
+node_retarget_menu() {
+    local tgt="$1" sni="$2"
+    local -a modes=() ports=() tgts=() snis=()
+    local f i=0 pick item
+    local -a sel=()
+    if [[ -z "$tgt" ]]; then
+        info "没有新的伪装站可应用"
+        return 0
+    fi
+    for f in "$XHY_NODES"/*.env; do
+        [[ -f "$f" ]] || continue
+        node_load "$f"
+        [[ "$SECURITY" == "reality" ]] || continue
+        modes+=("$MODE"); ports+=("$PORT"); tgts+=("$TARGET"); snis+=("$SNI")
+    done
+    if (( ${#ports[@]} == 0 )); then
+        info "当前没有 REALITY 节点，新伪装站已记为默认 target，下次新建节点会用"
+        return 0
+    fi
+
+    printf '\n  新伪装站: target=%s SNI=%s\n' "$tgt" "$sni"
+    printf '  已存在的 REALITY 节点：\n'
+    printf '  %-3s %-16s %-34s %s\n' "#" "节点" "当前 target" "当前 SNI"
+    printf '  %s\n' "--------------------------------------------------------------------------"
+    for (( i = 0; i < ${#ports[@]}; i++ )); do
+        printf '  %-3s %-16s %-34s %s\n' "$((i + 1))" "${modes[$i]}_${ports[$i]}" \
+            "${tgts[$i]:-?}" "${snis[$i]:-?}"
+    done
+    pick="$(ask '替换哪些（all / 1,3 / 回车=不换）' '')"
+    [[ -n "$pick" ]] || { info "保持原 target 不变"; return 0; }
+
+    if [[ "$pick" == "all" ]]; then
+        for (( i = 0; i < ${#ports[@]}; i++ )); do sel+=("$i"); done
+    else
+        local IFS_BAK="$IFS"
+        IFS=','
+        for item in $pick; do
+            item="${item// /}"
+            if [[ "$item" =~ ^[0-9]+$ ]] && (( item >= 1 && item <= ${#ports[@]} )); then
+                sel+=("$((item - 1))")
+            fi
+        done
+        IFS="$IFS_BAK"
+    fi
+    if (( ${#sel[@]} == 0 )); then
+        warn "没有匹配的编号，未做任何替换"
+        return 0
+    fi
+
+    local rc=0
+    for i in "${sel[@]}"; do
+        printf '\n'
+        info "替换 ${modes[$i]}_${ports[$i]} 的伪装站…"
+        node_retarget "${modes[$i]}" "${ports[$i]}" "$tgt" "$sni" auto || {
+            warn "${modes[$i]}_${ports[$i]} 替换失败，已跳过"
+            rc=1
+        }
+    done
+    if (( rc == 0 )); then
+        ok "已完成 ${#sel[@]} 个节点的伪装站替换"
+    fi
+    return "$rc"
+}
+
 # 交互式选择节点：列出编号 → 选中后把该节点的字段载入全局 MODE/PORT 等。
-# 供菜单「删除节点」与不带参数的 `xhy del` 使用；取消返回 1。
+# 供菜单「编辑 / 删除节点」与不带参数的 `xhy del` 使用；取消返回 1。
 node_pick() {
     local -a files=()
     local f i=0 pick
@@ -4535,6 +4946,7 @@ Usage: xhy <command> [options]
 
   Node management
     add <mode> [--port N] [opts]  Add a node
+    edit [mode] [port]            Edit a node; no args = pick by number
     list                          List nodes
     link [--all|--uri|--qr]       Export vless:// links
     del [mode] [port]             Delete node; no args = pick by number
@@ -4578,7 +4990,7 @@ Usage: xhy <command> [options]
                    SNI allowlist and must be covered by the target certificate.
     Behind a CDN?  dest = origin IP, SNI stays the domain:
         xhy add reality --port 443 --target 1.2.3.4:443 --sni www.example.com
-    Menu 8) -> 3) manual accepts the same form (1.2.3.4:443,sni=www.example.com);
+    Menu 9) -> 3) manual accepts the same form (1.2.3.4:443,sni=www.example.com);
     validation uses --resolve to hit that IP and verify the cert covers the name.
     Or just xhy scan: auto-scan this rack's subnet and pick the best site (cached).
 
@@ -4650,6 +5062,7 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
 
   节点管理
     add <mode> [--port N] [选项] 添加节点
+    edit [mode] [port]          编辑已有节点；省略参数时列出编号选择（回车=不改）
     list                        列出所有节点
     link [--all|--uri|--qr]     导出 vless:// 链接
     del [mode] [port]           删除节点；省略参数时列出编号选择
@@ -4689,7 +5102,7 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
                   必须被 target 的证书覆盖。
     目标站挂在 CDN 后面时，dest 要写「源站 IP」、SNI 仍写域名，例如：
         xhy add reality --port 443 --target 1.2.3.4:443 --sni www.example.com
-    交互菜单 8) 伪装站 → 3) 手动指定 支持同一写法（1.2.3.4:443,sni=www.example.com），
+    交互菜单 9) 伪装站 → 3) 手动指定 支持同一写法（1.2.3.4:443,sni=www.example.com），
     校验会用 --resolve 打该 IP，测证书是否真的覆盖这个域名。
     不想手挑就用 xhy scan：自动扫本机机房网段并选最优站点（结果缓存复用）。
 
@@ -4968,7 +5381,7 @@ cmd_scan() {
                 if (( require == 1 )); then
                     err "自动扫描失败：/24 与 /21 里都没有支持被动 TFO 的候选"
                     err "可去掉 --require-tfo 按质量选，或 xhy scan --cidr <其它网段> --require-tfo"
-                    err "也可改用 xhy target → 1) 内置地区库，或 3) 手动指定"
+                    err "也可改用 xhy target → 2) 指定地区，或 3) 手动指定"
                 else
                     err "自动扫描失败；可改用 xhy target → 1) 内置地区库，或 3) 手动指定"
                 fi
@@ -5083,32 +5496,34 @@ cmd_menu() {
         printf '  %s / %s / Xray %s / 节点 %s 个\n' "$XHY_DISTRO" "$XHY_INIT" "$(xray_installed_version)" "$(node_count)"
         xhy_t <<'EOF'
   ---- 节点 ----
-   1) 添加节点               2) 节点列表
-   3) 导出分享链接           4) 删除节点
+   1) 添加节点               2) 编辑节点
+   3) 节点列表               4) 导出分享链接
+   5) 删除节点
   ---- 系统 ----
-   5) 完整安装 / 重装        6) 环境自检
-   7) 配置（路由/DNS/日志）  8) 伪装站
-   9) 防火墙                10) BBR / 内核
+   6) 完整安装 / 重装        7) 环境自检
+   8) 配置（路由/DNS/日志）  9) 伪装站
+  10) 防火墙                11) BBR / 内核
   ---- 维护 ----
-  11) 服务管理              12) Xray 版本通道
-  13) 更新                  14) 卸载
-  15) 备份 / 恢复           16) 扫描伪装站
+  12) 服务管理              13) Xray 版本通道
+  14) 更新                  15) 卸载
+  16) 备份 / 恢复
    0) 退出
 EOF
         case "$(ask '选择' '0')" in
             1) cmd_add_interactive ;;
-            2) node_list; ask '按回车继续' '' ;;
-            3) link_all; ask '按回车继续' '' ;;
-            4) if node_pick; then
+            2) node_edit ;;
+            3) node_list; ask '按回车继续' '' ;;
+            4) link_all; ask '按回车继续' '' ;;
+            5) if node_pick; then
                    if confirm "确认删除节点 ${MODE}_${PORT}？恢复需 xhy rollback" "n"; then
                        node_del "$MODE" "$PORT"
                    fi
                fi ;;
-            5) cmd_install ;;
-            6) self_check ;;
-            7) cmd_config_menu ;;
-            8) target_menu ;;
-            9) local fa
+            6) cmd_install ;;
+            7) self_check ;;
+            8) cmd_config_menu ;;
+            9) target_menu ;;
+           10) local fa
                fa="$(ask 'apply / strict / off / status' 'status')"
                case "$fa" in
                    apply)  firewall_apply safe ;;
@@ -5117,33 +5532,82 @@ EOF
                    off)    firewall_off ;;
                    *)      firewall_status ;;
                esac ;;
-           10) [[ "$(ask 'on / status' 'status')" == "on" ]] && tune_bbr || bbr_status ;;
-           11) local sa
+           11) if [[ "$(ask 'on / status' 'status')" == "on" ]]; then tune_bbr; else bbr_status; fi ;;
+           12) local sa
                sa="$(ask 'start / stop / restart / status' 'status')"
                case "$sa" in
                    start|stop|restart) "svc_$sa" "$SVC_XRAY" ;;
                    *) svc_status "$SVC_XRAY" ;;
                esac ;;
-           12) core_status
+           13) core_status
                local ch; ch="$(ask 'pinned / latest / vX.Y.Z（回车不改）' '')"
-               [[ -n "$ch" ]] && { xray_set_channel "$ch"; core_status; } ;;
-           13) local ua; ua="$(ask 'all / script / core / geodata / config' 'all')"
+               if [[ -n "$ch" ]]; then xray_set_channel "$ch"; core_status; fi ;;
+           14) local ua; ua="$(ask 'all / script / core / geodata / config' 'all')"
                case "$ua" in
                    all) update_all ;; script) update_script ;; core) update_core ;;
                    geodata) update_geodata ;; config) update_config ;;
                esac ;;
-           14) cmd_uninstall; return 0 ;;
-           15) local ba
+           15) cmd_uninstall; return 0 ;;
+           16) local ba
                ba="$(ask 'backup / restore' 'backup')"
                case "$ba" in
                    backup) backup_create ;;
                    restore) backup_restore "$(ask '备份文件路径' '')" ;;
                    *) warn "只支持 backup 或 restore" ;;
                esac ;;
-           16) cmd_scan ;;
             0) return 0 ;;
         esac
     done
+}
+
+cmd_link() {
+    local what="${1:---all}" f
+    case "$what" in
+        --uri)
+            for f in "$XHY_NODES"/*.env; do
+                [[ -f "$f" ]] || continue
+                link_uri "$f"
+            done
+            return 0 ;;
+        --all|"") link_all; return ;;
+        --qr)
+            local n=0; for f in "$XHY_NODES"/*.env; do [[ -f "$f" ]] || continue; link_qr "$f"; n=1; done
+            (( n == 1 )) || warn "暂无节点"; return ;;
+    esac
+    # link <mode> <port>
+    f="$(node_file "$what" "${2:-}")"
+    [[ -f "$f" ]] || die "节点不存在: ${what}_${2:-}"
+    link_from_env "$f"
+}
+
+cmd_uninstall() {
+    need_root
+    warn "这将停止 Xray / cloudflared 服务并移除 xray-hy 的开机项与防火墙链。"
+    confirm "确定卸载？" "n" || { info "已取消"; return 0; }
+    svc_stop "$SVC_CF"; svc_stop "$SVC_XRAY"
+    svc_disable "$SVC_CF"; svc_disable "$SVC_XRAY"
+    remove_cf_service 2>/dev/null || true
+    firewall_off
+    rm -f /etc/systemd/system/xray-hy.service /etc/systemd/system/xray-hy-firewall.service \
+          /etc/init.d/xray-hy /etc/init.d/xray-hy-firewall \
+          /usr/local/lib/xray-hy/tunnel-run /usr/local/bin/xhy \
+          "$XHY_SELF" /etc/sysctl.d/90-xray-hy.conf /etc/modules-load.d/xray-hy.conf
+    # 扫描器是下载来的独立工具，不在 git 工作树里，卸载时单独清。
+    rm -rf "$XHY_TOOLS_DIR"
+    # 仓库内运行时 XHY_APP_DIR 就是工作树：只删入口，不碰 conf/ 和目录本身。
+    if [[ "${XHY_DEV:-0}" != "1" ]]; then
+        rm -rf "$XHY_APP_DIR/conf"
+        rmdir "$XHY_APP_DIR" 2>/dev/null || true
+    fi
+    [[ "$XHY_INIT" == "systemd" ]] && systemctl daemon-reload
+    if confirm "同时删除 Xray 二进制与所有节点配置/凭证？" "n"; then
+        rm -f "$XRAY_BIN" "$CF_BIN"
+        rm -rf "$XRAY_ASSET" "$XHY_ETC"
+        ok "配置与凭证已删除"
+    else
+        ok "已保留 $XHY_ETC（内含节点凭证，权限 0600/0700）"
+    fi
+    ok "卸载完成"
 }
 
 main() {
@@ -5205,6 +5669,7 @@ main() {
         snapshots)  list_snapshots ;;
         rollback)   rollback_config "${1:-}" ;;
         target)     target_menu ;;
+        edit)       node_edit "$@" ;;
         scan)       cmd_scan "$@" ;;
         firewall)   case "${1:-status}" in
                         # --quiet is passed by the boot unit; forward it so boot
