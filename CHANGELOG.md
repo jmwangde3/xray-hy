@@ -2,6 +2,10 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.9.1 — 2026-11-07
+
+- refactor(install): 单文件直装 /usr/local/bin/xhy（不再嵌套 /usr/local/lib/xray-hy + 软链），删除 git 仓库安装模式；install_self/update_script 增加 reconcile_bin 自愈旧软链，升级时自动校正 PATH 入口
+
 ## v1.9.0 — 2026-11-07
 
 - feat(target): 地域推荐名单（伪装站子菜单 1/2）新增「只要 TFO」筛选——选定地域/自动匹配后问一次是否强制 TFO；强制时逐站实测、跳过不支持被动 TFO 的站、绝不做兜底；选择随状态保存，之后新建节点继续沿用

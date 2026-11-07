@@ -135,8 +135,8 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.9.0"
-XHY_BUILD="d88030026112"
+XHY_VERSION="1.9.1"
+XHY_BUILD="5472ac4260a7"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -154,18 +154,43 @@ fi
 # ===================== lib/common.sh =====================
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.9.0}"
+XHY_VERSION="${XHY_VERSION:-1.9.1}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
 # 单文件发布后，"脚本目录"只有两种含义：
-#   已安装 -> /usr/local/lib/xray-hy（软链 /usr/local/bin/xhy 指过去）
+#   已安装 -> 单文件本体直装到 /usr/local/bin/xhy（不再嵌套 /usr/local/lib/xray-hy + 软链）
 #   仓库内 -> 仓库根（xhy 是开发入口，直接 source lib/）
+# 数据目录（内嵌 conf/targets.tsv 落盘、tunnel-run 辅助脚本）仍在 /usr/local/lib/xray-hy，
+# 与脚本本体解耦：用户敲的命令路径变浅，但数据落盘位置不变。
 # 测试会显式给出 XHY_SCRIPT_DIR，因此这里全部用「已存在就不覆盖」的写法。
 XHY_SCRIPT_DIR="${XHY_SCRIPT_DIR:-${XHY_APP_DIR:-/usr/local/lib/xray-hy}}"
 XHY_APP_DIR="${XHY_APP_DIR:-$XHY_SCRIPT_DIR}"
-XHY_SELF="${XHY_SELF:-$XHY_APP_DIR/xhy}"
+XHY_SELF="${XHY_SELF:-/usr/local/bin/xhy}"
 XHY_HOME="${XHY_HOME:-$XHY_APP_DIR}"
+
+# 命令入口自愈：旧版本把 /usr/local/bin/xhy 留成软链（指向已失效的本体或旧仓库）。
+# 直装成文件前必须先摘掉软链，否则 install -m / mv 会顺着软链写进旧本体。
+reconcile_bin() {
+    local bindir="${XHY_BINDIR:-/usr/local/bin}"
+    local target="$bindir/xhy"
+    if [[ -L "$target" ]]; then
+        local cur; cur="$(readlink "$target" 2>/dev/null || true)"
+        info "命令入口是旧软链（$target -> $cur），改为直接安装单文件"
+        rm -f "$target" || true
+    fi
+}
+
+# 迁移清理：单文件改用 /usr/local/bin/xhy 后，旧位置 /usr/local/lib/xray-hy/xhy
+# 成为孤儿。只删这份遗留脚本本体（数据目录里的 conf/、tunnel-run 不动）。
+_cleanup_legacy_self() {
+    local legacy="/usr/local/lib/xray-hy/xhy"
+    local self; self="$(readlink -f "$XHY_SELF" 2>/dev/null || printf '%s' "$XHY_SELF")"
+    [[ "$legacy" == "$self" ]] && return 0
+    [[ -e "$legacy" ]] || return 0
+    [[ "$(head -c 256 "$legacy" 2>/dev/null || true)" == *"xray-hy"* ]] || return 0
+    rm -f "$legacy" || true
+}
 XHY_ETC="${XHY_ETC:-/etc/xray-hy}"
 XHY_CONFDIR="$XHY_ETC/confs"
 XHY_NODES="$XHY_ETC/nodes"
@@ -5060,12 +5085,14 @@ update_script() {
         info "已取消"
         return 0
     fi
+    reconcile_bin
     backup_file "$XHY_SELF"
     if ! install -m 0755 "$tmp" "$XHY_SELF.new" || ! mv -f "$XHY_SELF.new" "$XHY_SELF"; then
         rm -f "$tmp" "$XHY_SELF.new"
         die "替换失败，旧版本仍在 $XHY_SELF"
     fi
     rm -f "$tmp"
+    _cleanup_legacy_self
     ok "已更新到 build $newbuild；当前进程仍是旧版，下次执行 xhy 生效"
 }
 
@@ -5344,6 +5371,280 @@ preflight_check() {
     printf '==============================================\n\n'
 }
 
+# ===================== lib/relay.sh =====================
+# xray-hy / relay —— 中转（relay）子命令：把「入口机」的 AI/美区流量，经 xray
+# 路由转发到「落地机」出口，绕开直连公网绕路（如硅谷 TATA 绕欧洲）。
+#
+# 两种角色（同一台机器只扮其一）：
+#   land  : 落地/接收端（例：硅谷 sanjose）。开一个 vless/tcp 入站，仅放行入口机
+#           公网 IP，出站走默认 freedom（直连落地机本地出口）。
+#   entry : 入口/转发端（例：东京 tokyo）。把 geosite(ai/美区)+geoip:us 的流量，
+#           经 vless 出站转发到落地机的中继端口；其余海外流量本地 freedom 直出。
+#
+# 配置管线说明（重要，避免与 nodes.sh 冲突）：
+#   - land 仅新增一个 confs/relay_in_<port>.json 入站片段，直接复用基础
+#     rebuild_config（它把 confs/*.json 拼成 inbounds），不碰 nodes.sh。
+#   - entry 需要自定义 outbounds + routing 规则，而基础 rebuild_config 的
+#     outbounds/routing 由函数生成、不接受片段。为避免修改 nodes.sh（与「伪装站
+#     TFO」开发会话冲突），这里用 relay_rebuild 本地重新拼装：调用基础 json 函数
+#     + 注入 us-relay 出站与路由规则，零依赖（不靠 jq/python）。
+#   - 限制：基础 rebuild_config 不含 relay。entry 激活后，若又跑 xhy add/del/edit
+#     等触发基础 rebuild 的命令，relay 出站/路由会被覆盖；改完节点后跑
+#     `xhy relay reapply` 重新注入即可。
+#
+# 状态存 $XHY_NODES/relay.env（与节点注册同目录，纳入快照）。
+
+# 全局状态变量（relay_env_save 前由各子命令赋值）
+RELAY_ROLE=""; RELAY_PORT=""; RELAY_ALLOW=""; RELAY_UUID=""
+RELAY_UPSTREAM=""; RELAY_CATEGORIES=""; RELAY_FW_CHAIN=""
+
+relay_reset_vars() {
+    RELAY_ROLE=""; RELAY_PORT=""; RELAY_ALLOW=""; RELAY_UUID=""
+    RELAY_UPSTREAM=""; RELAY_CATEGORIES=""; RELAY_FW_CHAIN=""
+}
+
+relay_env_save() {
+    init_dirs
+    local f="$XHY_NODES/relay.env"
+    {
+        [[ -n "$RELAY_ROLE" ]]       && echo "RELAY_ROLE=$RELAY_ROLE"
+        [[ -n "$RELAY_PORT" ]]       && echo "RELAY_PORT=$RELAY_PORT"
+        [[ -n "$RELAY_ALLOW" ]]      && echo "RELAY_ALLOW=$RELAY_ALLOW"
+        [[ -n "$RELAY_UUID" ]]       && echo "RELAY_UUID=$RELAY_UUID"
+        [[ -n "$RELAY_UPSTREAM" ]]   && echo "RELAY_UPSTREAM=$RELAY_UPSTREAM"
+        [[ -n "$RELAY_CATEGORIES" ]] && echo "RELAY_CATEGORIES=$RELAY_CATEGORIES"
+        [[ -n "$RELAY_FW_CHAIN" ]]   && echo "RELAY_FW_CHAIN=$RELAY_FW_CHAIN"
+    } | atomic_write "$f" 0600
+}
+
+relay_env_load() {
+    local f="$XHY_NODES/relay.env"
+    [[ -f "$f" ]] || return 1
+    # shellcheck disable=SC1090
+    source "$f"
+    [[ -n "$RELAY_ROLE" ]]
+}
+
+# 生成 land 入站片段（符合 confs/*.json 入站片段格式，被 rebuild_config 拼进 inbounds）
+relay_fragment() {
+    local port="$1" uuid="$2"
+    cat <<EOF
+{
+  "listen": "0.0.0.0", "port": ${port}, "protocol": "vless",
+  "tag": "in-relay-${port}",
+  "settings": { "clients": [ { "id": "${uuid}" } ], "decryption": "none" },
+  "streamSettings": { "network": "tcp", "security": "none" },
+  "sniffing": {"enabled":true,"destOverride":["tls"],"routeOnly":true}
+}
+EOF
+}
+
+# entry 出站（转发到落地机中继端口）
+relay_outbounds_json() {
+    local up="$RELAY_UPSTREAM" host port
+    host="${up%:*}"; port="${up##*:}"
+    cat <<EOF
+{"protocol":"vless","tag":"us-relay","settings":{"vnext":[{"address":"$host","port":$port,"users":[{"id":"$RELAY_UUID","encryption":"none"}]}]},"streamSettings":{"network":"tcp"}}
+EOF
+}
+
+# entry 路由规则（注入到 routing.rules 数组最前面）。输出为「逗号分隔的 rule 对象」，无方括号
+relay_routing_rules() {
+    local cats="$RELAY_CATEGORIES" domains="" sep="" c
+    for c in ${cats//,/ }; do
+        domains+="$sep\"geosite:$c\""; sep=","
+    done
+    printf '%s' "{\"type\":\"field\",\"domain\":[$domains],\"outboundTag\":\"us-relay\"},{\"type\":\"field\",\"ip\":[\"geoip:us\"],\"outboundTag\":\"us-relay\"}"
+}
+
+# entry 专用重建：调用基础 json 函数 + 注入 relay 出站/路由
+relay_rebuild() {
+    local joined="" sep="" f
+    init_dirs
+    [[ "${XHY_SKIP_SNAPSHOT:-0}" == "1" ]] || snapshot_state
+    for f in "$XHY_CONFDIR"/*.json; do
+        [[ -s "$f" ]] || continue
+        joined+="$sep$(cat "$f")"
+        sep=","
+    done
+    # outbounds: 基础 [freedom,blackhole] + relay
+    local ob="$(outbounds_json)"
+    local ob_inner="${ob#\[}"; ob_inner="${ob_inner%\]}"
+    local outbounds="[${ob_inner},$(relay_outbounds_json)]"
+    # routing: 基础规则 + 前置 relay 规则
+    local rt="$(routing_json)"
+    local rt_rules="${rt#*\"rules\":\[}"; rt_rules="${rt_rules%\]*}"
+    local new_rules
+    if [[ -z "$rt_rules" ]]; then new_rules="$(relay_routing_rules)"
+    else new_rules="$(relay_routing_rules),${rt_rules}"; fi
+    local routing="{\"domainStrategy\":\"IPIfNonMatch\",\"rules\":[${new_rules}]}"
+    {
+        printf '{\n  "log": %s,\n' "$(log_json)"
+        printf '  "inbounds": [%s],\n' "$joined"
+        printf '  "dns": %s,\n' "$(dns_json)"
+        printf '  "routing": %s,\n' "$routing"
+        printf '  "outbounds": %s,\n' "$outbounds"
+        printf '  "policy": %s\n}\n' "$(policy_json)"
+    } | atomic_write "$XHY_ETC/config.json" 0600
+    ok "配置已重建（含 relay 出站/路由）: $XHY_ETC/config.json"
+}
+
+relay_fw_add() {
+    local port="$1" allow="$2" chain t
+    t=iptables; [[ "$allow" == *:* ]] && t=ip6tables
+    if $t -w -L XHY-IN -n >/dev/null 2>&1; then chain=XHY-IN; else chain=INPUT; fi
+    $t -w -C "$chain" -p tcp --dport "$port" -s "$allow" -j ACCEPT 2>/dev/null \
+        || $t -w -A "$chain" -p tcp --dport "$port" -s "$allow" -m comment --comment "xhy-relay-$port" -j ACCEPT
+    RELAY_FW_CHAIN="$chain"
+}
+
+relay_fw_del() {
+    local port="$1" allow="$2" chain="${3:-XHY-IN}" t
+    t=iptables; [[ "$allow" == *:* ]] && t=ip6tables
+    $t -w -D "$chain" -p tcp --dport "$port" -s "$allow" -m comment --comment "xhy-relay-$port" -j ACCEPT 2>/dev/null \
+        || $t -w -D INPUT -p tcp --dport "$port" -s "$allow" -m comment --comment "xhy-relay-$port" -j ACCEPT 2>/dev/null \
+        || true
+}
+
+relay_cfg_test() {
+    if [[ -x "$XRAY_BIN" ]] && "$XRAY_BIN" run -test -c "$XHY_ETC/config.json" >/dev/null 2>&1; then
+        ok "config.json 校验通过"
+        return 0
+    else
+        warn "config.json 校验未通过（xray run -test 失败，检查片段 JSON）"
+        return 1
+    fi
+}
+
+# ---------------------------------------------------------------- 子命令
+
+relay_land() {
+    local port=14430 allow="" uuid=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --port)  port="$2"; shift 2 ;;
+            --allow) allow="$2"; shift 2 ;;
+            --uuid)  uuid="$2"; shift 2 ;;
+            *) die "未知参数: $1（用法: xhy relay land [--port N] [--allow <入口机公网IP>] [--uuid UUID]）" ;;
+        esac
+    done
+    relay_reset_vars
+    valid_port "$port" || die "端口不合法: $port"
+    port_busy "$port" && die "端口 $port 已被占用"
+    [[ -z "$allow" ]] && die "缺少 --allow <入口机公网IP>：落地端只放行该 IP 到中继端口"
+    [[ -z "$uuid" ]] && uuid="$(uuid_gen)"
+    disk_need 1 "中继入站配置"
+    relay_fragment "$port" "$uuid" | atomic_write "$XHY_CONFDIR/relay_in_${port}.json" 0644
+    relay_fw_add "$port" "$allow"
+    rebuild_config
+    RELAY_ROLE=land
+    RELAY_PORT="$port"
+    RELAY_ALLOW="$allow"
+    RELAY_UUID="$uuid"
+    RELAY_FW_CHAIN="$RELAY_FW_CHAIN"
+    relay_env_save
+    relay_cfg_test
+    local myip="$(public_ip)"
+    ok "中继入站已就绪：${myip}:$port（仅放行 $allow）"
+    info "把同一 UUID 带到入口机执行："
+    printf '    xhy relay entry --to %s:%s --uuid %s\n' "$myip" "$port" "$uuid"
+    printf 'vless://%s@%s:%s?encryption=none#relay-land\n' "$uuid" "$myip" "$port"
+}
+
+relay_entry() {
+    local upstream="" uuid="" categories="openai,anthropic,google,tiktok,netflix"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --to) upstream="$2"; shift 2 ;;
+            --uuid) uuid="$2"; shift 2 ;;
+            --categories) categories="$2"; shift 2 ;;
+            *) die "未知参数: $1（用法: xhy relay entry --to <落地IP>:<端口> [--uuid UUID] [--categories a,b,c]）" ;;
+        esac
+    done
+    relay_reset_vars
+    [[ "$upstream" == *:* ]] || die "缺少 --to <落地机公网IP>:<端口>"
+    [[ -z "$uuid" ]] && uuid="$(uuid_gen)"
+    local host="${upstream%:*}" p="${upstream##*:}"
+    valid_port "$p" || die "端口不合法: $p"
+    disk_need 1 "中继出站配置"
+    RELAY_ROLE=entry
+    RELAY_UPSTREAM="$upstream"
+    RELAY_UUID="$uuid"
+    RELAY_CATEGORIES="$categories"
+    relay_env_save
+    relay_rebuild
+    relay_cfg_test
+    ok "中继出站已就绪：美区/AI 流量 → $upstream"
+    info "落地端用同一 UUID 配置：xhy relay land --allow <本机公网IP> --uuid $uuid"
+}
+
+relay_reapply() {
+    relay_env_load || die "本机未配置 relay（先跑 xhy relay entry）"
+    [[ "$RELAY_ROLE" == "entry" ]] || die "只有入口机需要 reapply"
+    relay_rebuild
+    ok "已重新注入 relay 出站/路由"
+}
+
+relay_status() {
+    relay_env_load || { info "本机未配置 relay"; return 0; }
+    case "$RELAY_ROLE" in
+        land)
+            info "角色: 落地(接收端)  端口=$RELAY_PORT  放行源=$RELAY_ALLOW  UUID=$RELAY_UUID"
+            ss -H -ltn 2>/dev/null | grep -qE "[:.]${RELAY_PORT}$" && ok "端口 $RELAY_PORT 监听中" || warn "端口 $RELAY_PORT 未监听" ;;
+        entry)
+            info "角色: 入口(转发端)  落地=$RELAY_UPSTREAM  UUID=$RELAY_UUID  分类=$RELAY_CATEGORIES"
+            relay_cfg_test >/dev/null 2>&1 && ok "config.json 含 relay 出站/路由" || warn "config.json 未含 relay（跑 xhy relay reapply）" ;;
+    esac
+}
+
+relay_test() {
+    relay_env_load || { info "本机未配置 relay，无法测试"; return 0; }
+    relay_cfg_test || warn "配置校验失败"
+    if [[ "$RELAY_ROLE" == "land" ]]; then
+        local t=iptables; [[ "$RELAY_ALLOW" == *:* ]] && t=ip6tables
+        $t -w -C "${RELAY_FW_CHAIN:-XHY-IN}" -p tcp --dport "$RELAY_PORT" -s "$RELAY_ALLOW" -j ACCEPT >/dev/null 2>&1 \
+            && ok "防火墙已放行 $RELAY_ALLOW → :$RELAY_PORT" || warn "防火墙规则缺失"
+        ss -H -ltn 2>/dev/null | grep -qE "[:.]${RELAY_PORT}$" && ok "中继端口监听中" || warn "中继端口未监听"
+        info "从入口机执行 xhy relay test，并视需要 curl 经本机出口验证"
+    else
+        local host="${RELAY_UPSTREAM%:*}" p="${RELAY_UPSTREAM##*:}"
+        if timeout 5 bash -c "cat < /dev/null > /dev/tcp/$host/$p" 2>/dev/null; then
+            ok "入口机能 TCP 连通落地端 $RELAY_UPSTREAM"
+        else
+            warn "入口机无法 TCP 连通落地端 $RELAY_UPSTREAM（检查落地端防火墙/端口）"
+        fi
+        info "最终验证：客户端走入口机访问 ipinfo.io 应显示落地端所在地区 IP"
+    fi
+}
+
+relay_del() {
+    relay_env_load || { info "本机无 relay 配置"; return 0; }
+    if [[ "$RELAY_ROLE" == "land" ]]; then
+        rm -f "$XHY_CONFDIR/relay_in_${RELAY_PORT}.json"
+        relay_fw_del "$RELAY_PORT" "$RELAY_ALLOW" "${RELAY_FW_CHAIN:-XHY-IN}"
+        rebuild_config
+        rm -f "$XHY_NODES/relay.env"
+        ok "落地端中继已移除（片段+防火墙+重建）"
+    else
+        rm -f "$XHY_NODES/relay.env"
+        rebuild_config
+        ok "入口端 relay 已移除（恢复基础路由）"
+    fi
+}
+
+cmd_relay() {
+    local sub="${1:-status}"; shift || true
+    case "$sub" in
+        land)    relay_land "$@" ;;
+        entry)   relay_entry "$@" ;;
+        reapply) relay_reapply "$@" ;;
+        status)  relay_status "$@" ;;
+        test)    relay_test "$@" ;;
+        del)     relay_del "$@" ;;
+        *)       die "用法: xhy relay <land|entry|reapply|status|test|del>" ;;
+    esac
+}
+
 # ============ 内嵌数据：conf/targets.tsv ============
 targets_tsv() {
     cat <<'XHY_TARGETS_TSV'
@@ -5382,16 +5683,18 @@ XHY_TARGETS_TSV
 }
 
 # ===================== entry/main.sh =====================
-# 把「正在运行的这个文件」装到 $XHY_APP_DIR/xhy，供 /usr/local/bin/xhy 软链。
+# 把「正在运行的这个文件」直装成 /usr/local/bin/xhy（不再嵌套 /usr/local/lib/xray-hy + 软链）。
 #   本地文件运行（sh install.sh / ./xhy）：直接复制
 #   bash <(curl ...)：BASH_SOURCE 是管道，读不回来，按 XHY_INSTALL_URL 取一份
 # 已经在目标位置运行时（开发目录）什么都不做。
 install_self() {
     need_root
+    reconcile_bin
     install -d -m 0755 "$XHY_APP_DIR" || die "无法创建 $XHY_APP_DIR"
     local src="${XHY_RUNNING:-}" tmp
     if [[ -n "$src" ]] && [[ "$(readlink -f "$src" 2>/dev/null || echo "$src")" == "$(readlink -f "$XHY_SELF" 2>/dev/null || echo "$XHY_SELF")" ]]; then
         chmod 0755 "$XHY_SELF" 2>/dev/null || true
+        _cleanup_legacy_self
         return 0
     fi
     tmp="$XHY_SELF.new.$$"
@@ -5414,6 +5717,7 @@ install_self() {
     fi
     mv -f "$tmp" "$XHY_SELF" || { rm -f "$tmp"; die "无法写入 $XHY_SELF"; }
     ok "脚本已安装到 $XHY_SELF"
+    _cleanup_legacy_self
 }
 
 # 命令入口目录：默认 /usr/local/bin，离线测试用 XHY_BINDIR 指到临时目录，
@@ -5421,10 +5725,13 @@ install_self() {
 XHY_BINDIR="${XHY_BINDIR:-/usr/local/bin}"
 
 create_symlink() {
-    install -d -m 0755 "$XHY_BINDIR"
+    local bindir="${XHY_BINDIR:-/usr/local/bin}"
+    # 单文件已直接装在 $bindir/xhy 时不再做软链（否则会变成自指向的环）。
+    [[ "$XHY_SELF" == "$bindir/xhy" ]] && { chmod 0755 "$XHY_SELF" 2>/dev/null || true; return 0; }
+    install -d -m 0755 "$bindir"
     chmod 0755 "$XHY_SELF"
-    ln -sf "$XHY_SELF" "$XHY_BINDIR/xhy"
-    ok "命令入口: $XHY_BINDIR/xhy -> $XHY_SELF"
+    ln -sf "$XHY_SELF" "$bindir/xhy"
+    ok "命令入口: $bindir/xhy -> $XHY_SELF"
 }
 
 # 一键脚本（bash <(curl ...)、wget|sh、sh install.sh）跑完后退出菜单，
@@ -5433,37 +5740,17 @@ create_symlink() {
 # 都不存在。任何从非安装位置发起的运行，先在这里把本体与入口装上（幂等）。
 XHY_BOOTSTRAPPED=0
 
-# 正在运行的位置是不是一份 git 克隆（方式 B）：同目录有 .git / xhy / lib/common.sh。
-# 这种机器升级走 `git pull --ff-only`，在里面跑 install.sh 绝不能被自举悄悄改写成
-# 方式 A 的单文件安装（那会把 /usr/local/bin/xhy 指向 /usr/local/lib/xray-hy，
-# 之后再 git pull 就不生效了）。
-xhy_is_repo_checkout() {
-    local d="${1:-}"
-    if [[ -z "$d" ]]; then
-        d="$(cd -P "$(dirname "${XHY_RUNNING:-/nonexistent}")" 2>/dev/null && pwd)" || return 1
-    fi
-    [[ -n "$d" ]] || return 1
-    [[ -d "$d/.git" ]] || return 1
-    [[ -f "$d/xhy" ]] || return 1
-    [[ -f "$d/lib/common.sh" ]] || return 1
-    return 0
-}
-
+# 一键脚本（bash <(curl ...)、wget|sh、sh install.sh）跑完后退出菜单，
+# `xhy` 必须能用。以前只有 cmd_install 的 stage 2 会落地脚本本体，而无参数
+# 运行走的是菜单，于是「装完了」其实什么都没装 —— 连 /usr/local/bin/xhy
+# 都不存在。任何从非安装位置发起的运行，先在这里把本体与入口装上（幂等）。
+# 统一安装路径：单文件永远直装到 /usr/local/bin/xhy（不再有 git 仓库 / 单文件
+# 两套模式抢这个入口；旧软链由 reconcile_bin 在 install_self 里自动摘掉）。
 bootstrap_self() {
     [[ "${XHY_DEV:-0}" == "1" ]] && return 0
-    local src="${XHY_RUNNING:-}" self repo
+    local src="${XHY_RUNNING:-}" self
     self="$(readlink -f "$XHY_SELF" 2>/dev/null || printf '%s' "$XHY_SELF")"
     if [[ -n "$src" ]] && [[ "$(readlink -f "$src" 2>/dev/null || printf '%s' "$src")" == "$self" ]]; then
-        return 0
-    fi
-    if repo="$(cd -P "$(dirname "${src:-/nonexistent}")" 2>/dev/null && pwd)" && xhy_is_repo_checkout "$repo"; then
-        install -d -m 0755 "$XHY_BINDIR"
-        ln -sf "$repo/xhy" "$XHY_BINDIR/xhy"
-        XHY_SCRIPT_DIR="$repo"
-        XHY_APP_DIR="$repo"
-        XHY_SELF="$repo/xhy"
-        XHY_BOOTSTRAPPED=1
-        ok "仓库部署：命令入口 $XHY_BINDIR/xhy -> $repo/xhy（升级用 git pull --ff-only）"
         return 0
     fi
     install_self
@@ -6251,6 +6538,7 @@ main() {
         target)     target_menu ;;
         edit)       node_edit "$@" ;;
         clean)      cmd_clean "$@" ;;
+        relay)      cmd_relay "$@" ;;
         scan)       cmd_scan "$@" ;;
         firewall)   case "${1:-status}" in
                         # --quiet is passed by the boot unit; forward it so boot

@@ -1,18 +1,43 @@
 #!/usr/bin/env bash
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.9.0}"
+XHY_VERSION="${XHY_VERSION:-1.9.1}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
 # 单文件发布后，"脚本目录"只有两种含义：
-#   已安装 -> /usr/local/lib/xray-hy（软链 /usr/local/bin/xhy 指过去）
+#   已安装 -> 单文件本体直装到 /usr/local/bin/xhy（不再嵌套 /usr/local/lib/xray-hy + 软链）
 #   仓库内 -> 仓库根（xhy 是开发入口，直接 source lib/）
+# 数据目录（内嵌 conf/targets.tsv 落盘、tunnel-run 辅助脚本）仍在 /usr/local/lib/xray-hy，
+# 与脚本本体解耦：用户敲的命令路径变浅，但数据落盘位置不变。
 # 测试会显式给出 XHY_SCRIPT_DIR，因此这里全部用「已存在就不覆盖」的写法。
 XHY_SCRIPT_DIR="${XHY_SCRIPT_DIR:-${XHY_APP_DIR:-/usr/local/lib/xray-hy}}"
 XHY_APP_DIR="${XHY_APP_DIR:-$XHY_SCRIPT_DIR}"
-XHY_SELF="${XHY_SELF:-$XHY_APP_DIR/xhy}"
+XHY_SELF="${XHY_SELF:-/usr/local/bin/xhy}"
 XHY_HOME="${XHY_HOME:-$XHY_APP_DIR}"
+
+# 命令入口自愈：旧版本把 /usr/local/bin/xhy 留成软链（指向已失效的本体或旧仓库）。
+# 直装成文件前必须先摘掉软链，否则 install -m / mv 会顺着软链写进旧本体。
+reconcile_bin() {
+    local bindir="${XHY_BINDIR:-/usr/local/bin}"
+    local target="$bindir/xhy"
+    if [[ -L "$target" ]]; then
+        local cur; cur="$(readlink "$target" 2>/dev/null || true)"
+        info "命令入口是旧软链（$target -> $cur），改为直接安装单文件"
+        rm -f "$target" || true
+    fi
+}
+
+# 迁移清理：单文件改用 /usr/local/bin/xhy 后，旧位置 /usr/local/lib/xray-hy/xhy
+# 成为孤儿。只删这份遗留脚本本体（数据目录里的 conf/、tunnel-run 不动）。
+_cleanup_legacy_self() {
+    local legacy="/usr/local/lib/xray-hy/xhy"
+    local self; self="$(readlink -f "$XHY_SELF" 2>/dev/null || printf '%s' "$XHY_SELF")"
+    [[ "$legacy" == "$self" ]] && return 0
+    [[ -e "$legacy" ]] || return 0
+    [[ "$(head -c 256 "$legacy" 2>/dev/null || true)" == *"xray-hy"* ]] || return 0
+    rm -f "$legacy" || true
+}
 XHY_ETC="${XHY_ETC:-/etc/xray-hy}"
 XHY_CONFDIR="$XHY_ETC/confs"
 XHY_NODES="$XHY_ETC/nodes"

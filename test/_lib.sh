@@ -34,7 +34,7 @@ export MSYS2_ARG_CONV_EXCL='/CN;DNS'
 
 load_libs() {
     local l
-    for l in common i18n sockopt platform core service hardening target scanner nodes links export backup update; do
+    for l in common i18n sockopt platform core service hardening target scanner nodes links export backup update relay; do
         # shellcheck disable=SC1090
         source "$REPO/lib/$l.sh"
     done

@@ -40,18 +40,18 @@ chk "一键脚本会装脚本本体" 'grep -qx self "$LOG"'
 chk "一键脚本会建 xhy 入口" 'grep -qx link "$LOG"'
 chk "置 XHY_BOOTSTRAPPED=1" '[[ "$XHY_BOOTSTRAPPED" == 1 ]]'
 
-echo "=== 仓库克隆里跑 install.sh 不改写成单文件安装 ==="
-: >"$TEST_TMP/repo/xhy"
-: >"$TEST_TMP/repo/lib/common.sh"
-rm -f "$XHY_BINDIR/xhy"
-: >"$LOG"
-XHY_DEV=0 XHY_RUNNING="$TEST_TMP/repo/install.sh" XHY_SELF="$TEST_TMP/xhy" XHY_BOOTSTRAPPED=0
-bootstrap_self >/dev/null 2>&1
-chk "识别仓库克隆（xhy_is_repo_checkout）" 'xhy_is_repo_checkout "$TEST_TMP/repo"'
-chk "不执行 install_self（不复制单文件）" '[[ ! -s "$LOG" ]]'
-chk "入口指向仓库内 xhy" '[[ "$(readlink "$XHY_BINDIR/xhy")" == "$TEST_TMP/repo/xhy" ]]'
-chk "XHY_APP_DIR 切到仓库根" '[[ "$XHY_APP_DIR" == "$TEST_TMP/repo" ]]'
-chk "普通目录不算仓库克隆" '! xhy_is_repo_checkout "$TEST_TMP"'
+echo "=== reconcile_bin 自愈旧软链（统一路径后必须能修好指错入口） ==="
+mkdir -p "$TEST_TMP/old"
+: >"$TEST_TMP/old/xhy"
+ln -sf "$TEST_TMP/old/xhy" "$XHY_BINDIR/xhy"
+chk "旧软链存在" '[[ -L "$XHY_BINDIR/xhy" ]]'
+reconcile_bin
+chk "旧软链被摘掉（直装前清场）" '[[ ! -L "$XHY_BINDIR/xhy" ]]'
+# 模拟已经直装成文件后，再次遇到旧软链也幂等
+: >"$XHY_BINDIR/xhy"
+ln -sf "$TEST_TMP/old/xhy" "$XHY_BINDIR/xhy"
+reconcile_bin
+chk "reconcile 幂等（不报错、软链消失）" '[[ ! -L "$XHY_BINDIR/xhy" ]]'
 
 echo "=== xhy_is_installed ==="
 init_dirs
@@ -76,6 +76,7 @@ echo "=== 源码接线 ==="
 for spec in \
     "bootstrap_self 定义存在|grep -q '^bootstrap_self()' entry/main.sh" \
     "xhy_is_installed 定义存在|grep -q '^xhy_is_installed()' entry/main.sh" \
+    "reconcile_bin 定义存在（自愈旧软链）|grep -q '^reconcile_bin()' lib/common.sh" \
     "默认命令改成 auto|grep -q 'local cmd=\"\${1:-auto}\"' entry/main.sh" \
     "auto 分支先判是否已安装|grep -q '|| xhy_is_installed; then' entry/main.sh" \
     "开发入口不触发自动安装|grep -q 'XHY_DEV:-0.*==.*1.*|| xhy_is_installed' entry/main.sh" \

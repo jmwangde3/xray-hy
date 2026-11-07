@@ -70,12 +70,14 @@ update_script() {
         info "已取消"
         return 0
     fi
+    reconcile_bin
     backup_file "$XHY_SELF"
     if ! install -m 0755 "$tmp" "$XHY_SELF.new" || ! mv -f "$XHY_SELF.new" "$XHY_SELF"; then
         rm -f "$tmp" "$XHY_SELF.new"
         die "替换失败，旧版本仍在 $XHY_SELF"
     fi
     rm -f "$tmp"
+    _cleanup_legacy_self
     ok "已更新到 build $newbuild；当前进程仍是旧版，下次执行 xhy 生效"
 }
 

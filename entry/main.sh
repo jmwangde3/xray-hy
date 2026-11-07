@@ -1,13 +1,15 @@
-# 把「正在运行的这个文件」装到 $XHY_APP_DIR/xhy，供 /usr/local/bin/xhy 软链。
+# 把「正在运行的这个文件」直装成 /usr/local/bin/xhy（不再嵌套 /usr/local/lib/xray-hy + 软链）。
 #   本地文件运行（sh install.sh / ./xhy）：直接复制
 #   bash <(curl ...)：BASH_SOURCE 是管道，读不回来，按 XHY_INSTALL_URL 取一份
 # 已经在目标位置运行时（开发目录）什么都不做。
 install_self() {
     need_root
+    reconcile_bin
     install -d -m 0755 "$XHY_APP_DIR" || die "无法创建 $XHY_APP_DIR"
     local src="${XHY_RUNNING:-}" tmp
     if [[ -n "$src" ]] && [[ "$(readlink -f "$src" 2>/dev/null || echo "$src")" == "$(readlink -f "$XHY_SELF" 2>/dev/null || echo "$XHY_SELF")" ]]; then
         chmod 0755 "$XHY_SELF" 2>/dev/null || true
+        _cleanup_legacy_self
         return 0
     fi
     tmp="$XHY_SELF.new.$$"
@@ -30,6 +32,7 @@ install_self() {
     fi
     mv -f "$tmp" "$XHY_SELF" || { rm -f "$tmp"; die "无法写入 $XHY_SELF"; }
     ok "脚本已安装到 $XHY_SELF"
+    _cleanup_legacy_self
 }
 
 # 命令入口目录：默认 /usr/local/bin，离线测试用 XHY_BINDIR 指到临时目录，
@@ -37,10 +40,13 @@ install_self() {
 XHY_BINDIR="${XHY_BINDIR:-/usr/local/bin}"
 
 create_symlink() {
-    install -d -m 0755 "$XHY_BINDIR"
+    local bindir="${XHY_BINDIR:-/usr/local/bin}"
+    # 单文件已直接装在 $bindir/xhy 时不再做软链（否则会变成自指向的环）。
+    [[ "$XHY_SELF" == "$bindir/xhy" ]] && { chmod 0755 "$XHY_SELF" 2>/dev/null || true; return 0; }
+    install -d -m 0755 "$bindir"
     chmod 0755 "$XHY_SELF"
-    ln -sf "$XHY_SELF" "$XHY_BINDIR/xhy"
-    ok "命令入口: $XHY_BINDIR/xhy -> $XHY_SELF"
+    ln -sf "$XHY_SELF" "$bindir/xhy"
+    ok "命令入口: $bindir/xhy -> $XHY_SELF"
 }
 
 # 一键脚本（bash <(curl ...)、wget|sh、sh install.sh）跑完后退出菜单，
@@ -49,37 +55,17 @@ create_symlink() {
 # 都不存在。任何从非安装位置发起的运行，先在这里把本体与入口装上（幂等）。
 XHY_BOOTSTRAPPED=0
 
-# 正在运行的位置是不是一份 git 克隆（方式 B）：同目录有 .git / xhy / lib/common.sh。
-# 这种机器升级走 `git pull --ff-only`，在里面跑 install.sh 绝不能被自举悄悄改写成
-# 方式 A 的单文件安装（那会把 /usr/local/bin/xhy 指向 /usr/local/lib/xray-hy，
-# 之后再 git pull 就不生效了）。
-xhy_is_repo_checkout() {
-    local d="${1:-}"
-    if [[ -z "$d" ]]; then
-        d="$(cd -P "$(dirname "${XHY_RUNNING:-/nonexistent}")" 2>/dev/null && pwd)" || return 1
-    fi
-    [[ -n "$d" ]] || return 1
-    [[ -d "$d/.git" ]] || return 1
-    [[ -f "$d/xhy" ]] || return 1
-    [[ -f "$d/lib/common.sh" ]] || return 1
-    return 0
-}
-
+# 一键脚本（bash <(curl ...)、wget|sh、sh install.sh）跑完后退出菜单，
+# `xhy` 必须能用。以前只有 cmd_install 的 stage 2 会落地脚本本体，而无参数
+# 运行走的是菜单，于是「装完了」其实什么都没装 —— 连 /usr/local/bin/xhy
+# 都不存在。任何从非安装位置发起的运行，先在这里把本体与入口装上（幂等）。
+# 统一安装路径：单文件永远直装到 /usr/local/bin/xhy（不再有 git 仓库 / 单文件
+# 两套模式抢这个入口；旧软链由 reconcile_bin 在 install_self 里自动摘掉）。
 bootstrap_self() {
     [[ "${XHY_DEV:-0}" == "1" ]] && return 0
-    local src="${XHY_RUNNING:-}" self repo
+    local src="${XHY_RUNNING:-}" self
     self="$(readlink -f "$XHY_SELF" 2>/dev/null || printf '%s' "$XHY_SELF")"
     if [[ -n "$src" ]] && [[ "$(readlink -f "$src" 2>/dev/null || printf '%s' "$src")" == "$self" ]]; then
-        return 0
-    fi
-    if repo="$(cd -P "$(dirname "${src:-/nonexistent}")" 2>/dev/null && pwd)" && xhy_is_repo_checkout "$repo"; then
-        install -d -m 0755 "$XHY_BINDIR"
-        ln -sf "$repo/xhy" "$XHY_BINDIR/xhy"
-        XHY_SCRIPT_DIR="$repo"
-        XHY_APP_DIR="$repo"
-        XHY_SELF="$repo/xhy"
-        XHY_BOOTSTRAPPED=1
-        ok "仓库部署：命令入口 $XHY_BINDIR/xhy -> $repo/xhy（升级用 git pull --ff-only）"
         return 0
     fi
     install_self
@@ -867,6 +853,7 @@ main() {
         target)     target_menu ;;
         edit)       node_edit "$@" ;;
         clean)      cmd_clean "$@" ;;
+        relay)      cmd_relay "$@" ;;
         scan)       cmd_scan "$@" ;;
         firewall)   case "${1:-status}" in
                         # --quiet is passed by the boot unit; forward it so boot

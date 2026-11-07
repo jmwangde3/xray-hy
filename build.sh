@@ -12,7 +12,7 @@ set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="$ROOT/install.sh"
-LIBS=(common i18n sockopt platform core service hardening target scanner nodes links export backup update)
+LIBS=(common i18n sockopt platform core service hardening target scanner nodes links export backup update relay)
 PRELUDE="$ROOT/entry/prelude.sh"
 MAIN="$ROOT/entry/main.sh"
 TARGETS="$ROOT/conf/targets.tsv"
