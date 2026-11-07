@@ -80,6 +80,8 @@ chk "TERM=linux 非中文 -> en"  '( XHY_LANG=auto LANG=en_US.UTF-8 TERM=linux x
 chk "state 里 en -> en"        'state_set XHY_LANG en; ( XHY_LANG=auto xhy_lang_init; [[ "$XHY_LANG_EFFECTIVE" == en ]] )'
 chk "UTF-8 xterm 保持中文"     'state_del XHY_LANG; ( XHY_LANG=auto LANG=zh_CN.UTF-8 TERM=xterm-256color xhy_lang_init; [[ "$XHY_LANG_EFFECTIVE" == zh ]] )'
 chk "TERM=dumb 不是控制台，保持中文" 'state_del XHY_LANG; ( XHY_LANG=auto LANG=zh_CN.UTF-8 TERM=dumb xhy_lang_init; [[ "$XHY_LANG_EFFECTIVE" == zh ]] )'
+chk "空 LANG（Alpine 默认）保持中文" 'state_del XHY_LANG; ( XHY_LANG=auto LANG= LC_ALL= LC_CTYPE= TERM=xterm-256color xhy_lang_init; [[ "$XHY_LANG_EFFECTIVE" == zh ]] )'
+chk "空 LANG + 控制台 TERM -> en"   'state_del XHY_LANG; ( XHY_LANG=auto LANG= LC_ALL= LC_CTYPE= TERM=linux xhy_lang_init; [[ "$XHY_LANG_EFFECTIVE" == en ]] )'
 
 echo "=== 源码接线 ==="
 for spec in \

@@ -255,12 +255,18 @@ xhy_lang_init() {
         en|english|ascii) XHY_LANG_EFFECTIVE="en" ;;
         zh|cn|chinese|zh_cn|zh_tw) XHY_LANG_EFFECTIVE="zh" ;;
         *)
+            # 空 locale ≠ 非 UTF-8。Alpine / 精简容器默认根本没有 LANG，终端照样
+            # 是 UTF-8、中文照样能显示；早期把空值当 no_utf8，导致普通 ssh 会话
+            # 一律被判成英文。只有「明确设了、且不是 UTF-8」才算。
             lang_all="${LC_ALL:-${LC_CTYPE:-${LANG:-}}}"
             case "${lang_all,,}" in zh*|*zh_cn*|*zh_tw*) is_zh=1 ;; esac
-            case "$lang_all" in ""|C|POSIX|c|posix) no_utf8=1 ;; esac
-            cm="$(locale charmap 2>/dev/null || true)"
-            if [[ -n "$cm" ]]; then
-                case "${cm,,}" in *utf-8*|*utf8*) ;; *) no_utf8=1 ;; esac
+            if [[ -n "$lang_all" || -n "${LC_ALL:-}" || -n "${LC_CTYPE:-}" ]]; then
+                case "$lang_all" in C|POSIX|c|posix) no_utf8=1 ;; esac
+                case "${lang_all,,}" in *utf-8*|*utf8*) ;; *) no_utf8=1 ;; esac
+                cm="$(locale charmap 2>/dev/null || true)"
+                if [[ -n "$cm" ]]; then
+                    case "${cm,,}" in *utf-8*|*utf8*) ;; *) no_utf8=1 ;; esac
+                fi
             fi
             # 云 VNC / 串口控制台的 TERM：没有中文字形。
             # 不含 dumb：非交互 ssh / CI / agent 管道常见 TERM=dumb，那不是
