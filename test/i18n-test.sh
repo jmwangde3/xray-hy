@@ -30,6 +30,8 @@ chk "校验行译成英文"     '[[ "$en" == *"no redirect"* && "$en" == *"TFO: 
 chk "校验行纯 ASCII"     '! printf "%s" "$en" | LC_ALL=C grep -q "[^ -~]"'
 en="$(XHY_LANG_EFFECTIVE=en xhy_t '这个新词没进词表也不会变成小方块')"
 chk "未登录词条仍纯 ASCII" '! printf "%s" "$en" | LC_ALL=C grep -q "[^ -~]"'
+en="$(XHY_LANG_EFFECTIVE=en xhy_t 'scan完成support')"
+chk "未登录中文换成空格不粘连" '[[ "$en" == *scan* && "$en" == *support* && "$en" != *scansupport* ]]'
 
 echo "=== 纯 ASCII 数据不被改写 ==="
 json='{"sockopt":{"tcpFastOpen":false},"remark":"hello"}'
@@ -77,6 +79,7 @@ chk "LANG=C -> en"             '( XHY_LANG=auto LANG=C LC_ALL=C TERM=xterm xhy_l
 chk "TERM=linux 非中文 -> en"  '( XHY_LANG=auto LANG=en_US.UTF-8 TERM=linux xhy_lang_init; [[ "$XHY_LANG_EFFECTIVE" == en ]] )'
 chk "state 里 en -> en"        'state_set XHY_LANG en; ( XHY_LANG=auto xhy_lang_init; [[ "$XHY_LANG_EFFECTIVE" == en ]] )'
 chk "UTF-8 xterm 保持中文"     'state_del XHY_LANG; ( XHY_LANG=auto LANG=zh_CN.UTF-8 TERM=xterm-256color xhy_lang_init; [[ "$XHY_LANG_EFFECTIVE" == zh ]] )'
+chk "TERM=dumb 不是控制台，保持中文" 'state_del XHY_LANG; ( XHY_LANG=auto LANG=zh_CN.UTF-8 TERM=dumb xhy_lang_init; [[ "$XHY_LANG_EFFECTIVE" == zh ]] )'
 
 echo "=== 源码接线 ==="
 for spec in \
@@ -96,7 +99,8 @@ for spec in \
     "target 展示文本用 xhy_t|grep -q \"xhy_t <<'EOF'\" lib/target.sh" \
     "配置片段仍用 cat 不走过滤器|grep -q '保持 cat，别走语言过滤器' lib/target.sh" \
     "ask 提示过 xhy_t|grep -q 'xhy_t \"\$p\"' lib/common.sh" \
-    "英文模式硬保证 tr -cd|grep -q 'tr -cd' lib/i18n.sh" \
+    "英文模式硬保证纯 ASCII|grep -q \"LC_ALL=C tr -c '\" lib/i18n.sh" \
+    "dumb 不算控制台终端|! grep -q 'linux|dumb|vt100' lib/i18n.sh" \
     "ASCII 快速路径存在|grep -q 'xhy_is_ascii' lib/i18n.sh" \
     "glob 元字符已转义|grep -qF '\\[0\\]' lib/i18n.sh"; do
     d="${spec%%|*}"; c="${spec#*|}"

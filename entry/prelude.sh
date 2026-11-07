@@ -38,7 +38,7 @@ case "${XHY_LANG:-}" in
         case "$_xhy_lc" in
             zh*|ZH*) ;;
             C|POSIX|c|posix|"") _XHY_POSIX_LANG=en ;;
-            *) case "${TERM:-}" in linux|dumb|vt100|vt102|ansi|cons25|sun) _XHY_POSIX_LANG=en ;; esac ;;
+            *) case "${TERM:-}" in linux|vt100|vt102|ansi|cons25|sun) _XHY_POSIX_LANG=en ;; esac ;;
         esac
         _cm="$(locale charmap 2>/dev/null || true)"
         case "$_cm" in

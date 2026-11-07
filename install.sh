@@ -38,7 +38,7 @@ case "${XHY_LANG:-}" in
         case "$_xhy_lc" in
             zh*|ZH*) ;;
             C|POSIX|c|posix|"") _XHY_POSIX_LANG=en ;;
-            *) case "${TERM:-}" in linux|dumb|vt100|vt102|ansi|cons25|sun) _XHY_POSIX_LANG=en ;; esac ;;
+            *) case "${TERM:-}" in linux|vt100|vt102|ansi|cons25|sun) _XHY_POSIX_LANG=en ;; esac ;;
         esac
         _cm="$(locale charmap 2>/dev/null || true)"
         case "$_cm" in
@@ -136,7 +136,7 @@ fi
 set -Eeuo pipefail
 
 XHY_VERSION="1.4.4"
-XHY_BUILD="0ac7e85efb67"
+XHY_BUILD="7845d157f31c"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -651,15 +651,17 @@ xhy_is_ascii() {
     return 0
 }
 
-# 一行的翻译：先按短语表替换，再用 tr -cd 删掉所有残留的非 ASCII 字节。
+# 一行的翻译：先按短语表替换，再把残留的非 ASCII 字节换成空格。
 # 最后这一步是硬保证：即便将来新增了没进词表的中文，VNC 上也只会看到 ASCII。
-# 保留 tab/LF/CR/ESC（ANSI 颜色）与 0x20-0x7e 可打印字符。
+# 用 tr -c（替换成空格）而不是 tr -cd（直接删除）：中文是多字节，直接删会让
+# 前后两个英文词粘成一个（"scan完成support" -> "scandonesupport"），换空格
+# 后至少还能读。保留 tab/LF/CR/ESC（ANSI 颜色）与 0x20-0x7e 可打印字符。
 xhy_t_line() {
     local s="$1" i
     for (( i = 0; i < ${#XHY_T_ZH[@]}; i++ )); do
         s="${s//${XHY_T_ZH[$i]}/${XHY_T_EN[$i]}}"
     done
-    builtin printf '%s' "$(builtin printf '%s' "$s" | LC_ALL=C tr -cd '\11\12\15\33\40-\176')"
+    builtin printf '%s' "$(builtin printf '%s' "$s" | LC_ALL=C tr -c '\11\12\15\33\40-\176' ' ')"
 }
 
 # xhy_t <字符串>  或  xhy_t <<'EOF' ... EOF（整段展示文本）
@@ -721,9 +723,11 @@ xhy_lang_init() {
             if [[ -n "$cm" ]]; then
                 case "${cm,,}" in *utf-8*|*utf8*) ;; *) no_utf8=1 ;; esac
             fi
-            # 云 VNC / 串口控制台 / 纯 console 的 TERM：没有中文字形。
+            # 云 VNC / 串口控制台的 TERM：没有中文字形。
+            # 不含 dumb：非交互 ssh / CI / agent 管道常见 TERM=dumb，那不是
+            # 控制台，输出中文给日志和管道读完全没问题，不该切成英文。
             # 中文 locale 明确出现时尊重用户（他自己配了字形）。
-            case "${TERM:-}" in linux|dumb|vt100|vt102|ansi|cons25|sun) console=1 ;; esac
+            case "${TERM:-}" in linux|vt100|vt102|ansi|cons25|sun) console=1 ;; esac
             if (( no_utf8 == 1 )); then
                 # 脚本输出是 UTF-8、终端却不是：中文只会更乱，直接英文。
                 XHY_LANG_EFFECTIVE="en"
