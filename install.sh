@@ -135,8 +135,8 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.7.4"
-XHY_BUILD="43e7464349f9"
+XHY_VERSION="1.8.0"
+XHY_BUILD="4600f39d30e9"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -154,7 +154,7 @@ fi
 # ===================== lib/common.sh =====================
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.7.4}"
+XHY_VERSION="${XHY_VERSION:-1.8.0}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -551,6 +551,15 @@ verify_release_digest() {
 # 不带 declare：本文件是在 load_libs() 函数内被 source 的，显式 declare 会创建
 # 局部变量，函数返回后数组就丢了（同一个坑 scanner.sh 的 XHY_TFO_CACHE 踩过）。
 XHY_T_ZH=(
+    "本机不具备被动 TFO 探测能力："
+    "此时 --require-tfo 的结果必然是空，不代表网段里没有支持 TFO 的站点。"
+    "改为按质量选站（不强制 TFO）？"
+    "已按你的要求中止。修好上面那条再跑，或去掉 --require-tfo。"
+    "TFO 探测  : 可用（curl --tcp-fastopen + nstat + 客户端位已开）"
+    "TFO 探测  : 不可用（%s）—— --require-tfo 会恒为空"
+    "nstat 缺失（apk add iproute2 / apt install iproute2）"
+    "net.ipv4.tcp_fastopen=%s，客户端位没开（需 1 或 3）"
+    "curl 缺失"
     "扫描范围默认是本机公网 IP 所在 /24；无合格站点、或强制 TFO 时没找到支持 TFO 的站，会自动扩到 /21 再扫一次" "根分区余量不足 200 MB：盘满会让 sshd 写不了会话文件、SSH 直接连不上。先跑 xhy clean" "当前网段内没有支持被动 TFO 的候选（每个站点后已标注 TFO 结果）；将自动扩大到 /21 再扫一次"
     "安装完成。现在可用 xhy add reality 添加第一个节点，或直接输入 xhy 打开菜单。" "  xhy lang en    强制英文（纯 ASCII；云 VNC 控制台中文是小方块时用）" "已按新的端口 / SNI 重签 Hysteria2 证书，客户端的 pinSHA256 需要更新"
     "节点参数已写入但未生效，可用 xhy snapshots + xhy rollback 回退" "TFO 只省首连 1 个 RTT，伪装站又不承载正常代理流量，不值得为它牺牲站点质量。" "  单次强制：XHY_LANG=en xhy  或  XHY_ASCII=1 xhy"
@@ -652,6 +661,15 @@ XHY_T_ZH=(
 )
 
 XHY_T_EN=(
+    "Local TFO probing unavailable: "
+    "so --require-tfo would always come back empty; that does NOT mean this subnet has no TFO-capable site."
+    "Pick by quality instead (do not require TFO)?"
+    "Aborted as requested. Fix the line above, or drop --require-tfo."
+    "TFO probe : ready (curl --tcp-fastopen + nstat + client bit on)"
+    "TFO probe : NOT ready (%s) -- --require-tfo would always be empty"
+    "nstat missing (apk add iproute2 / apt install iproute2)"
+    "net.ipv4.tcp_fastopen=%s has the client bit off (needs 1 or 3)"
+    "curl missing"
     "Default scan range is this host's /24; with no usable site (or no TFO-capable site when required) it auto-widens to /21 and rescans" "Root filesystem has <200 MB free. A full disk makes sshd unable to write session files, so SSH stops responding while the proxy keeps running. Run xhy clean first" "No TFO-capable candidate in this subnet (each site above is labelled); auto-widening to /21 and rescanning"
     "Install complete. Run xhy add reality to add the first node, or just xhy for the menu." "  xhy lang en    force English (pure ASCII; use when a cloud VNC shows boxes)" "Hysteria2 cert re-issued for the new port/SNI; update pinSHA256 on clients"
     "Node updated but not active; use xhy snapshots + xhy rollback to revert" "TFO only saves 1 RTT on the first connect and the target carries no proxy traffic; not worth trading site quality for." "  one-shot: XHY_LANG=en xhy   or  XHY_ASCII=1 xhy"
@@ -975,6 +993,51 @@ sockopt_cc_available() {
 # 判定伪装站 target 是否启用被动 TFO。
 # 返回 0 = 支持（应开 TFO）；1 = 不支持或判不了（应关，失败时保守关闭）。
 # 判据：curl --tcp-fastopen 连打 3 次，TcpExtTCPFastOpenActive 是否增长。
+# 本机到底能不能探测「别人的」被动 TFO —— 三个前提缺一不可：
+#   ① curl 支持 --tcp-fastopen
+#   ② nstat 能读 MIB（判据靠 TcpExtTCPFastOpenActive 增量）
+#   ③ net.ipv4.tcp_fastopen 的**客户端位**（bit 0）为 1；为 0 时内核根本不会
+#      带数据发 SYN，任何服务端都测成「不支持」——这是最典型的静默假阴性。
+# 三者任一不满足，--require-tfo 的结果必然是「一个都没有」，所以要先判再扫。
+tfo_probe_ready() {
+    local v
+    have_cmd curl || return 1
+    have_cmd nstat || return 1
+    v="$(sysctl -n net.ipv4.tcp_fastopen 2>/dev/null || echo 0)"
+    [[ "$v" =~ ^[0-9]+$ ]] || v=0
+    (( v & 1 )) || return 1
+    return 0
+}
+
+# 说明「为什么不能探」，给用户一句能行动的话。
+tfo_probe_blocker() {
+    local v
+    have_cmd curl || { printf 'curl 缺失'; return 0; }
+    have_cmd nstat || { printf 'nstat 缺失（apk add iproute2 / apt install iproute2）'; return 0; }
+    v="$(sysctl -n net.ipv4.tcp_fastopen 2>/dev/null || echo 0)"
+    [[ "$v" =~ ^[0-9]+$ ]] || v=0
+    if (( !(v & 1) )); then
+        printf 'net.ipv4.tcp_fastopen=%s，客户端位没开（需 1 或 3）' "$v"
+        return 0
+    fi
+    printf ''
+}
+
+# 把一个域名钉到单个 IPv4。TFO cookie 按目的 IP 缓存，多 A 记录的站在
+# 三次 curl 之间可能落到不同 IP 上，于是「支持 TFO 的站」也会测出 0 —— 假阴性。
+# 扫描器本身以 IP 为候选（dest 是 IP，走 --resolve 已天然钉死），这里补的是
+# 「用户直接给域名」那条路。
+resolve_v4_one() {
+    local h="$1" ip=""
+    if have_cmd getent; then
+        ip="$(getent ahostsv4 "$h" 2>/dev/null | awk 'NR==1{print $1}')"
+    fi
+    if [[ ! "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && have_cmd nslookup; then
+        ip="$(nslookup -type=A "$h" 2>/dev/null | awk '/^Name:/{f=1;next} f && /^Address: /{print $2; exit}')"
+    fi
+    [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && printf '%s' "$ip"
+}
+
 target_tfo_detect() {
     local dest="$1" port="${2:-443}" sni="${3:-}" b a i resolve=()
     have_cmd curl || return 1
@@ -982,6 +1045,11 @@ target_tfo_detect() {
     [[ -n "$sni" ]] || sni="$dest"
     if is_ip_literal "$dest"; then
         resolve=(--resolve "${sni}:${port}:${dest}")
+    else
+        # 多 A 记录的站：钉死一个 IP，否则三次试探可能各连一台，cookie 永远攒不齐。
+        local _ip
+        _ip="$(resolve_v4_one "$dest")"
+        [[ -n "$_ip" ]] && resolve=(--resolve "${sni}:${port}:${_ip}")
     fi
     b="$(nstat -az 2>/dev/null | awk '$1=="TcpExtTCPFastOpenActive"{print $2}')"
     [[ "$b" =~ ^[0-9]+$ ]] || return 1
@@ -3160,6 +3228,19 @@ scanner_pick() {
         esac
     done
 
+    # 「本机根本探不出 TFO」必须在开扫之前说清楚：否则用户看到的是
+    # 「扫了 /24 又扫 /21，一个都没有」，会误判成"全网没人开 TFO"。
+    if (( require_tfo == 1 )) && ! tfo_probe_ready; then
+        warn "本机不具备被动 TFO 探测能力：$(tfo_probe_blocker)"
+        warn "此时 --require-tfo 的结果必然是空，不代表网段里没有支持 TFO 的站点。"
+        if confirm "改为按质量选站（不强制 TFO）？" "y"; then
+            require_tfo=0
+        else
+            err "已按你的要求中止。修好上面那条再跑，或去掉 --require-tfo。" >&2
+            return 1
+        fi
+    fi
+
     if (( refresh == 0 )) && scanner_cache_valid; then
         cache_ok=1
         sc_info "使用扫描缓存（$(scanner_cache_age_h) 小时前，$(scanner_cache_count) 个候选；--refresh 可强制重扫）"
@@ -5050,6 +5131,13 @@ self_check() {
         fi
     done
     printf 'TFO       : 跟随伪装站（开 %d / 关 %d；--tfo auto|on|off 可覆盖）\n' "$_tfo_on" "$_tfo_off"
+    # 探测能力与「节点开没开」是两件事：本机客户端位没开 / 缺 nstat 时，
+    # --require-tfo 会把全部候选判成「不支持」，看起来像"全网没人开 TFO"。
+    if tfo_probe_ready; then
+        printf 'TFO 探测  : 可用（curl --tcp-fastopen + nstat + 客户端位已开）\n'
+    else
+        printf 'TFO 探测  : 不可用（%s）—— --require-tfo 会恒为空\n' "$(tfo_probe_blocker)"
+    fi
     # v1.4.2：tcpcongestion 按内核能力决定写不写，无 bbr 时该字段根本不出现。
     # 这里显示的是**实际渲染结果**而不是"应该是什么"，排查时少一层猜测。
     if sockopt_cc_available; then

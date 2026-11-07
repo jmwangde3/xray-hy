@@ -19,6 +19,15 @@
 # 不带 declare：本文件是在 load_libs() 函数内被 source 的，显式 declare 会创建
 # 局部变量，函数返回后数组就丢了（同一个坑 scanner.sh 的 XHY_TFO_CACHE 踩过）。
 XHY_T_ZH=(
+    "本机不具备被动 TFO 探测能力："
+    "此时 --require-tfo 的结果必然是空，不代表网段里没有支持 TFO 的站点。"
+    "改为按质量选站（不强制 TFO）？"
+    "已按你的要求中止。修好上面那条再跑，或去掉 --require-tfo。"
+    "TFO 探测  : 可用（curl --tcp-fastopen + nstat + 客户端位已开）"
+    "TFO 探测  : 不可用（%s）—— --require-tfo 会恒为空"
+    "nstat 缺失（apk add iproute2 / apt install iproute2）"
+    "net.ipv4.tcp_fastopen=%s，客户端位没开（需 1 或 3）"
+    "curl 缺失"
     "扫描范围默认是本机公网 IP 所在 /24；无合格站点、或强制 TFO 时没找到支持 TFO 的站，会自动扩到 /21 再扫一次" "根分区余量不足 200 MB：盘满会让 sshd 写不了会话文件、SSH 直接连不上。先跑 xhy clean" "当前网段内没有支持被动 TFO 的候选（每个站点后已标注 TFO 结果）；将自动扩大到 /21 再扫一次"
     "安装完成。现在可用 xhy add reality 添加第一个节点，或直接输入 xhy 打开菜单。" "  xhy lang en    强制英文（纯 ASCII；云 VNC 控制台中文是小方块时用）" "已按新的端口 / SNI 重签 Hysteria2 证书，客户端的 pinSHA256 需要更新"
     "节点参数已写入但未生效，可用 xhy snapshots + xhy rollback 回退" "TFO 只省首连 1 个 RTT，伪装站又不承载正常代理流量，不值得为它牺牲站点质量。" "  单次强制：XHY_LANG=en xhy  或  XHY_ASCII=1 xhy"
@@ -120,6 +129,15 @@ XHY_T_ZH=(
 )
 
 XHY_T_EN=(
+    "Local TFO probing unavailable: "
+    "so --require-tfo would always come back empty; that does NOT mean this subnet has no TFO-capable site."
+    "Pick by quality instead (do not require TFO)?"
+    "Aborted as requested. Fix the line above, or drop --require-tfo."
+    "TFO probe : ready (curl --tcp-fastopen + nstat + client bit on)"
+    "TFO probe : NOT ready (%s) -- --require-tfo would always be empty"
+    "nstat missing (apk add iproute2 / apt install iproute2)"
+    "net.ipv4.tcp_fastopen=%s has the client bit off (needs 1 or 3)"
+    "curl missing"
     "Default scan range is this host's /24; with no usable site (or no TFO-capable site when required) it auto-widens to /21 and rescans" "Root filesystem has <200 MB free. A full disk makes sshd unable to write session files, so SSH stops responding while the proxy keeps running. Run xhy clean first" "No TFO-capable candidate in this subnet (each site above is labelled); auto-widening to /21 and rescanning"
     "Install complete. Run xhy add reality to add the first node, or just xhy for the menu." "  xhy lang en    force English (pure ASCII; use when a cloud VNC shows boxes)" "Hysteria2 cert re-issued for the new port/SNI; update pinSHA256 on clients"
     "Node updated but not active; use xhy snapshots + xhy rollback to revert" "TFO only saves 1 RTT on the first connect and the target carries no proxy traffic; not worth trading site quality for." "  one-shot: XHY_LANG=en xhy   or  XHY_ASCII=1 xhy"

@@ -617,6 +617,19 @@ scanner_pick() {
         esac
     done
 
+    # 「本机根本探不出 TFO」必须在开扫之前说清楚：否则用户看到的是
+    # 「扫了 /24 又扫 /21，一个都没有」，会误判成"全网没人开 TFO"。
+    if (( require_tfo == 1 )) && ! tfo_probe_ready; then
+        warn "本机不具备被动 TFO 探测能力：$(tfo_probe_blocker)"
+        warn "此时 --require-tfo 的结果必然是空，不代表网段里没有支持 TFO 的站点。"
+        if confirm "改为按质量选站（不强制 TFO）？" "y"; then
+            require_tfo=0
+        else
+            err "已按你的要求中止。修好上面那条再跑，或去掉 --require-tfo。" >&2
+            return 1
+        fi
+    fi
+
     if (( refresh == 0 )) && scanner_cache_valid; then
         cache_ok=1
         sc_info "使用扫描缓存（$(scanner_cache_age_h) 小时前，$(scanner_cache_count) 个候选；--refresh 可强制重扫）"

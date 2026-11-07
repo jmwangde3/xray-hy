@@ -3,7 +3,9 @@
 #
 # 锁定 target_tfo_detect 的判据：
 #   curl --tcp-fastopen 连打 3 次，TcpExtTCPFastOpenActive 增长 -> 目标支持
-#   IP target 用 --resolve SNI:port:IP 打真源站；域名 target 不带 --resolve
+#   IP target 用 --resolve SNI:port:IP 打真源站；域名 target 先解析再钉死一个 IP
+#   （TFO cookie 按目的 IP 缓存，多 A 记录不钉会假阴性）；解析失败才退回不钉
+#   客户端位 net.ipv4.tcp_fastopen bit0 没开 / 缺 nstat -> 必然全假阴性，先判后扫
 #   工具缺失 / 计数读不到 -> 保守判定「不支持」
 # 以及 tfo_decide 的 on/off/auto 三种模式。
 set -u
@@ -38,6 +40,17 @@ have_cmd() {
     esac
 }
 is_ip_literal() { [[ "${1:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
+# 客户端位（bit 0）与探测能力判定要用到 sysctl；默认按"能探"（3）给。
+FAKE_FASTOPEN=3
+sysctl() {
+    case "${2:-}" in
+        net.ipv4.tcp_fastopen) printf '%s\n' "$FAKE_FASTOPEN"; return 0 ;;
+        *) return 1 ;;
+    esac
+}
+# 域名解析结果可控：空串 = 解析失败（回到不钉 IP 的旧行为）
+FAKE_RESOLVE_IP=""
+resolve_v4_one() { printf '%s' "$FAKE_RESOLVE_IP"; }
 
 pass=0 fail=0
 chk() {
@@ -51,6 +64,7 @@ chk() {
 reset() {
     FAKE_ACTIVE=0; FAKE_DELTA=0; CURL_CALLS=0; CURL_ARGS=""
     FAKE_HAVE_CURL=0; FAKE_HAVE_NSTAT=0; FAKE_NSTAT_BAD=0
+    FAKE_FASTOPEN=3; FAKE_RESOLVE_IP=""
 }
 
 echo "=== 目标不支持（Active 不增长）==="
@@ -73,13 +87,36 @@ chk "on -> 1"                    "1" "$(tfo_decide on 47.88.102.65 443 www.easeu
 chk "off -> 0"                   "0" "$(tfo_decide off 47.88.102.65 443 www.easeus.com)"
 chk "on/off 不调 curl"           "0" "$CURL_CALLS"
 
-echo "=== --resolve 只在 IP target 时出现 ==="
+echo "=== --resolve：IP 天然钉死，域名解析后也钉死 ==="
 reset; FAKE_DELTA=1
 target_tfo_detect 47.88.102.65 443 www.easeus.com >/dev/null 2>&1
 chk "IP target 带 --resolve"     "1" "$(printf '%s' "$CURL_ARGS" | grep -c -- '--resolve www.easeus.com:443:47.88.102.65')"
-reset; FAKE_DELTA=1
+reset; FAKE_DELTA=1; FAKE_RESOLVE_IP="93.184.216.34"
 target_tfo_detect real.example.com 443 real.example.com >/dev/null 2>&1
-chk "域名 target 不带 --resolve" "0" "$(printf '%s' "$CURL_ARGS" | grep -c -- '--resolve')"
+chk "域名解析成功则钉死 IP"       "1" "$(printf '%s' "$CURL_ARGS" | grep -c -- '--resolve real.example.com:443:93.184.216.34')"
+chk "钉死后 3 次打同一 IP"         "3" "$(printf '%s' "$CURL_ARGS" | grep -o -- '93.184.216.34' | wc -l | tr -d ' ')"
+reset; FAKE_DELTA=1; FAKE_RESOLVE_IP=""
+target_tfo_detect real.example.com 443 real.example.com >/dev/null 2>&1
+chk "解析失败则退回不钉 IP"       "0" "$(printf '%s' "$CURL_ARGS" | grep -c -- '--resolve')"
+
+echo "=== 探测能力：客户端位没开 = 必然全部假阴性 ==="
+# 约定：FAKE_HAVE_* = 0 表示"有这个命令"（与 have_cmd 的返回语义一致）
+reset
+chk "fastopen=3 可探"            "0" "$(tfo_probe_ready; echo $?)"
+FAKE_FASTOPEN=1
+chk "fastopen=1 可探（客户端位）" "0" "$(tfo_probe_ready; echo $?)"
+FAKE_FASTOPEN=2
+chk "fastopen=2 不可探（只有服务端位）" "1" "$(tfo_probe_ready; echo $?)"
+chk "说明指出客户端位"            "1" "$(tfo_probe_blocker | grep -c '客户端位')"
+FAKE_FASTOPEN=0
+chk "fastopen=0 不可探"          "1" "$(tfo_probe_ready; echo $?)"
+reset; FAKE_HAVE_NSTAT=1; FAKE_FASTOPEN=3
+chk "缺 nstat 不可探"             "1" "$(tfo_probe_ready; echo $?)"
+chk "说明指出 nstat"              "1" "$(tfo_probe_blocker | grep -c 'nstat')"
+reset; FAKE_HAVE_CURL=1; FAKE_FASTOPEN=3
+chk "缺 curl 不可探"              "1" "$(tfo_probe_ready; echo $?)"
+reset; FAKE_FASTOPEN=3
+chk "能力齐备时说明为空"          "" "$(tfo_probe_blocker)"
 
 echo "=== 失败时保守关闭 ==="
 reset; FAKE_HAVE_CURL=1

@@ -26,6 +26,11 @@ SCAN_LOG="$TEST_TMP/scan.log"
 scanner_default_cidr() { printf '1.1.1.0/24'; }
 scanner_scan() { printf '%s %s\n' "$1" "${2:-0}" >>"$SCAN_LOG"; return 1; }
 
+# 扫描前的「本机探测能力」自检：离线环境下 sysctl/nstat 不可信，
+# 这里固定为「可探测」，否则 scanner_pick 会先问要不要放弃 --require-tfo。
+tfo_probe_ready() { return 0; }
+tfo_probe_blocker() { printf ''; }
+
 # stub_system 把探测 stub 成「不支持」；这里按 IP 注入可控结果。
 target_tfo_detect() {
     case " $TFO_SUPPORT " in

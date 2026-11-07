@@ -2,6 +2,13 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.8.0 — 2026-11-07
+
+- feat(tfo): `--require-tfo` 开扫之前先自检「本机能不能探」——`curl --tcp-fastopen`、`nstat`、`net.ipv4.tcp_fastopen` 的**客户端位**三者缺一，任何目标都会被判成「不支持」，用户看到的是「扫了 /24 又扫 /21 一个都没有」，极易误判成「全网没人开 TFO」。缺条件时直接说明原因，并问一次是否改为按质量选站
+- fix(tfo): 域名目标先解析再 `--resolve` 钉死**单个 IP**再探三次。TFO cookie 按目的 IP 缓存，多 A 记录的站三次试探可能落到不同 IP，支持 TFO 的站也会测成 0（假阴性）
+- feat(check): `xhy check` 新增「TFO 探测 : 可用 / 不可用（原因）」一行，与「节点开没开 TFO」分开显示
+- test: `tfo-test.sh` 17 → 28 项（钉 IP、解析失败退回、客户端位 0/1/2/3、缺 curl/nstat）
+
 ## v1.7.4 — 2026-11-07
 
 - fix(check): 遗留钩子告警文案与实际行为对齐 —— 是**原地改名**（`xhy-backup-prune.retired-<ts>`，含 `.` 故 run-parts 不再执行），不是搬到 `/root`；告警里给出的回滚命令随之正确

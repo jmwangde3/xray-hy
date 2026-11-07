@@ -229,6 +229,13 @@ self_check() {
         fi
     done
     printf 'TFO       : 跟随伪装站（开 %d / 关 %d；--tfo auto|on|off 可覆盖）\n' "$_tfo_on" "$_tfo_off"
+    # 探测能力与「节点开没开」是两件事：本机客户端位没开 / 缺 nstat 时，
+    # --require-tfo 会把全部候选判成「不支持」，看起来像"全网没人开 TFO"。
+    if tfo_probe_ready; then
+        printf 'TFO 探测  : 可用（curl --tcp-fastopen + nstat + 客户端位已开）\n'
+    else
+        printf 'TFO 探测  : 不可用（%s）—— --require-tfo 会恒为空\n' "$(tfo_probe_blocker)"
+    fi
     # v1.4.2：tcpcongestion 按内核能力决定写不写，无 bbr 时该字段根本不出现。
     # 这里显示的是**实际渲染结果**而不是"应该是什么"，排查时少一层猜测。
     if sockopt_cc_available; then
