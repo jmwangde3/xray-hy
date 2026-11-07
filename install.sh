@@ -135,8 +135,8 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.4.4"
-XHY_BUILD="2774cb4dc0c4"
+XHY_VERSION="1.5.0"
+XHY_BUILD="d254b16a9fe1"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -154,7 +154,7 @@ fi
 # ===================== lib/common.sh =====================
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.4.4}"
+XHY_VERSION="${XHY_VERSION:-1.5.0}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 

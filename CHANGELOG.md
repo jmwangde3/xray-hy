@@ -2,6 +2,18 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.5.0 — 2026-11-07
+
+- 一键安装语义修正：`install.sh` 无参数 = `auto`，未安装则跑完整安装（脚本本体 + `/usr/local/bin/xhy`）并进菜单，已安装直接进菜单。任何从管道 / 临时文件启动的调用都会 `bootstrap_self` 先落地入口，装完 `xhy` 立刻可用
+- 新增语言层 `lib/i18n.sh`：`XHY_LANG=zh|en|auto`、`XHY_ASCII=1`、`xhy lang`。`en` 模式经短语表 + `tr -c` 兜底，硬保证纯可印 ASCII —— 云厂商 VNC 控制台没有中文字形，原来满屏小方块
+- `xhy scan --require-tfo` 自动扩网段：`/24`（含缓存）找不到支持被动 TFO 的站点时，自动扩到同机房 `/21` 再扫一次；缓存路径直接扩 `/21`，绝不重复扫同一 `/24`。扩视野用 `SCANNER_TFO_POOL_WIDE=32` 防新站被前排挤掉
+- 扫描输出每个候选后面标注 `TFO 支持 / 不支持`，覆盖 `[ok]` 校验行、3-5 候选短名单、`xhy scan --list` / `--verify`；现场探测，不写进缓存
+- 修 `--require-tfo` 过滤为空被当成「缓存候选都已失效」→ 白重扫同一 `/24`、同样 8 行 `[ok]` 打两遍；现在直接失败并给三条可选路径
+- 修仓库部署被自举改写成单文件安装：在 `/opt/xray-hy` 这类 git 克隆里跑 `install.sh` 会把入口改指 `/usr/local/lib/xray-hy`，之后 `git pull` 不再生效；现在识别仓库并只把入口指向该仓库
+- 修 `TERM=dumb` 与空 `LANG` 误判：非交互 ssh / CI 的 `TERM=dumb` 曾触发英文、Alpine 出厂无 locale 的空 `LANG` 曾被当 C locale，普通 ssh 中文输出被切成英文。现在只有真 console TERM（`linux`/`vt100`/`vt102`/`ansi`/`cons25`/`sun`）或明确设了且非 UTF-8 的 locale 才切英文
+- 修英文模式 `tr -cd` 删字节导致未登录中文两侧英文词粘连；改用 `tr -c` 替换为空格
+- 新增 `XHY_BINDIR`（默认 `/usr/local/bin`），离线测试不再往系统目录写软链；新增 `test/i18n-test.sh` 与 `test/bootstrap-test.sh`，全量断言 357 项
+
 ## v1.4.4 — 2026-11-07
 
 - 修 `xhy check` 的过时文案：v1.4.3 把 TFO 改回可配置后，输出里仍写着 v1.4.1 遗留的 `TFO : off（固定，无开关）`。现在改为统计现网节点的实际判定：`TFO : 跟随伪装站（开 N / 关 M；--tfo auto|on|off 可覆盖）`
