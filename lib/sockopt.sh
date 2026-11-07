@@ -97,14 +97,35 @@ sockopt_cc_available() {
 # 判据：curl --tcp-fastopen 连打 3 次，TcpExtTCPFastOpenActive 是否增长。
 # 本机到底能不能探测「别人的」被动 TFO —— 三个前提缺一不可：
 #   ① curl 支持 --tcp-fastopen
-#   ② nstat 能读 MIB（判据靠 TcpExtTCPFastOpenActive 增量）
+#   ② 读 MIB 的通道可用（nstat 或 /proc/net/netstat 任一可读；精简系统常无 nstat，
+#      但 /proc/net/netstat 里 TCPFastOpenActive 字段在，必须回退，否则明明能探却
+#      被判「不可用」——8.222.223.248 即此情形：tcp_fastopen=3、无 nstat、但
+#      /proc 可读，实测 curl --tcp-fastopen 后 TCPFastOpenActive 照常 +6）
 #   ③ net.ipv4.tcp_fastopen 的**客户端位**（bit 0）为 1；为 0 时内核根本不会
 #      带数据发 SYN，任何服务端都测成「不支持」——这是最典型的静默假阴性。
 # 三者任一不满足，--require-tfo 的结果必然是「一个都没有」，所以要先判再扫。
+
+# 读内核 TcpExtTCPFastOpenActive 计数。优先 nstat；精简系统（BusyBox / 未装
+# iproute2）常无 nstat，但 /proc/net/netstat 里字段在，必须回退，否则探测链路
+# 明明能探却被判成「不可用」。XHY_NETSTAT_PROC 可重定向，便于测试。
+tfo_active_read() {
+    local v="" proc="${XHY_NETSTAT_PROC:-/proc/net/netstat}"
+    if have_cmd nstat; then
+        v="$(nstat -az 2>/dev/null | awk '$1=="TcpExtTCPFastOpenActive"{print $2}')"
+    fi
+    if [[ ! "$v" =~ ^[0-9]+$ ]] && [[ -r "$proc" ]]; then
+        v="$(awk '/^TcpExt:/{ if(h==0){for(i=1;i<=NF;i++) if($i=="TCPFastOpenActive") c=i; h=1; next} else {print $c; exit} }' "$proc" 2>/dev/null)"
+    fi
+    [[ "$v" =~ ^[0-9]+$ ]] && printf '%s' "$v"
+}
+
 tfo_probe_ready() {
     local v
     have_cmd curl || return 1
-    have_cmd nstat || return 1
+    # ② 通道：nstat 或 /proc/net/netstat 任一可读即可。
+    if ! have_cmd nstat && [[ ! -r "${XHY_NETSTAT_PROC:-/proc/net/netstat}" ]]; then
+        return 1
+    fi
     v="$(sysctl -n net.ipv4.tcp_fastopen 2>/dev/null || echo 0)"
     [[ "$v" =~ ^[0-9]+$ ]] || v=0
     (( v & 1 )) || return 1
@@ -115,7 +136,10 @@ tfo_probe_ready() {
 tfo_probe_blocker() {
     local v
     have_cmd curl || { printf 'curl 缺失'; return 0; }
-    have_cmd nstat || { printf 'nstat 缺失（apk add iproute2 / apt install iproute2）'; return 0; }
+    if ! have_cmd nstat && [[ ! -r "${XHY_NETSTAT_PROC:-/proc/net/netstat}" ]]; then
+        printf 'nstat 缺失且 /proc/net/netstat 不可读（apk add iproute2 / apt install iproute2）'
+        return 0
+    fi
     v="$(sysctl -n net.ipv4.tcp_fastopen 2>/dev/null || echo 0)"
     [[ "$v" =~ ^[0-9]+$ ]] || v=0
     if (( !(v & 1) )); then
@@ -143,7 +167,6 @@ resolve_v4_one() {
 target_tfo_detect() {
     local dest="$1" port="${2:-443}" sni="${3:-}" b a i resolve=()
     have_cmd curl || return 1
-    have_cmd nstat || return 1
     [[ -n "$sni" ]] || sni="$dest"
     if is_ip_literal "$dest"; then
         resolve=(--resolve "${sni}:${port}:${dest}")
@@ -153,7 +176,7 @@ target_tfo_detect() {
         _ip="$(resolve_v4_one "$dest")"
         [[ -n "$_ip" ]] && resolve=(--resolve "${sni}:${port}:${_ip}")
     fi
-    b="$(nstat -az 2>/dev/null | awk '$1=="TcpExtTCPFastOpenActive"{print $2}')"
+    b="$(tfo_active_read)"
     [[ "$b" =~ ^[0-9]+$ ]] || return 1
     i=0
     while (( i < 3 )); do
@@ -161,7 +184,7 @@ target_tfo_detect() {
             "https://${sni}:${port}/" -o /dev/null 2>/dev/null || true
         i=$((i + 1))
     done
-    a="$(nstat -az 2>/dev/null | awk '$1=="TcpExtTCPFastOpenActive"{print $2}')"
+    a="$(tfo_active_read)"
     [[ "$a" =~ ^[0-9]+$ ]] || return 1
     if (( a > b )); then
         return 0

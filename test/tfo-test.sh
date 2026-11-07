@@ -26,10 +26,14 @@ nstat() {
     fi
     return 0
 }
+# /proc/net/netstat 的 TcpExt 段最小桩：TCPFastOpenActive 在第 4 列。
+# curl stub 每次调用都把该列写成当前 FAKE_ACTIVE，模拟真实 MIB 增长。
+write_netstat() { printf 'TcpExt: Foo Bar TCPFastOpenActive Baz\nTcpExt: 0 0 %s 0\n' "$1" > "${XHY_NETSTAT_PROC:-/proc/net/netstat}"; }
 curl() {
     CURL_CALLS=$((CURL_CALLS + 1))
     CURL_ARGS="$CURL_ARGS $*"
     FAKE_ACTIVE=$((FAKE_ACTIVE + FAKE_DELTA))
+    write_netstat "$FAKE_ACTIVE"
     return 0
 }
 have_cmd() {
@@ -65,6 +69,7 @@ reset() {
     FAKE_ACTIVE=0; FAKE_DELTA=0; CURL_CALLS=0; CURL_ARGS=""
     FAKE_HAVE_CURL=0; FAKE_HAVE_NSTAT=0; FAKE_NSTAT_BAD=0
     FAKE_FASTOPEN=3; FAKE_RESOLVE_IP=""
+    XHY_NETSTAT_PROC="${TEST_TMP:-/tmp}/netstat"; write_netstat 0
 }
 
 echo "=== 目标不支持（Active 不增长）==="
@@ -110,13 +115,29 @@ chk "fastopen=2 不可探（只有服务端位）" "1" "$(tfo_probe_ready; echo 
 chk "说明指出客户端位"            "1" "$(tfo_probe_blocker | grep -c '客户端位')"
 FAKE_FASTOPEN=0
 chk "fastopen=0 不可探"          "1" "$(tfo_probe_ready; echo $?)"
+# nstat 缺失但 /proc 可读：仍可探（8.222 真实场景，修复前此处被误判不可用）
 reset; FAKE_HAVE_NSTAT=1; FAKE_FASTOPEN=3
-chk "缺 nstat 不可探"             "1" "$(tfo_probe_ready; echo $?)"
-chk "说明指出 nstat"              "1" "$(tfo_probe_blocker | grep -c 'nstat')"
+chk "缺 nstat 但 /proc 可读 -> 可探" "0" "$(tfo_probe_ready; echo $?)"
+chk "说明此时为空"               "" "$(tfo_probe_blocker)"
+# nstat 缺失 且 /proc 不可读：才真正不可探
+reset; FAKE_HAVE_NSTAT=1; FAKE_FASTOPEN=3; XHY_NETSTAT_PROC="$TEST_TMP/nope_netstat"
+chk "nstat无+proc不可读 -> 不可探" "1" "$(tfo_probe_ready; echo $?)"
+chk "说明指出 nstat缺失"          "1" "$(tfo_probe_blocker | grep -c 'nstat 缺失')"
+XHY_NETSTAT_PROC="$TEST_TMP/netstat"
 reset; FAKE_HAVE_CURL=1; FAKE_FASTOPEN=3
 chk "缺 curl 不可探"              "1" "$(tfo_probe_ready; echo $?)"
 reset; FAKE_FASTOPEN=3
 chk "能力齐备时说明为空"          "" "$(tfo_probe_blocker)"
+
+echo "=== 无 nstat 但 /proc 可读：仍能探测出 TFO（核心回归）==="
+reset; FAKE_HAVE_NSTAT=1; FAKE_DELTA=1
+target_tfo_detect 47.88.102.65 443 www.easeus.com; rc=$?
+chk "无 nstat+proc可读 -> detect 返回 0（支持）" "0" "$rc"
+chk "无 nstat 也调了 curl 3 次"   "3" "$CURL_CALLS"
+chk "auto 判定为 1"               "1" "$(tfo_decide auto 47.88.102.65 443 www.easeus.com)"
+reset; FAKE_HAVE_NSTAT=1; FAKE_DELTA=0
+target_tfo_detect 47.88.102.65 443 www.easeus.com; rc=$?
+chk "无 nstat+proc可读 但 Active 不增 -> 1" "1" "$rc"
 
 echo "=== 失败时保守关闭 ==="
 reset; FAKE_HAVE_CURL=1
@@ -124,7 +145,7 @@ target_tfo_detect 47.88.102.65 443 www.easeus.com; rc=$?
 chk "无 curl -> 1"               "1" "$rc"
 reset; FAKE_HAVE_NSTAT=1
 target_tfo_detect 47.88.102.65 443 www.easeus.com; rc=$?
-chk "无 nstat -> 1"              "1" "$rc"
+chk "无 nstat（走 /proc）且 Active 不增 -> 1" "1" "$rc"
 reset; FAKE_NSTAT_BAD=1
 target_tfo_detect 47.88.102.65 443 www.easeus.com; rc=$?
 chk "计数读不到 -> 1"            "1" "$rc"
