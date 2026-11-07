@@ -135,6 +135,48 @@ chk "列出 jp 及候选数 1"   'printf "%s\n" "$tbl" | grep -qx "jp|JP|1|2.2.2
 chk "注释行不进表"         '! printf "%s\n" "$tbl" | grep -q "^#"'
 chk "表按地区排序"         '[[ "$(printf "%s\n" "$tbl" | cut -d"|" -f1 | tr "\n" " ")" == "auto jp us " ]]'
 
+echo "=== 地域名单 TFO：过滤 / 状态保存 / 缓存隔离 ==="
+state_del TARGET_CUSTOM; state_del TARGET_SNI; state_set TARGET_REGION us
+target_validate() { return 0; }
+tfo_probe_ready() { return 0; }
+tfo_probe_blocker() { printf 'test blocker'; }
+target_tfo_detect() { [[ "$1" == "1.1.1.2" ]]; }
+scanner_cache_valid() { return 0; }
+scanner_cache_pick_valid() { printf '9.9.9.9:443 auto.example.com scan\n'; }
+picked="$(pick_target 1 2>/dev/null)" && rc=0 || rc=$?
+chk "强制 TFO 跳过不支持站" '[[ "$rc" -eq 0 && "$picked" == "1.1.1.2:443 b.us.example.com us-b" ]]'
+chk "强制 TFO 不采用扫描缓存" '[[ "$picked" != *scan* ]]'
+state_set TARGET_REQUIRE_TFO 1
+picked="$(pick_target 2>/dev/null)"
+chk "默认读取已保存的 TFO 选择" '[[ "$picked" == "1.1.1.2:443 b.us.example.com us-b" ]]'
+scanner_cache_valid() { return 1; }
+picked="$(pick_target 0 2>/dev/null)"
+chk "不强制时保持原质量顺序" '[[ "$picked" == "1.1.1.1:443 a.us.example.com us-a" ]]'
+target_tfo_detect() { return 1; }
+picked="$(pick_target 1 2>/dev/null)" && rc=0 || rc=$?
+chk "无 TFO 命中返回非零" '[[ "$rc" -ne 0 ]]'
+chk "无 TFO 命中不返回普通兜底站" '[[ -z "$picked" ]]'
+tfo_probe_ready() { return 1; }
+out="$(pick_target 1 2>&1)" && rc=0 || rc=$?
+chk "本机不可探测时快速失败" '[[ "$rc" -ne 0 && "$out" == *"test blocker"* ]]'
+
+echo "=== 菜单 1 / 2：选完地区询问 TFO ==="
+tfo_probe_ready() { return 0; }
+target_tfo_detect() { [[ "$1" == "1.1.1.2" ]]; }
+public_country() { printf 'US'; }
+state_del TARGET_CUSTOM; state_del TARGET_SNI; state_set TARGET_REQUIRE_TFO 0
+out="$(target_menu <<< $'1\ny\n0\n' 2>&1)"
+chk "菜单1 可选 TFO 并选支持站" '[[ "$out" == *"当前 target: 1.1.1.2:443"* ]]'
+chk "菜单1 保存 TFO 选择" '[[ "$(state_get TARGET_REQUIRE_TFO 0)" == 1 ]]'
+state_set TARGET_REQUIRE_TFO 0
+out="$(target_menu <<< $'2\n3\ny\nn\n0\n' 2>&1)"
+chk "菜单2 选地区后可选 TFO" '[[ "$out" == *"当前 target: 1.1.1.2:443"* ]]'
+chk "菜单2 保存 TFO 选择" '[[ "$(state_get TARGET_REQUIRE_TFO 0)" == 1 ]]'
+target_tfo_detect() { return 1; }
+picked="$(target_region_pick_flow <<< $'y\ny\n' 2>/dev/null)" && rc=0 || rc=$?
+chk "无命中时明确确认后按质量重选" '[[ "$rc" -eq 0 && "$picked" == "1.1.1.1:443 a.us.example.com us-a" ]]'
+chk "回退后清除强制 TFO 状态" '[[ "$(state_get TARGET_REQUIRE_TFO 0)" == 0 ]]'
+
 echo "=== 菜单与接线 ==="
 chk "菜单有 2) 编辑节点"          'grep -q "2) 编辑节点" entry/main.sh'
 chk "菜单不再有 16) 扫描伪装站"    '! grep -q "16) 扫描伪装站" entry/main.sh'
@@ -152,6 +194,8 @@ chk "定义 node_retarget"          'grep -q "^node_retarget()" lib/nodes.sh'
 chk "定义 node_retarget_menu"     'grep -q "^node_retarget_menu()" lib/nodes.sh'
 chk "定义 target_region_table"    'grep -q "^target_region_table()" lib/target.sh'
 chk "定义 target_scan_flow"       'grep -q "^target_scan_flow()" lib/target.sh'
+chk "定义地域 TFO 选站流程"        'grep -q "^target_region_pick_flow()" lib/target.sh'
+chk "菜单1/2 共用 TFO 选站流程"    '[[ $(grep -c "picked=\"\$(target_region_pick_flow)\"" lib/target.sh) -eq 2 ]]'
 chk "扫描流程接 node_retarget_menu" 'grep -q "node_retarget_menu \"\$st\" \"\$ss\"" lib/target.sh'
 chk "地区菜单用编号选择"          'grep -q "选择地区编号" lib/target.sh'
 chk "手动指定后也问替换"          'grep -q "node_retarget_menu \"\$h\" \"\$s\"" lib/target.sh'
@@ -168,5 +212,8 @@ chk "菜单行已翻译"                 'printf "%s" "$en" | grep -q "Edit node
 chk "英文输出纯可印 ASCII"         '! printf "%s" "$en" | LC_ALL=C grep -q "[^ -~]"'
 en2="$( XHY_LANG_EFFECTIVE=en xhy_t 'TFO auto/on/off（auto = 按新 target 重新探测）' )"
 chk "TFO 提示已翻译"               'printf "%s" "$en2" | grep -q "re-probe the new target"'
+en3="$( XHY_LANG_EFFECTIVE=en xhy_t '地域名单里没有通过校验且支持被动 TFO 的站点。' )"
+chk "地域无 TFO 命中提示已翻译"     'printf "%s" "$en3" | grep -q "No candidate in the region list"'
+chk "地域 TFO 新文案纯 ASCII"       '! printf "%s" "$en3" | LC_ALL=C grep -q "[^ -~]"'
 
 summary

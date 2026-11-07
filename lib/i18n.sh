@@ -19,6 +19,12 @@
 # 不带 declare：本文件是在 load_libs() 函数内被 source 的，显式 declare 会创建
 # 局部变量，函数返回后数组就丢了（同一个坑 scanner.sh 的 XHY_TFO_CACHE 踩过）。
 XHY_T_ZH=(
+    "菜单 1 / 2 的地域名单也可选择「只要 TFO」：逐站实测，不支持的不兜底；"
+    "该选择会保存，之后新建节点继续沿用。大网站不等于支持 TFO，以实测为准。"
+    "地域名单里没有通过校验且支持被动 TFO 的站点。"
+    "TFO 筛选 : 仅支持被动 TFO"
+    "TFO 筛选 : 不强制（按质量选）"
+    "TFO 不支持（跳过）"
     "本机不具备被动 TFO 探测能力："
     "此时 --require-tfo 的结果必然是空，不代表网段里没有支持 TFO 的站点。"
     "改为按质量选站（不强制 TFO）？"
@@ -129,6 +135,12 @@ XHY_T_ZH=(
 )
 
 XHY_T_EN=(
+    "Region menus 1 / 2 can also require TFO: probe each site and never fall back to one without it;"
+    "The choice is saved for future nodes. Big-name sites do not necessarily support TFO; live probing decides."
+    "No candidate in the region list both passed validation and supports passive TFO."
+    "TFO filter : passive TFO required"
+    "TFO filter : not required (pick by quality)"
+    "TFO: no (skipped)"
     "Local TFO probing unavailable: "
     "so --require-tfo would always come back empty; that does NOT mean this subnet has no TFO-capable site."
     "Pick by quality instead (do not require TFO)?"

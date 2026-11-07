@@ -135,8 +135,8 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.8.1"
-XHY_BUILD="cc1dbf7be920"
+XHY_VERSION="1.9.0"
+XHY_BUILD="d88030026112"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -154,7 +154,7 @@ fi
 # ===================== lib/common.sh =====================
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.8.1}"
+XHY_VERSION="${XHY_VERSION:-1.9.0}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -551,6 +551,12 @@ verify_release_digest() {
 # 不带 declare：本文件是在 load_libs() 函数内被 source 的，显式 declare 会创建
 # 局部变量，函数返回后数组就丢了（同一个坑 scanner.sh 的 XHY_TFO_CACHE 踩过）。
 XHY_T_ZH=(
+    "菜单 1 / 2 的地域名单也可选择「只要 TFO」：逐站实测，不支持的不兜底；"
+    "该选择会保存，之后新建节点继续沿用。大网站不等于支持 TFO，以实测为准。"
+    "地域名单里没有通过校验且支持被动 TFO 的站点。"
+    "TFO 筛选 : 仅支持被动 TFO"
+    "TFO 筛选 : 不强制（按质量选）"
+    "TFO 不支持（跳过）"
     "本机不具备被动 TFO 探测能力："
     "此时 --require-tfo 的结果必然是空，不代表网段里没有支持 TFO 的站点。"
     "改为按质量选站（不强制 TFO）？"
@@ -661,6 +667,12 @@ XHY_T_ZH=(
 )
 
 XHY_T_EN=(
+    "Region menus 1 / 2 can also require TFO: probe each site and never fall back to one without it;"
+    "The choice is saved for future nodes. Big-name sites do not necessarily support TFO; live probing decides."
+    "No candidate in the region list both passed validation and supports passive TFO."
+    "TFO filter : passive TFO required"
+    "TFO filter : not required (pick by quality)"
+    "TFO: no (skipped)"
     "Local TFO probing unavailable: "
     "so --require-tfo would always come back empty; that does NOT mean this subnet has no TFO-capable site."
     "Pick by quality instead (do not require TFO)?"
@@ -2271,6 +2283,8 @@ target_help() {
   探测不了或明确不支持都按「不支持」显示（决策上一律关，不做模糊态）。
   --require-tfo 在 /24（或缓存）里没找到时，会自动扩到同机房 /21 再扫一次；
   扩的是不同网段，不会把同一个 /24 白扫两遍。
+  菜单 1 / 2 的地域名单也可选择「只要 TFO」：逐站实测，不支持的不兜底；
+  该选择会保存，之后新建节点继续沿用。大网站不等于支持 TFO，以实测为准。
 EOF
 }
 
@@ -2358,7 +2372,9 @@ target_region() { state_get TARGET_REGION "auto"; }
 #   4) auto: match the VPS egress country code
 pick_target() {
     local region candidate="" cc="" line r c label tgt sni
-    local custom_t custom_s sbest
+    local custom_t custom_s sbest dest port
+    local require="${1:-$(state_get TARGET_REQUIRE_TFO 0)}"
+    [[ "$require" == "1" ]] || require=0
     custom_t="$(state_get TARGET_CUSTOM '')"
     custom_s="$(state_get TARGET_SNI '')"
     if [[ -n "$custom_t" ]]; then
@@ -2368,7 +2384,9 @@ pick_target() {
 
     # 扫描缓存优先：同机房的真实源站比全球静态表更贴合，而且已经验过一次。
     # XHY_SKIP_SCAN_CACHE=1 可绕过（排查问题时用）。
-    if [[ "${XHY_SKIP_SCAN_CACHE:-0}" != "1" ]] && declare -F scanner_cache_valid >/dev/null; then
+    # 强制 TFO 的地域选站必须真的读地域名单并逐站探测；扫描缓存的「最优站」
+    # 不带这个过滤语义，不能抢在前面直接返回。
+    if (( require == 0 )) && [[ "${XHY_SKIP_SCAN_CACHE:-0}" != "1" ]] && declare -F scanner_cache_valid >/dev/null; then
         if scanner_cache_valid; then
             if sbest="$(scanner_cache_pick_valid)"; then
                 printf '%s\n' "$sbest"
@@ -2389,6 +2407,11 @@ pick_target() {
         [[ -z "$region" ]] && region="other"
     fi
 
+    if (( require == 1 )) && ! tfo_probe_ready; then
+        warn "本机不具备被动 TFO 探测能力：$(tfo_probe_blocker)" >&2
+        return 1
+    fi
+
     # Two passes: the region's own candidates first, then the generic
     # auto/other fallbacks. A single pass let the `auto` row (line 1 of the
     # table) win over every region-specific entry, because it is validated
@@ -2403,10 +2426,21 @@ pick_target() {
                 [[ "$r" == "auto" || "$r" == "other" ]] || continue
             fi
             if target_validate "$tgt" "${sni:-${tgt%%:*}}" >&2; then
+                if (( require == 1 )); then
+                    dest="${tgt%%:*}"; port="${tgt##*:}"
+                    [[ "$tgt" == *:* ]] || port=443
+                    if target_tfo_detect "$dest" "$port" "${sni:-${tgt%%:*}}"; then
+                        ok "  ${sni:-${tgt%%:*}} : TFO 支持" >&2
+                    else
+                        info "  ${sni:-${tgt%%:*}} : TFO 不支持（跳过）" >&2
+                        continue
+                    fi
+                fi
                 found="$tgt|${sni:-${tgt%%:*}}|$label"
                 break
             fi
-            [[ -z "$candidate" ]] && candidate="$tgt|${sni:-${tgt%%:*}}|$label"
+            # 强制 TFO 时绝不把「校验失败或 TFO 不支持」的站当兜底返回。
+            (( require == 0 )) && [[ -z "$candidate" ]] && candidate="$tgt|${sni:-${tgt%%:*}}|$label"
         done < <(target_rows)
         [[ -n "$found" ]] && break
     done
@@ -2415,12 +2449,38 @@ pick_target() {
         printf '%s\n' "${found//|/ }"
         return 0
     fi
+    if (( require == 1 )); then
+        warn "地域名单里没有通过校验且支持被动 TFO 的站点。" >&2
+        return 1
+    fi
     if [[ -n "$candidate" ]]; then
         warn "该地区候选均未通过完整校验，回退使用第一个（请自行确认可用性）" >&2
         printf '%s\n' "${candidate//|/ }"
         return 0
     fi
     die "没有可用的伪装站候选，请用 xhy target custom <域名> 手动指定。"
+}
+
+# 菜单 1 / 2 共用的地域选站流程。TFO 选择随结果保存，之后新建节点仍沿用，
+# 避免菜单里选中了 TFO 站，真正建节点时却又按质量选到别的站。
+target_region_pick_flow() {
+    local require=0 picked=""
+    if confirm "是否只选支持 TFO 的伪装站？（不强制则按质量选）" "n"; then
+        require=1
+    fi
+    if picked="$(pick_target "$require")"; then
+        state_set TARGET_REQUIRE_TFO "$require"
+        printf '%s\n' "$picked"
+        return 0
+    fi
+    if (( require == 1 )) && confirm "改为不强制 TFO、按质量重选？" "y"; then
+        if picked="$(pick_target 0)"; then
+            state_set TARGET_REQUIRE_TFO 0
+            printf '%s\n' "$picked"
+            return 0
+        fi
+    fi
+    return 1
 }
 
 target_show() {
@@ -2432,6 +2492,11 @@ target_show() {
         printf '自定义   : %s  SNI=%s\n' "$t" "${s:-${t%%:*}}"
     else
         printf '自定义   : 未设置（使用地区自动匹配）\n'
+        if [[ "$(state_get TARGET_REQUIRE_TFO 0)" == "1" ]]; then
+            printf 'TFO 筛选 : 仅支持被动 TFO\n'
+        else
+            printf 'TFO 筛选 : 不强制（按质量选）\n'
+        fi
     fi
     if declare -F scanner_cache_count >/dev/null && [[ -s "$SCANNER_CACHE" ]]; then
         cache="$(scanner_cache_count) 个候选 / $(scanner_cache_age_h) 小时前"
@@ -2471,7 +2536,7 @@ target_scan_flow() {
         read -r st ss _ <<<"$sp"
         ok "最优站点: target=$st SNI=$ss"
         if confirm "固定为当前 target（新建节点直接使用）？" "y"; then
-            state_set TARGET_CUSTOM "$st"; state_set TARGET_SNI "$ss"
+            state_set TARGET_CUSTOM "$st"; state_set TARGET_SNI "$ss"; state_set TARGET_REQUIRE_TFO 0
             ok "已固定 target=$st SNI=$ss"
         fi
         node_retarget_menu "$st" "$ss"
@@ -2489,7 +2554,7 @@ target_scan_flow() {
                 read -r st ss _ <<<"$sp"
                 ok "最优站点: target=$st SNI=$ss"
                 if confirm "固定为当前 target（新建节点直接使用）？" "y"; then
-                    state_set TARGET_CUSTOM "$st"; state_set TARGET_SNI "$ss"
+                    state_set TARGET_CUSTOM "$st"; state_set TARGET_SNI "$ss"; state_set TARGET_REQUIRE_TFO 0
                     ok "已固定 target=$st SNI=$ss"
                 fi
                 node_retarget_menu "$st" "$ss"
@@ -2519,7 +2584,7 @@ EOF
         case "$(ask '选择' '0')" in
             1) state_del TARGET_CUSTOM; state_del TARGET_SNI; state_set TARGET_REGION auto
                info "已设为自动匹配"
-               if picked="$(pick_target)"; then
+               if picked="$(target_region_pick_flow)"; then
                    read -r pt ps pl <<<"$picked"
                    ok "当前 target: $pt SNI=$ps（来源 $pl）"
                fi ;;
@@ -2554,7 +2619,7 @@ EOF
                fi
                state_del TARGET_CUSTOM; state_del TARGET_SNI; state_set TARGET_REGION "$r"
                ok "地区已设为 $r（国家 ${c:--}，$n 个候选）"
-               if picked="$(pick_target)"; then
+               if picked="$(target_region_pick_flow)"; then
                    read -r pt ps pl <<<"$picked"
                    ok "当前 target: $pt SNI=$ps（来源 $pl）"
                    if confirm "固定下来（新建节点直接用）？" "y"; then
@@ -2580,10 +2645,10 @@ EOF
                fi
                s="${s:-${h%%:*}}"
                target_validate "$h" "$s" || confirm '校验未完全通过，仍要使用？' 'n' || continue
-               state_set TARGET_CUSTOM "$h"; state_set TARGET_SNI "$s"
+               state_set TARGET_CUSTOM "$h"; state_set TARGET_SNI "$s"; state_set TARGET_REQUIRE_TFO 0
                ok "已固定 target=$h SNI=$s"
                node_retarget_menu "$h" "$s" ;;
-            4) state_del TARGET_CUSTOM; state_del TARGET_SNI; state_set TARGET_REGION auto; ok "已清除" ;;
+            4) state_del TARGET_CUSTOM; state_del TARGET_SNI; state_del TARGET_REQUIRE_TFO; state_set TARGET_REGION auto; ok "已清除" ;;
             5) local v vs
                xhy_t <<'EOF'
   格式同选项 3：域名 / 域名:端口 / IP:端口,sni=域名
