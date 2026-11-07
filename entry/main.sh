@@ -4,17 +4,25 @@
 # 已经在目标位置运行时（开发目录）什么都不做。
 install_self() {
     need_root
+    local src="${XHY_RUNNING:-}" real="" tmp
+    # 软链调用时 BASH_SOURCE 是链接本身。先解析出真身：reconcile_bin 会删掉
+    # /usr/local/bin/xhy 这个链接，之后再复制 $src 就复制不到了。旧布局
+    # /usr/local/bin/xhy -> /usr/local/lib/xray-hy/xhy 正是这种情况。
+    if [[ -n "$src" ]]; then
+        real="$(readlink -f "$src" 2>/dev/null || printf '%s' "$src")"
+    fi
     reconcile_bin
     install -d -m 0755 "$XHY_APP_DIR" || die "无法创建 $XHY_APP_DIR"
-    local src="${XHY_RUNNING:-}" tmp
-    if [[ -n "$src" ]] && [[ "$(readlink -f "$src" 2>/dev/null || echo "$src")" == "$(readlink -f "$XHY_SELF" 2>/dev/null || echo "$XHY_SELF")" ]]; then
+    # 已是规范直装（入口是普通文件、运行的就是它本身）→ 只补权限 + 清孤儿
+    if [[ -n "$real" ]] && [[ ! -L "$XHY_SELF" ]] \
+       && [[ "$real" == "$(readlink -f "$XHY_SELF" 2>/dev/null || printf '%s' "$XHY_SELF")" ]]; then
         chmod 0755 "$XHY_SELF" 2>/dev/null || true
         _cleanup_legacy_self
         return 0
     fi
     tmp="$XHY_SELF.new.$$"
-    if [[ -n "$src" && -f "$src" ]]; then
-        install -m 0755 "$src" "$tmp" || die "复制脚本到 $tmp 失败"
+    if [[ -n "$real" && -f "$real" ]]; then
+        install -m 0755 "$real" "$tmp" || die "复制脚本到 $tmp 失败"
     else
         info "当前是从管道运行的，重新下载一份脚本到 $XHY_SELF ..."
         fetch "$XHY_INSTALL_URL" "$tmp" || die "下载脚本本体失败（见上面的 curl 错误码）"
@@ -62,10 +70,18 @@ XHY_BOOTSTRAPPED=0
 # 统一安装路径：单文件永远直装到 /usr/local/bin/xhy（不再有 git 仓库 / 单文件
 # 两套模式抢这个入口；旧软链由 reconcile_bin 在 install_self 里自动摘掉）。
 bootstrap_self() {
-    [[ "${XHY_DEV:-0}" == "1" ]] && return 0
-    local src="${XHY_RUNNING:-}" self
-    self="$(readlink -f "$XHY_SELF" 2>/dev/null || printf '%s' "$XHY_SELF")"
-    if [[ -n "$src" ]] && [[ "$(readlink -f "$src" 2>/dev/null || printf '%s' "$src")" == "$self" ]]; then
+    local src="${XHY_RUNNING:-}"
+    # 已规范直装：入口就是正在运行的本体，且它不是软链 → 什么都不用做（顺手清孤儿）。
+    # 注意判据是「字面同一路径」，不能只比 readlink -f：旧布局
+    # /usr/local/bin/xhy -> /usr/local/lib/xray-hy/xhy 解析后同样相等，
+    # 用解析值比较会永远跳过迁移，机器就永远停在旧路径上。
+    if [[ -n "$src" ]] && [[ "$src" == "$XHY_SELF" ]] && [[ ! -L "$XHY_SELF" ]]; then
+        _cleanup_legacy_self
+        return 0
+    fi
+    # 仓库开发目录（XHY_DEV=1）：不往系统目录写，避免调试时被悄悄改写。
+    # 仓库模式迁移到单文件由 `xhy update script` 显式完成。
+    if [[ "${XHY_DEV:-0}" == "1" ]]; then
         return 0
     fi
     install_self

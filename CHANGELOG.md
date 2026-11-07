@@ -2,6 +2,12 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.9.2 — 2026-11-07
+
+- fix(install): 旧软链入口在下次运行 xhy 时自动迁移到 /usr/local/bin/xhy 并清掉孤儿本体（此前 readlink 解析相同会跳过迁移，机器会永远停在旧路径）
+- fix(update): `xhy update script` 不再拒绝仓库模式，改为迁移为单文件直装（仓库目录本身不动）；同版本但布局非规范时也会重装纠正
+- feat(check): `xhy check` 新增「入口布局」行（单文件 / 旧软链 / 非规范路径）与遗留本体提示；`_cleanup_legacy_self` 支持 XHY_LEGACY_SELF 重定向便于测试
+
 ## v1.9.1 — 2026-11-07
 
 - refactor(install): 单文件直装 /usr/local/bin/xhy（不再嵌套 /usr/local/lib/xray-hy + 软链），删除 git 仓库安装模式；install_self/update_script 增加 reconcile_bin 自愈旧软链，升级时自动校正 PATH 入口

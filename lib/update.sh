@@ -18,14 +18,23 @@ update_script() {
         esac
     done
     need_root
-    # 仓库模式（git clone）下 $XHY_SELF 是 42 行的开发入口，不是单文件发布物。
-    # 在这里做替换会把 dev 入口覆盖成 4307 行的 install.sh：版本号回退到旧
-    # 构建号、git 工作区变脏、下次 git pull 还可能冲突。实测踩过（2026-11-07）。
+
+    # 单文件永远装在 /usr/local/bin/xhy。仓库模式下运行的是 $REPO/xhy（XHY_DEV=1），
+    # 原地覆盖会把 42 行 dev 入口换成 4307 行 install.sh（版本回退、git 变脏）。
+    # 正确做法是往规范路径装：跑一次 update script 就从「git 克隆」变成「单文件直装」，
+    # 仓库目录本身不动。
+    local canonical="${XHY_BINDIR:-/usr/local/bin}/xhy"
+    local repo_mode=0 layout_bad=0 selfreal
     if [[ -f "$XHY_SCRIPT_DIR/build.sh" && -f "$XHY_SCRIPT_DIR/entry/main.sh" ]]; then
-        err "检测到仓库模式（$XHY_SCRIPT_DIR），脚本本体由 git 管理，不走单文件自更新"
-        info "升级请用: cd $XHY_SCRIPT_DIR && git pull --ff-only"
-        info "节点与配置不受影响；如需重建单文件发布物: ./build.sh"
-        return 1
+        repo_mode=1
+        info "检测到仓库模式（$XHY_SCRIPT_DIR）：本次迁移为单文件直装 $canonical（仓库目录本身不动）"
+    fi
+    if [[ -L "$canonical" ]]; then
+        layout_bad=1
+    fi
+    selfreal="$(readlink -f "$XHY_SELF" 2>/dev/null || printf '%s' "$XHY_SELF")"
+    if [[ "$selfreal" != "$(readlink -f "$canonical" 2>/dev/null || printf '%s' "$canonical")" ]]; then
+        layout_bad=1
     fi
     info "当前版本: $XHY_VERSION (build $XHY_BUILD)"
     info "检查更新: $XHY_INSTALL_URL"
@@ -45,40 +54,52 @@ update_script() {
         rm -f "$tmp"
         die "下载的脚本里找不到构建号，可能不是本项目的 install.sh，已放弃"
     fi
-    if [[ "$newbuild" == "$XHY_BUILD" ]]; then
+    if [[ "$newbuild" == "$XHY_BUILD" ]] && (( ! layout_bad )); then
         rm -f "$tmp"
         ok "脚本已是最新 ($XHY_VERSION build $newbuild)"
         return 0
     fi
-    newver="$(sed -n 's/^XHY_VERSION="\(.*\)"$/\1/p' "$tmp" | head -1 || true)"
-    [[ -n "$newver" ]] || newver="未知"
-    info "发现新版本: $newver (build $newbuild，当前 $XHY_VERSION build $XHY_BUILD)"
-    if have_cmd diff; then
-        diff -u "$XHY_SELF" "$tmp" | head -40 || true
-    fi
-    if [[ "${newver%%.*}" != "${XHY_VERSION%%.*}" ]]; then
-        warn "这是跨主版本更新 ($XHY_VERSION -> $newver)，可能包含不兼容变更，建议先看 release notes。"
-        if (( autoyes && ! allowmajor )); then
+    if [[ "$newbuild" == "$XHY_BUILD" ]]; then
+        info "已是最新版本，但入口布局需要纠正（旧软链或非规范路径），重装到 $canonical"
+    else
+        newver="$(sed -n 's/^XHY_VERSION="\(.*\)"$/\1/p' "$tmp" | head -1 || true)"
+        [[ -n "$newver" ]] || newver="未知"
+        info "发现新版本: $newver (build $newbuild，当前 $XHY_VERSION build $XHY_BUILD)"
+        if have_cmd diff; then
+            diff -u "$XHY_SELF" "$tmp" | head -40 || true
+        fi
+        if [[ "${newver%%.*}" != "${XHY_VERSION%%.*}" ]]; then
+            warn "这是跨主版本更新 ($XHY_VERSION -> $newver)，可能包含不兼容变更，建议先看 release notes。"
+            if (( autoyes && ! allowmajor )); then
+                rm -f "$tmp"
+                die "非交互模式拒绝跨主版本更新；确认后请加 --allow-major 重试"
+            fi
+        fi
+        if (( autoyes )); then
+            info "--yes: 自动确认替换"
+        elif ! confirm "替换 $canonical 为这个构建？配置与节点数据不受影响。" "y"; then
             rm -f "$tmp"
-            die "非交互模式拒绝跨主版本更新；确认后请加 --allow-major 重试"
+            info "已取消"
+            return 0
         fi
     fi
-    if (( autoyes )); then
-        info "--yes: 自动确认替换"
-    elif ! confirm "替换 $XHY_SELF 为这个构建？配置与节点数据不受影响。" "y"; then
-        rm -f "$tmp"
-        info "已取消"
-        return 0
-    fi
     reconcile_bin
-    backup_file "$XHY_SELF"
-    if ! install -m 0755 "$tmp" "$XHY_SELF.new" || ! mv -f "$XHY_SELF.new" "$XHY_SELF"; then
-        rm -f "$tmp" "$XHY_SELF.new"
-        die "替换失败，旧版本仍在 $XHY_SELF"
+    # 只备份真正的单文件本体；仓库模式下的 $REPO/xhy 是开发入口，不进备份目录
+    if (( ! repo_mode )) && [[ -f "$XHY_SELF" && ! -L "$XHY_SELF" ]]; then
+        backup_file "$XHY_SELF"
+    fi
+    if ! install -m 0755 "$tmp" "$canonical.new" || ! mv -f "$canonical.new" "$canonical"; then
+        rm -f "$tmp" "$canonical.new"
+        die "替换失败，旧版本仍在 $canonical"
     fi
     rm -f "$tmp"
     _cleanup_legacy_self
-    ok "已更新到 build $newbuild；当前进程仍是旧版，下次执行 xhy 生效"
+    ok "已更新到 build $newbuild（$canonical）"
+    if (( layout_bad )); then
+        ok "入口布局已纠正：$canonical 现在是单文件实体（非软链）"
+    fi
+    info "当前进程仍是旧版，下次执行 xhy 生效"
+    return 0
 }
 
 update_core() {
@@ -168,6 +189,16 @@ self_check() {
     platform_summary
     printf '脚本版本 : %s (build %s)\n' "$XHY_VERSION" "$XHY_BUILD"
     printf '脚本路径 : %s\n' "$XHY_SELF"
+    local _canonical="${XHY_BINDIR:-/usr/local/bin}/xhy" _layout="单文件直装"
+    if [[ -L "$_canonical" ]]; then
+        _layout="旧软链（下次运行 xhy 会自动迁移）"
+    elif [[ "$(readlink -f "$XHY_SELF" 2>/dev/null || printf '%s' "$XHY_SELF")" != "$(readlink -f "$_canonical" 2>/dev/null || printf '%s' "$_canonical")" ]]; then
+        _layout="非规范路径（跑一次 xhy update script 会迁移）"
+    fi
+    printf '入口布局 : %s\n' "$_layout"
+    if [[ -e "${XHY_LEGACY_SELF:-/usr/local/lib/xray-hy/xhy}" ]]; then
+        printf '遗留本体 : %s（下次运行 xhy 会自动清理）\n' "${XHY_LEGACY_SELF:-/usr/local/lib/xray-hy/xhy}"
+    fi
     printf '配置目录 : %s\n' "$XHY_ETC"
     printf '出口 IPv4: %s\n' "$(public_ip || true)"
     local _ip6; _ip6="$(public_ip6 || true)"

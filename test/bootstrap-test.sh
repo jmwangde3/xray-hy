@@ -53,6 +53,31 @@ ln -sf "$TEST_TMP/old/xhy" "$XHY_BINDIR/xhy"
 reconcile_bin
 chk "reconcile 幂等（不报错、软链消失）" '[[ ! -L "$XHY_BINDIR/xhy" ]]'
 
+echo "=== bootstrap_self 迁移旧布局（readlink 相同也必须迁移） ==="
+: >"$LOG"
+mkdir -p "$TEST_TMP/legacy"
+printf '#!/bin/sh\n# xray-hy\n' >"$TEST_TMP/legacy/xhy"
+ln -sfn "$TEST_TMP/legacy/xhy" "$XHY_BINDIR/xhy"
+XHY_DEV=0 XHY_RUNNING="$XHY_BINDIR/xhy" XHY_SELF="$XHY_BINDIR/xhy" XHY_BOOTSTRAPPED=0
+bootstrap_self
+chk "旧软链入口触发迁移（不再因解析值相同而跳过）" 'grep -qx self "$LOG"'
+chk "迁移后置 XHY_BOOTSTRAPPED=1" '[[ "$XHY_BOOTSTRAPPED" == 1 ]]'
+
+echo "=== install_self 真实迁移（旧布局 -> 直装 + 清孤儿） ==="
+# 前面 install_self 被 stub 覆盖；从源码里重新抽出真实实现
+sed -n '/^install_self()/,/^}/p' entry/main.sh >"$TEST_TMP/install_self.func"
+# shellcheck disable=SC1090
+source "$TEST_TMP/install_self.func"
+export XHY_BINDIR XHY_APP_DIR="$TEST_TMP/app" XHY_LEGACY_SELF="$TEST_TMP/app/xhy"
+export XHY_SELF="$XHY_BINDIR/xhy" XHY_RUNNING="$XHY_BINDIR/xhy"
+mkdir -p "$XHY_APP_DIR"
+printf '#!/bin/sh\n# xray-hy legacy\n' >"$XHY_APP_DIR/xhy"
+ln -sfn "$XHY_APP_DIR/xhy" "$XHY_BINDIR/xhy"
+install_self >/dev/null 2>&1
+chk "入口变成普通文件（非软链）" '[[ -f "$XHY_BINDIR/xhy" && ! -L "$XHY_BINDIR/xhy" ]]'
+chk "内容来自旧本体（复制成功，未下载）" 'grep -q "xray-hy legacy" "$XHY_BINDIR/xhy"'
+chk "旧孤儿本体被清掉" '[[ ! -e "$XHY_APP_DIR/xhy" ]]'
+
 echo "=== xhy_is_installed ==="
 init_dirs
 state_del INSTALLED
@@ -77,6 +102,10 @@ for spec in \
     "bootstrap_self 定义存在|grep -q '^bootstrap_self()' entry/main.sh" \
     "xhy_is_installed 定义存在|grep -q '^xhy_is_installed()' entry/main.sh" \
     "reconcile_bin 定义存在（自愈旧软链）|grep -q '^reconcile_bin()' lib/common.sh" \
+    "_cleanup_legacy_self 可重定向（测试用）|grep -q 'XHY_LEGACY_SELF' lib/common.sh" \
+    "update_script 仓库模式改为迁移|grep -q 'repo_mode=1' lib/update.sh" \
+    "update_script 同版本也纠正布局|grep -q 'layout_bad' lib/update.sh" \
+    "self_check 报入口布局|grep -q '入口布局' lib/update.sh" \
     "默认命令改成 auto|grep -q 'local cmd=\"\${1:-auto}\"' entry/main.sh" \
     "auto 分支先判是否已安装|grep -q '|| xhy_is_installed; then' entry/main.sh" \
     "开发入口不触发自动安装|grep -q 'XHY_DEV:-0.*==.*1.*|| xhy_is_installed' entry/main.sh" \

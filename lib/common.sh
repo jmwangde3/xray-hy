@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.9.1}"
+XHY_VERSION="${XHY_VERSION:-1.9.2}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -15,6 +15,9 @@ XHY_SCRIPT_DIR="${XHY_SCRIPT_DIR:-${XHY_APP_DIR:-/usr/local/lib/xray-hy}}"
 XHY_APP_DIR="${XHY_APP_DIR:-$XHY_SCRIPT_DIR}"
 XHY_SELF="${XHY_SELF:-/usr/local/bin/xhy}"
 XHY_HOME="${XHY_HOME:-$XHY_APP_DIR}"
+# 单文件发布物地址。prelude（单文件本体内）会给出同名变量；库层也留默认值，
+# 这样 test/ 与仓库入口直接 source lib/ 时不会在 set -u 下炸掉。
+XHY_INSTALL_URL="${XHY_INSTALL_URL:-https://github.com/jmwangde3/xray-hy/releases/latest/download/install.sh}"
 
 # 命令入口自愈：旧版本把 /usr/local/bin/xhy 留成软链（指向已失效的本体或旧仓库）。
 # 直装成文件前必须先摘掉软链，否则 install -m / mv 会顺着软链写进旧本体。
@@ -31,7 +34,7 @@ reconcile_bin() {
 # 迁移清理：单文件改用 /usr/local/bin/xhy 后，旧位置 /usr/local/lib/xray-hy/xhy
 # 成为孤儿。只删这份遗留脚本本体（数据目录里的 conf/、tunnel-run 不动）。
 _cleanup_legacy_self() {
-    local legacy="/usr/local/lib/xray-hy/xhy"
+    local legacy="${XHY_LEGACY_SELF:-/usr/local/lib/xray-hy/xhy}"
     local self; self="$(readlink -f "$XHY_SELF" 2>/dev/null || printf '%s' "$XHY_SELF")"
     [[ "$legacy" == "$self" ]] && return 0
     [[ -e "$legacy" ]] || return 0

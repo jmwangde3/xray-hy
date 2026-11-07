@@ -135,8 +135,8 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.9.1"
-XHY_BUILD="5472ac4260a7"
+XHY_VERSION="1.9.2"
+XHY_BUILD="7d9042ef5e70"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -154,7 +154,7 @@ fi
 # ===================== lib/common.sh =====================
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.9.1}"
+XHY_VERSION="${XHY_VERSION:-1.9.2}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -168,6 +168,9 @@ XHY_SCRIPT_DIR="${XHY_SCRIPT_DIR:-${XHY_APP_DIR:-/usr/local/lib/xray-hy}}"
 XHY_APP_DIR="${XHY_APP_DIR:-$XHY_SCRIPT_DIR}"
 XHY_SELF="${XHY_SELF:-/usr/local/bin/xhy}"
 XHY_HOME="${XHY_HOME:-$XHY_APP_DIR}"
+# 单文件发布物地址。prelude（单文件本体内）会给出同名变量；库层也留默认值，
+# 这样 test/ 与仓库入口直接 source lib/ 时不会在 set -u 下炸掉。
+XHY_INSTALL_URL="${XHY_INSTALL_URL:-https://github.com/jmwangde3/xray-hy/releases/latest/download/install.sh}"
 
 # 命令入口自愈：旧版本把 /usr/local/bin/xhy 留成软链（指向已失效的本体或旧仓库）。
 # 直装成文件前必须先摘掉软链，否则 install -m / mv 会顺着软链写进旧本体。
@@ -184,7 +187,7 @@ reconcile_bin() {
 # 迁移清理：单文件改用 /usr/local/bin/xhy 后，旧位置 /usr/local/lib/xray-hy/xhy
 # 成为孤儿。只删这份遗留脚本本体（数据目录里的 conf/、tunnel-run 不动）。
 _cleanup_legacy_self() {
-    local legacy="/usr/local/lib/xray-hy/xhy"
+    local legacy="${XHY_LEGACY_SELF:-/usr/local/lib/xray-hy/xhy}"
     local self; self="$(readlink -f "$XHY_SELF" 2>/dev/null || printf '%s' "$XHY_SELF")"
     [[ "$legacy" == "$self" ]] && return 0
     [[ -e "$legacy" ]] || return 0
@@ -5033,14 +5036,23 @@ update_script() {
         esac
     done
     need_root
-    # 仓库模式（git clone）下 $XHY_SELF 是 42 行的开发入口，不是单文件发布物。
-    # 在这里做替换会把 dev 入口覆盖成 4307 行的 install.sh：版本号回退到旧
-    # 构建号、git 工作区变脏、下次 git pull 还可能冲突。实测踩过（2026-11-07）。
+
+    # 单文件永远装在 /usr/local/bin/xhy。仓库模式下运行的是 $REPO/xhy（XHY_DEV=1），
+    # 原地覆盖会把 42 行 dev 入口换成 4307 行 install.sh（版本回退、git 变脏）。
+    # 正确做法是往规范路径装：跑一次 update script 就从「git 克隆」变成「单文件直装」，
+    # 仓库目录本身不动。
+    local canonical="${XHY_BINDIR:-/usr/local/bin}/xhy"
+    local repo_mode=0 layout_bad=0 selfreal
     if [[ -f "$XHY_SCRIPT_DIR/build.sh" && -f "$XHY_SCRIPT_DIR/entry/main.sh" ]]; then
-        err "检测到仓库模式（$XHY_SCRIPT_DIR），脚本本体由 git 管理，不走单文件自更新"
-        info "升级请用: cd $XHY_SCRIPT_DIR && git pull --ff-only"
-        info "节点与配置不受影响；如需重建单文件发布物: ./build.sh"
-        return 1
+        repo_mode=1
+        info "检测到仓库模式（$XHY_SCRIPT_DIR）：本次迁移为单文件直装 $canonical（仓库目录本身不动）"
+    fi
+    if [[ -L "$canonical" ]]; then
+        layout_bad=1
+    fi
+    selfreal="$(readlink -f "$XHY_SELF" 2>/dev/null || printf '%s' "$XHY_SELF")"
+    if [[ "$selfreal" != "$(readlink -f "$canonical" 2>/dev/null || printf '%s' "$canonical")" ]]; then
+        layout_bad=1
     fi
     info "当前版本: $XHY_VERSION (build $XHY_BUILD)"
     info "检查更新: $XHY_INSTALL_URL"
@@ -5060,40 +5072,52 @@ update_script() {
         rm -f "$tmp"
         die "下载的脚本里找不到构建号，可能不是本项目的 install.sh，已放弃"
     fi
-    if [[ "$newbuild" == "$XHY_BUILD" ]]; then
+    if [[ "$newbuild" == "$XHY_BUILD" ]] && (( ! layout_bad )); then
         rm -f "$tmp"
         ok "脚本已是最新 ($XHY_VERSION build $newbuild)"
         return 0
     fi
-    newver="$(sed -n 's/^XHY_VERSION="\(.*\)"$/\1/p' "$tmp" | head -1 || true)"
-    [[ -n "$newver" ]] || newver="未知"
-    info "发现新版本: $newver (build $newbuild，当前 $XHY_VERSION build $XHY_BUILD)"
-    if have_cmd diff; then
-        diff -u "$XHY_SELF" "$tmp" | head -40 || true
-    fi
-    if [[ "${newver%%.*}" != "${XHY_VERSION%%.*}" ]]; then
-        warn "这是跨主版本更新 ($XHY_VERSION -> $newver)，可能包含不兼容变更，建议先看 release notes。"
-        if (( autoyes && ! allowmajor )); then
+    if [[ "$newbuild" == "$XHY_BUILD" ]]; then
+        info "已是最新版本，但入口布局需要纠正（旧软链或非规范路径），重装到 $canonical"
+    else
+        newver="$(sed -n 's/^XHY_VERSION="\(.*\)"$/\1/p' "$tmp" | head -1 || true)"
+        [[ -n "$newver" ]] || newver="未知"
+        info "发现新版本: $newver (build $newbuild，当前 $XHY_VERSION build $XHY_BUILD)"
+        if have_cmd diff; then
+            diff -u "$XHY_SELF" "$tmp" | head -40 || true
+        fi
+        if [[ "${newver%%.*}" != "${XHY_VERSION%%.*}" ]]; then
+            warn "这是跨主版本更新 ($XHY_VERSION -> $newver)，可能包含不兼容变更，建议先看 release notes。"
+            if (( autoyes && ! allowmajor )); then
+                rm -f "$tmp"
+                die "非交互模式拒绝跨主版本更新；确认后请加 --allow-major 重试"
+            fi
+        fi
+        if (( autoyes )); then
+            info "--yes: 自动确认替换"
+        elif ! confirm "替换 $canonical 为这个构建？配置与节点数据不受影响。" "y"; then
             rm -f "$tmp"
-            die "非交互模式拒绝跨主版本更新；确认后请加 --allow-major 重试"
+            info "已取消"
+            return 0
         fi
     fi
-    if (( autoyes )); then
-        info "--yes: 自动确认替换"
-    elif ! confirm "替换 $XHY_SELF 为这个构建？配置与节点数据不受影响。" "y"; then
-        rm -f "$tmp"
-        info "已取消"
-        return 0
-    fi
     reconcile_bin
-    backup_file "$XHY_SELF"
-    if ! install -m 0755 "$tmp" "$XHY_SELF.new" || ! mv -f "$XHY_SELF.new" "$XHY_SELF"; then
-        rm -f "$tmp" "$XHY_SELF.new"
-        die "替换失败，旧版本仍在 $XHY_SELF"
+    # 只备份真正的单文件本体；仓库模式下的 $REPO/xhy 是开发入口，不进备份目录
+    if (( ! repo_mode )) && [[ -f "$XHY_SELF" && ! -L "$XHY_SELF" ]]; then
+        backup_file "$XHY_SELF"
+    fi
+    if ! install -m 0755 "$tmp" "$canonical.new" || ! mv -f "$canonical.new" "$canonical"; then
+        rm -f "$tmp" "$canonical.new"
+        die "替换失败，旧版本仍在 $canonical"
     fi
     rm -f "$tmp"
     _cleanup_legacy_self
-    ok "已更新到 build $newbuild；当前进程仍是旧版，下次执行 xhy 生效"
+    ok "已更新到 build $newbuild（$canonical）"
+    if (( layout_bad )); then
+        ok "入口布局已纠正：$canonical 现在是单文件实体（非软链）"
+    fi
+    info "当前进程仍是旧版，下次执行 xhy 生效"
+    return 0
 }
 
 update_core() {
@@ -5183,6 +5207,16 @@ self_check() {
     platform_summary
     printf '脚本版本 : %s (build %s)\n' "$XHY_VERSION" "$XHY_BUILD"
     printf '脚本路径 : %s\n' "$XHY_SELF"
+    local _canonical="${XHY_BINDIR:-/usr/local/bin}/xhy" _layout="单文件直装"
+    if [[ -L "$_canonical" ]]; then
+        _layout="旧软链（下次运行 xhy 会自动迁移）"
+    elif [[ "$(readlink -f "$XHY_SELF" 2>/dev/null || printf '%s' "$XHY_SELF")" != "$(readlink -f "$_canonical" 2>/dev/null || printf '%s' "$_canonical")" ]]; then
+        _layout="非规范路径（跑一次 xhy update script 会迁移）"
+    fi
+    printf '入口布局 : %s\n' "$_layout"
+    if [[ -e "${XHY_LEGACY_SELF:-/usr/local/lib/xray-hy/xhy}" ]]; then
+        printf '遗留本体 : %s（下次运行 xhy 会自动清理）\n' "${XHY_LEGACY_SELF:-/usr/local/lib/xray-hy/xhy}"
+    fi
     printf '配置目录 : %s\n' "$XHY_ETC"
     printf '出口 IPv4: %s\n' "$(public_ip || true)"
     local _ip6; _ip6="$(public_ip6 || true)"
@@ -5689,17 +5723,25 @@ XHY_TARGETS_TSV
 # 已经在目标位置运行时（开发目录）什么都不做。
 install_self() {
     need_root
+    local src="${XHY_RUNNING:-}" real="" tmp
+    # 软链调用时 BASH_SOURCE 是链接本身。先解析出真身：reconcile_bin 会删掉
+    # /usr/local/bin/xhy 这个链接，之后再复制 $src 就复制不到了。旧布局
+    # /usr/local/bin/xhy -> /usr/local/lib/xray-hy/xhy 正是这种情况。
+    if [[ -n "$src" ]]; then
+        real="$(readlink -f "$src" 2>/dev/null || printf '%s' "$src")"
+    fi
     reconcile_bin
     install -d -m 0755 "$XHY_APP_DIR" || die "无法创建 $XHY_APP_DIR"
-    local src="${XHY_RUNNING:-}" tmp
-    if [[ -n "$src" ]] && [[ "$(readlink -f "$src" 2>/dev/null || echo "$src")" == "$(readlink -f "$XHY_SELF" 2>/dev/null || echo "$XHY_SELF")" ]]; then
+    # 已是规范直装（入口是普通文件、运行的就是它本身）→ 只补权限 + 清孤儿
+    if [[ -n "$real" ]] && [[ ! -L "$XHY_SELF" ]] \
+       && [[ "$real" == "$(readlink -f "$XHY_SELF" 2>/dev/null || printf '%s' "$XHY_SELF")" ]]; then
         chmod 0755 "$XHY_SELF" 2>/dev/null || true
         _cleanup_legacy_self
         return 0
     fi
     tmp="$XHY_SELF.new.$$"
-    if [[ -n "$src" && -f "$src" ]]; then
-        install -m 0755 "$src" "$tmp" || die "复制脚本到 $tmp 失败"
+    if [[ -n "$real" && -f "$real" ]]; then
+        install -m 0755 "$real" "$tmp" || die "复制脚本到 $tmp 失败"
     else
         info "当前是从管道运行的，重新下载一份脚本到 $XHY_SELF ..."
         fetch "$XHY_INSTALL_URL" "$tmp" || die "下载脚本本体失败（见上面的 curl 错误码）"
@@ -5747,10 +5789,18 @@ XHY_BOOTSTRAPPED=0
 # 统一安装路径：单文件永远直装到 /usr/local/bin/xhy（不再有 git 仓库 / 单文件
 # 两套模式抢这个入口；旧软链由 reconcile_bin 在 install_self 里自动摘掉）。
 bootstrap_self() {
-    [[ "${XHY_DEV:-0}" == "1" ]] && return 0
-    local src="${XHY_RUNNING:-}" self
-    self="$(readlink -f "$XHY_SELF" 2>/dev/null || printf '%s' "$XHY_SELF")"
-    if [[ -n "$src" ]] && [[ "$(readlink -f "$src" 2>/dev/null || printf '%s' "$src")" == "$self" ]]; then
+    local src="${XHY_RUNNING:-}"
+    # 已规范直装：入口就是正在运行的本体，且它不是软链 → 什么都不用做（顺手清孤儿）。
+    # 注意判据是「字面同一路径」，不能只比 readlink -f：旧布局
+    # /usr/local/bin/xhy -> /usr/local/lib/xray-hy/xhy 解析后同样相等，
+    # 用解析值比较会永远跳过迁移，机器就永远停在旧路径上。
+    if [[ -n "$src" ]] && [[ "$src" == "$XHY_SELF" ]] && [[ ! -L "$XHY_SELF" ]]; then
+        _cleanup_legacy_self
+        return 0
+    fi
+    # 仓库开发目录（XHY_DEV=1）：不往系统目录写，避免调试时被悄悄改写。
+    # 仓库模式迁移到单文件由 `xhy update script` 显式完成。
+    if [[ "${XHY_DEV:-0}" == "1" ]]; then
         return 0
     fi
     install_self
