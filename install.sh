@@ -135,8 +135,8 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.9.2"
-XHY_BUILD="7d9042ef5e70"
+XHY_VERSION="1.9.3"
+XHY_BUILD="fbc5fec19a4f"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -154,7 +154,7 @@ fi
 # ===================== lib/common.sh =====================
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.9.2}"
+XHY_VERSION="${XHY_VERSION:-1.9.3}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -3109,7 +3109,7 @@ scanner_cache_show() {
         return 0
     fi
     epoch="$(scanner_cache_epoch)"
-    at_iso="$(sed -n 's/^# .*at=\([^ ]*\).*/\1/p' "$SCANNER_CACHE" 2>/dev/null | head -1)"
+    at_iso="$(sed -n 's/^# .*at=\([^ ]*\).*/\1/p' "$SCANNER_CACHE" 2>/dev/null | head -1 || true)"
     printf '缓存文件 : %s\n' "$SCANNER_CACHE"
     printf '扫描时间 : %s（%s 小时前，有效期 %s 小时）\n' \
         "${at_iso:-?}" "$(scanner_cache_age_h)" "$(( SCANNER_TTL / 3600 ))"
@@ -5067,7 +5067,9 @@ update_script() {
         rm -f "$tmp"
         die "下载的脚本未通过 bash -n 语法检查，已放弃（本地脚本未改动）"
     fi
-    newbuild="$(sed -n 's/^XHY_BUILD="\(.*\)"$/\1/p' "$tmp" | head -1)"
+    # `| head -1` 会在 sed 还没写完时关管道，pipefail+errexit 下变成 141(SIGPIPE)
+    # 直接把整个升级打死（实测 2026-11-07 22:5x 三台全中）。必须兜住。
+    newbuild="$(sed -n 's/^XHY_BUILD="\(.*\)"$/\1/p' "$tmp" | head -1 || true)"
     if [[ -z "$newbuild" ]]; then
         rm -f "$tmp"
         die "下载的脚本里找不到构建号，可能不是本项目的 install.sh，已放弃"

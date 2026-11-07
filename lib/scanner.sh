@@ -382,7 +382,7 @@ scanner_cache_show() {
         return 0
     fi
     epoch="$(scanner_cache_epoch)"
-    at_iso="$(sed -n 's/^# .*at=\([^ ]*\).*/\1/p' "$SCANNER_CACHE" 2>/dev/null | head -1)"
+    at_iso="$(sed -n 's/^# .*at=\([^ ]*\).*/\1/p' "$SCANNER_CACHE" 2>/dev/null | head -1 || true)"
     printf '缓存文件 : %s\n' "$SCANNER_CACHE"
     printf '扫描时间 : %s（%s 小时前，有效期 %s 小时）\n' \
         "${at_iso:-?}" "$(scanner_cache_age_h)" "$(( SCANNER_TTL / 3600 ))"

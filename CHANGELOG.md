@@ -2,6 +2,12 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.9.3 — 2026-11-07
+
+- fix(update): `xhy update script` 在 pipefail+errexit 下被 `sed | head -1` 的 SIGPIPE 打死（退出码 141），升级在下载前静默中止；改为 `|| true` 兜住。scanner 缓存时间读取同样处理
+- test(lifecycle): 仓库模式用例改为断言「迁移到单文件、仓库入口不动」，覆盖 v1.9.2 新行为
+- fix(common): `XHY_INSTALL_URL` 在库层给默认值，仓库入口/离线测试直接 source lib/ 时不再因 set -u 炸掉
+
 ## v1.9.2 — 2026-11-07
 
 - fix(install): 旧软链入口在下次运行 xhy 时自动迁移到 /usr/local/bin/xhy 并清掉孤儿本体（此前 readlink 解析相同会跳过迁移，机器会永远停在旧路径）

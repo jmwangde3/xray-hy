@@ -49,7 +49,9 @@ update_script() {
         rm -f "$tmp"
         die "下载的脚本未通过 bash -n 语法检查，已放弃（本地脚本未改动）"
     fi
-    newbuild="$(sed -n 's/^XHY_BUILD="\(.*\)"$/\1/p' "$tmp" | head -1)"
+    # `| head -1` 会在 sed 还没写完时关管道，pipefail+errexit 下变成 141(SIGPIPE)
+    # 直接把整个升级打死（实测 2026-11-07 22:5x 三台全中）。必须兜住。
+    newbuild="$(sed -n 's/^XHY_BUILD="\(.*\)"$/\1/p' "$tmp" | head -1 || true)"
     if [[ -z "$newbuild" ]]; then
         rm -f "$tmp"
         die "下载的脚本里找不到构建号，可能不是本项目的 install.sh，已放弃"
