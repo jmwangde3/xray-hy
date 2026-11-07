@@ -17,6 +17,9 @@ source "$funcs"
 LOG="$TEST_TMP/bootstrap.log"
 install_self()   { printf 'self\n' >>"$LOG"; }
 create_symlink() { printf 'link\n' >>"$LOG"; }
+XHY_BINDIR="$TEST_TMP/bin"
+export XHY_BINDIR
+mkdir -p "$XHY_BINDIR" "$TEST_TMP/repo/.git" "$TEST_TMP/repo/lib"
 
 echo "=== bootstrap_self 功能 ==="
 : >"$LOG"
@@ -36,6 +39,19 @@ bootstrap_self
 chk "一键脚本会装脚本本体" 'grep -qx self "$LOG"'
 chk "一键脚本会建 xhy 入口" 'grep -qx link "$LOG"'
 chk "置 XHY_BOOTSTRAPPED=1" '[[ "$XHY_BOOTSTRAPPED" == 1 ]]'
+
+echo "=== 仓库克隆里跑 install.sh 不改写成单文件安装 ==="
+: >"$TEST_TMP/repo/xhy"
+: >"$TEST_TMP/repo/lib/common.sh"
+rm -f "$XHY_BINDIR/xhy"
+: >"$LOG"
+XHY_DEV=0 XHY_RUNNING="$TEST_TMP/repo/install.sh" XHY_SELF="$TEST_TMP/xhy" XHY_BOOTSTRAPPED=0
+bootstrap_self >/dev/null 2>&1
+chk "识别仓库克隆（xhy_is_repo_checkout）" 'xhy_is_repo_checkout "$TEST_TMP/repo"'
+chk "不执行 install_self（不复制单文件）" '[[ ! -s "$LOG" ]]'
+chk "入口指向仓库内 xhy" '[[ "$(readlink "$XHY_BINDIR/xhy")" == "$TEST_TMP/repo/xhy" ]]'
+chk "XHY_APP_DIR 切到仓库根" '[[ "$XHY_APP_DIR" == "$TEST_TMP/repo" ]]'
+chk "普通目录不算仓库克隆" '! xhy_is_repo_checkout "$TEST_TMP"'
 
 echo "=== xhy_is_installed ==="
 init_dirs

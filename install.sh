@@ -136,7 +136,7 @@ fi
 set -Eeuo pipefail
 
 XHY_VERSION="1.4.4"
-XHY_BUILD="e496123f9238"
+XHY_BUILD="2774cb4dc0c4"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -4434,11 +4434,15 @@ install_self() {
     ok "脚本已安装到 $XHY_SELF"
 }
 
+# 命令入口目录：默认 /usr/local/bin，离线测试用 XHY_BINDIR 指到临时目录，
+# 免得测试真的往系统目录里塞软链。
+XHY_BINDIR="${XHY_BINDIR:-/usr/local/bin}"
+
 create_symlink() {
-    install -d -m 0755 /usr/local/bin
+    install -d -m 0755 "$XHY_BINDIR"
     chmod 0755 "$XHY_SELF"
-    ln -sf "$XHY_SELF" /usr/local/bin/xhy
-    ok "命令入口: /usr/local/bin/xhy -> $XHY_SELF"
+    ln -sf "$XHY_SELF" "$XHY_BINDIR/xhy"
+    ok "命令入口: $XHY_BINDIR/xhy -> $XHY_SELF"
 }
 
 # 一键脚本（bash <(curl ...)、wget|sh、sh install.sh）跑完后退出菜单，
@@ -4446,11 +4450,38 @@ create_symlink() {
 # 运行走的是菜单，于是「装完了」其实什么都没装 —— 连 /usr/local/bin/xhy
 # 都不存在。任何从非安装位置发起的运行，先在这里把本体与入口装上（幂等）。
 XHY_BOOTSTRAPPED=0
+
+# 正在运行的位置是不是一份 git 克隆（方式 B）：同目录有 .git / xhy / lib/common.sh。
+# 这种机器升级走 `git pull --ff-only`，在里面跑 install.sh 绝不能被自举悄悄改写成
+# 方式 A 的单文件安装（那会把 /usr/local/bin/xhy 指向 /usr/local/lib/xray-hy，
+# 之后再 git pull 就不生效了）。
+xhy_is_repo_checkout() {
+    local d="${1:-}"
+    if [[ -z "$d" ]]; then
+        d="$(cd -P "$(dirname "${XHY_RUNNING:-/nonexistent}")" 2>/dev/null && pwd)" || return 1
+    fi
+    [[ -n "$d" ]] || return 1
+    [[ -d "$d/.git" ]] || return 1
+    [[ -f "$d/xhy" ]] || return 1
+    [[ -f "$d/lib/common.sh" ]] || return 1
+    return 0
+}
+
 bootstrap_self() {
     [[ "${XHY_DEV:-0}" == "1" ]] && return 0
-    local src="${XHY_RUNNING:-}" self
+    local src="${XHY_RUNNING:-}" self repo
     self="$(readlink -f "$XHY_SELF" 2>/dev/null || printf '%s' "$XHY_SELF")"
     if [[ -n "$src" ]] && [[ "$(readlink -f "$src" 2>/dev/null || printf '%s' "$src")" == "$self" ]]; then
+        return 0
+    fi
+    if repo="$(cd -P "$(dirname "${src:-/nonexistent}")" 2>/dev/null && pwd)" && xhy_is_repo_checkout "$repo"; then
+        install -d -m 0755 "$XHY_BINDIR"
+        ln -sf "$repo/xhy" "$XHY_BINDIR/xhy"
+        XHY_SCRIPT_DIR="$repo"
+        XHY_APP_DIR="$repo"
+        XHY_SELF="$repo/xhy"
+        XHY_BOOTSTRAPPED=1
+        ok "仓库部署：命令入口 $XHY_BINDIR/xhy -> $repo/xhy（升级用 git pull --ff-only）"
         return 0
     fi
     install_self
@@ -4464,7 +4495,7 @@ bootstrap_self() {
 xhy_is_installed() {
     [[ -x "$XRAY_BIN" ]] || return 1
     [[ -n "$(state_get INSTALLED '')" ]] || return 1
-    [[ -x /usr/local/bin/xhy ]] || return 1
+    [[ -x "${XHY_BINDIR:-/usr/local/bin}/xhy" ]] || return 1
     return 0
 }
 
