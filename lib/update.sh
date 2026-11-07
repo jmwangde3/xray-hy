@@ -99,6 +99,7 @@ update_core() {
     if [[ -s "$XHY_ETC/config.json" ]] && ! xray_config_test >/dev/null 2>&1; then
         if [[ -n "$rollback" ]]; then
             cp -a "$rollback" "$XRAY_BIN"
+            rm -f "$rollback"          # 回滚副本用完就删，别在小盘上留 30 MB
             err "新版本 $ver 无法加载现有配置，已自动回滚到原二进制。"
         fi
         die "请检查 $XHY_ETC/config.json，或改用兼容版本"

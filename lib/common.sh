@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.6.1}"
+XHY_VERSION="${XHY_VERSION:-1.6.2}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -152,6 +152,27 @@ disk_free_mb() {
     # 路径不存在 / df 不支持 -m 时都会得到空串；调用方按 0 处理更安全。
     [[ "$v" =~ ^[0-9]+$ ]] || v=0
     printf '%s' "$v"
+}
+
+# 单个文件/目录占用的 KB（du -k 是 POSIX，BusyBox 支持）。取不到给 0。
+# 为什么不拿 `df` 前后相减算释放量：df 的粒度是 1 MB，删一堆零字节残留文件
+# 会显示「释放 0 MB」，看起来像没删掉 —— 这正是 v1.6.2 要修掉的误导。
+file_kb() {
+    local k
+    k="$(du -k "$1" 2>/dev/null | awk 'NR==1 {print $1+0; exit}')"
+    [[ "$k" =~ ^[0-9]+$ ]] || k=0
+    printf '%s' "$k"
+}
+
+# KB → 人读字符串（小于 1024 给 KB，否则 MB 带一位小数）。纯 shell，不依赖 bc。
+human_kb() {
+    local k="${1:-0}"
+    [[ "$k" =~ ^[0-9]+$ ]] || k=0
+    if (( k >= 1024 )); then
+        printf '%d.%d MB' $(( k / 1024 )) $(( (k % 1024) * 10 / 1024 ))
+    else
+        printf '%d KB' "$k"
+    fi
 }
 
 backup_file() {

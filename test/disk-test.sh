@@ -69,7 +69,58 @@ chk "定义 cmd_clean"               'grep -q "^cmd_clean()" lib/backup.sh'
 chk "定义 disk_free_mb"            'grep -q "^disk_free_mb()" lib/common.sh'
 chk "分发表有 clean"               'grep -q "clean)      cmd_clean" entry/main.sh'
 chk "菜单 16 支持 clean"           'grep -q "clean)  cmd_clean all" entry/main.sh'
-chk "中文帮助有 clean"             'grep -q "clean \[backups|snapshots|all\]    清理旧核心二进制备份" entry/main.sh'
-chk "英文帮助有 clean"             'grep -q "clean \[backups|snapshots|all\]  Drop old core backups" entry/main.sh'
+chk "中文帮助有 clean"             'grep -Fq "clean [backups|snapshots|tarballs|tmp|all]  清理旧核心二进制" entry/main.sh'
+chk "英文帮助有 clean"             'grep -Fq "clean [backups|snapshots|tarballs|tmp|all]  Drop old core backups" entry/main.sh'
+chk "帮助说明 tarballs 含义"       'grep -Fq "tarballs = xhy backup 产物" entry/main.sh'
+
+echo "=== file_kb / human_kb ==="
+printf '0123456789abcdef' >"$TEST_TMP/kb-probe"
+chk "file_kb 返回数字"        '[[ "$(file_kb "$TEST_TMP/kb-probe")" =~ ^[0-9]+$ ]]'
+chk "file_kb 不存在的路径给 0" '[[ "$(file_kb "$TEST_TMP/nope-xyz")" == "0" ]]'
+chk "human_kb 0 -> 0 KB"      '[[ "$(human_kb 0)" == "0 KB" ]]'
+chk "human_kb 512 -> 512 KB"  '[[ "$(human_kb 512)" == "512 KB" ]]'
+chk "human_kb 1536 -> 1.5 MB" '[[ "$(human_kb 1536)" == "1.5 MB" ]]'
+chk "human_kb 2048 -> 2.0 MB" '[[ "$(human_kb 2048)" == "2.0 MB" ]]'
+
+# 回归：v1.6.1 在 47.88.102.45 上报「删除 2 个，释放 0 MB」，因为
+# `ls -1t $XHY_BACKUP/xray-*` 把 update_core 的零字节 xray-rollback.?????? 也算成
+# 二进制备份，排序后「最新一份」可能是这个残留，真正的 30 MB 备份反而被当旧文件。
+echo "=== 回归：xray-rollback 残留不能当二进制备份计数 ==="
+rm -rf "$XHY_BACKUP"; mkdir -p "$XHY_BACKUP"
+head -c 8192 /dev/zero >"$XHY_BACKUP/xray-26.10.1-20260101000000"
+head -c 4096 /dev/zero >"$XHY_BACKUP/xray-26.9.9-20251201000000"
+: >"$XHY_BACKUP/xray-rollback.Ab12Cd"
+touch -t 202601030000 "$XHY_BACKUP/xray-26.9.9-20251201000000"
+touch -t 202601040000 "$XHY_BACKUP/xray-26.10.1-20260101000000"
+touch -t 202601050000 "$XHY_BACKUP/xray-rollback.Ab12Cd"   # 残留是最新的
+out="$(cmd_clean backups 2>&1)"
+chk "零字节残留被清掉"        '[[ ! -e "$XHY_BACKUP/xray-rollback.Ab12Cd" ]]'
+chk "最新真实备份保留"        '[[ -s "$XHY_BACKUP/xray-26.10.1-20260101000000" ]]'
+chk "较旧的真实备份被删"      '[[ ! -e "$XHY_BACKUP/xray-26.9.9-20251201000000" ]]'
+chk "确实只剩 1 个二进制备份" '[[ $(ls -1 "$XHY_BACKUP"/xray-* 2>/dev/null | wc -l | tr -d " ") -eq 1 ]]'
+chk "逐条报出被删文件与体积"  'grep -q "xray-rollback.Ab12Cd" <<<"$out"'
+chk "报告 KB 级释放量而非 0 MB" 'grep -qE "[0-9]+ KB" <<<"$out"'
+chk "结尾写合计删除量"        'grep -q "本次删除" <<<"$out"'
+
+echo "=== cmd_clean tarballs：打包备份与还原前快照 ==="
+rm -rf "$XHY_BACKUP"; mkdir -p "$XHY_BACKUP"
+i=0
+while (( i < 5 )); do
+    head -c 2048 /dev/zero >"$XHY_BACKUP/xhy-backup-2026010${i}.tar.gz"
+    touch -t 2026010$(( i + 1 ))0000 "$XHY_BACKUP/xhy-backup-2026010${i}.tar.gz"
+    i=$(( i + 1 ))
+done
+head -c 1024 /dev/zero >"$XHY_BACKUP/pre-restore-20260106000000"
+cmd_clean tarballs >/dev/null 2>&1
+chk "打包备份+还原前共 3 份"   '[[ $(ls -1 "$XHY_BACKUP"/xhy-backup-*.tar.gz "$XHY_BACKUP"/pre-restore-* 2>/dev/null | wc -l | tr -d " ") -eq 3 ]]'
+chk "最新打包备份保留"         '[[ -f "$XHY_BACKUP/xhy-backup-20260104.tar.gz" ]]'
+chk "还原前快照保留（最新）"   '[[ -f "$XHY_BACKUP/pre-restore-20260106000000" ]]'
+chk "最旧的已被删"             '[[ ! -f "$XHY_BACKUP/xhy-backup-20260100.tar.gz" ]]'
+chk "tarballs 不动二进制备份"  '[[ -z "$(ls -1 "$XHY_BACKUP"/xray-* 2>/dev/null)" ]]'
+
+echo "=== cmd_clean：未知参数拒绝执行 ==="
+( cmd_clean bogus ) >/dev/null 2>&1
+rc=$?
+chk "未知参数非零退出"       '[[ $rc -ne 0 ]]'
 
 summary

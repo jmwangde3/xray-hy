@@ -148,62 +148,144 @@ backup_restore() {
 # 盘一满 sshd 就写不了会话文件 —— 症状是「SSH 突然连不上、但代理还能用」。
 # 只保留最近若干份，其余删除。
 
+# 删除一组文件，逐个报体积，并把「删了几个 / 释放多少」累加到 _CLEAN_N / _CLEAN_KB。
+# 为什么不拿 df 前后相减：df 粒度 1 MB，删掉零星零字节残留会显示「释放 0 MB」，
+# 看上去像什么都没删（v1.6.1 在 47.88.102.45 上就报过这个数）。
+_clean_drop() {
+    local label="$1"; shift
+    local f kb total=0 cnt=0
+    for f in "$@"; do
+        [[ -e "$f" ]] || continue
+        kb="$(file_kb "$f")"
+        if rm -rf "$f" 2>/dev/null; then
+            total=$(( total + kb )); cnt=$(( cnt + 1 ))
+            printf '  - %-40s %s\n' "$(basename "$f")" "$(human_kb "$kb")"
+        else
+            warn "删除失败（仍在占用？）：$f"
+        fi
+    done
+    _CLEAN_N=$(( _CLEAN_N + cnt ))
+    _CLEAN_KB=$(( _CLEAN_KB + total ))
+    (( cnt > 0 )) && ok "删除${label} $cnt 个，释放 $(human_kb "$total")"
+    return 0
+}
+
 cmd_clean() {
-    local what="${1:-all}" keep_bin=1 keep_snap=5 keep_bak=20
-    local before after n=0 f i
-    local -a bins=() snaps=() baks=()
+    local what="${1:-all}" keep_bin=1 keep_snap=5 keep_bak=20 keep_tar=3
+    local before after f i k p
+    local _keep=0
+    local -a bins=() rt=() snaps=() baks=() tars=() drop=()
     need_root
     init_dirs
+    _CLEAN_N=0
+    _CLEAN_KB=0
+
+    case "$what" in
+        all|backups|snapshots|tarballs|tmp) ;;
+        *) die "用法：xhy clean [all|backups|snapshots|tarballs|tmp]" ;;
+    esac
+
     before="$(disk_free_mb /)"
 
-    while IFS= read -r f; do bins+=("$f"); done < <(ls -1t "$XHY_BACKUP"/xray-* 2>/dev/null || true)
-    while IFS= read -r f; do snaps+=("$f"); done < <(ls -1t "$XHY_SNAPSHOTS"/state.*.tar.gz 2>/dev/null || true)
-    while IFS= read -r f; do baks+=("$f"); done < <(ls -1t "$XHY_BACKUP"/*.bak 2>/dev/null || true)
+    # 二进制备份 = xray-<版本>-<14 位时间戳>。
+    # xray-rollback.* 是 update_core 的临时副本，中断时会留零字节文件；它同样匹配
+    # xray-*，混在一起排序会让「最新一份」变成 0 字节残留，真正的 30 MB 备份反被删。
+    while IFS= read -r f; do
+        [[ -e "$f" ]] || continue
+        case "$(basename "$f")" in
+            xray-rollback.*) rt+=("$f") ;;
+            *)               bins+=("$f") ;;
+        esac
+    done < <(ls -1t "$XHY_BACKUP"/xray-* 2>/dev/null || true)
+    while IFS= read -r f; do [[ -e "$f" ]] && snaps+=("$f"); done \
+        < <(ls -1t "$XHY_SNAPSHOTS"/state.*.tar.gz 2>/dev/null || true)
+    while IFS= read -r f; do [[ -e "$f" ]] && baks+=("$f"); done \
+        < <(ls -1t "$XHY_BACKUP"/*.bak 2>/dev/null || true)
+    while IFS= read -r f; do [[ -e "$f" ]] && tars+=("$f"); done \
+        < <(ls -1t "$XHY_BACKUP"/xhy-backup-*.tar.gz "$XHY_BACKUP"/pre-restore-* 2>/dev/null || true)
 
     printf '\n清理前：根分区剩余 %s MB\n' "$before"
-    printf '  二进制备份 %d 个 / 状态快照 %d 个 / .bak %d 个\n' \
-        "${#bins[@]}" "${#snaps[@]}" "${#baks[@]}"
-    du -sh "$XHY_BACKUP" "$XHY_SNAPSHOTS" 2>/dev/null | sed 's/^/  /' || true
+    printf '  备份目录 %s / 快照目录 %s\n' \
+        "$(human_kb "$(file_kb "$XHY_BACKUP")")" "$(human_kb "$(file_kb "$XHY_SNAPSHOTS")")"
+    printf '  二进制备份 %d 个 / 临时副本 %d 个 / 状态快照 %d 个 / 打包备份 %d 个 / .bak %d 个\n' \
+        "${#bins[@]}" "${#rt[@]}" "${#snaps[@]}" "${#tars[@]}" "${#baks[@]}"
 
-    case "$what" in
-        backups|all)
-            if (( ${#bins[@]} > keep_bin )); then
-                for (( i = keep_bin; i < ${#bins[@]}; i++ )); do
-                    if rm -f "${bins[$i]}"; then n=$((n + 1)); fi
-                done
-                ok "删除旧二进制备份 $(( ${#bins[@]} - keep_bin )) 个（保留最新 $keep_bin 个）"
-            else
-                info "二进制备份只有 ${#bins[@]} 个，无需清理"
-            fi ;;
-    esac
+    # ---- 临时副本：按定义就是可丢的，不看数量 ----
+    if [[ "$what" == "tmp" || "$what" == "backups" || "$what" == "all" ]]; then
+        if (( ${#rt[@]} > 0 )); then
+            _clean_drop "临时副本残留" "${rt[@]}"
+        else
+            info "没有临时副本残留"
+        fi
+    fi
 
-    case "$what" in
-        snapshots|all)
-            if (( ${#snaps[@]} > keep_snap )); then
-                for (( i = keep_snap; i < ${#snaps[@]}; i++ )); do
-                    if rm -f "${snaps[$i]}"; then n=$((n + 1)); fi
-                done
-                ok "删除旧状态快照 $(( ${#snaps[@]} - keep_snap )) 个（保留最新 $keep_snap 个，xhy rollback 仍可用）"
-            else
-                info "状态快照只有 ${#snaps[@]} 个，无需清理"
-            fi ;;
-    esac
+    # ---- 二进制备份：留最新 keep_bin 份 ----
+    if [[ "$what" == "backups" || "$what" == "all" ]]; then
+        drop=()
+        for (( i = keep_bin; i < ${#bins[@]}; i++ )); do drop+=("${bins[$i]}"); done
+        if (( ${#drop[@]} > 0 )); then
+            _clean_drop "旧二进制备份" "${drop[@]}"
+        fi
+        if (( ${#bins[@]} > 0 )); then
+            _keep=$(( ${#bins[@]} > keep_bin ? keep_bin : ${#bins[@]} ))
+            info "保留 ${_keep} 份二进制备份：$(basename "${bins[0]}")（$(human_kb "$(file_kb "${bins[0]}")")）"
+        fi
+    fi
 
-    case "$what" in
-        backups|all)
-            if (( ${#baks[@]} > keep_bak )); then
-                for (( i = keep_bak; i < ${#baks[@]}; i++ )); do
-                    if rm -f "${baks[$i]}"; then n=$((n + 1)); fi
-                done
-                ok "删除旧 .bak $(( ${#baks[@]} - keep_bak )) 个（保留最新 $keep_bak 个）"
-            fi ;;
-    esac
+    # ---- 状态快照：留最新 keep_snap 份（xhy rollback 还要用） ----
+    if [[ "$what" == "snapshots" || "$what" == "all" ]]; then
+        drop=()
+        for (( i = keep_snap; i < ${#snaps[@]}; i++ )); do drop+=("${snaps[$i]}"); done
+        if (( ${#drop[@]} > 0 )); then
+            _clean_drop "旧状态快照" "${drop[@]}"
+            info "保留最新 $keep_snap 份快照，xhy rollback 仍可用"
+        else
+            info "状态快照 ${#snaps[@]} 个，未超过保留数 $keep_snap"
+        fi
+    fi
+
+    # ---- 打包备份（xhy backup / 还原前自动备份）：留最新 keep_tar 份 ----
+    if [[ "$what" == "tarballs" || "$what" == "all" ]]; then
+        drop=()
+        for (( i = keep_tar; i < ${#tars[@]}; i++ )); do drop+=("${tars[$i]}"); done
+        if (( ${#drop[@]} > 0 )); then
+            _clean_drop "旧打包备份" "${drop[@]}"
+        fi
+        if (( ${#tars[@]} > 0 )); then
+            info "保留 $(( ${#tars[@]} > keep_tar ? keep_tar : ${#tars[@]} )) 份打包备份（最新一份 $(human_kb "$(file_kb "${tars[0]}")")）"
+        fi
+    fi
+
+    # ---- .bak：留最新 keep_bak 份 ----
+    if [[ "$what" == "backups" || "$what" == "all" ]]; then
+        drop=()
+        for (( i = keep_bak; i < ${#baks[@]}; i++ )); do drop+=("${baks[$i]}"); done
+        if (( ${#drop[@]} > 0 )); then
+            _clean_drop "旧 .bak" "${drop[@]}"
+        else
+            info ".bak ${#baks[@]} 个，未超过保留数 $keep_bak"
+        fi
+    fi
 
     after="$(disk_free_mb /)"
-    printf '\n清理后：根分区剩余 %s MB（释放 %s MB，删除 %d 个文件）\n' \
-        "$after" "$(( after - before ))" "$n"
+    printf '\n清理后：根分区剩余 %s MB\n' "$after"
+    if (( _CLEAN_N == 0 )); then
+        printf '本次没有删除任何文件（都在保留数内）\n'
+    else
+        printf '本次删除 %d 个文件，合计 %s' "$_CLEAN_N" "$(human_kb "$_CLEAN_KB")"
+        if (( after > before )); then
+            printf '；df 增加 %d MB\n' "$(( after - before ))"
+        else
+            printf '；df 未变（删的多是零字节残留，或文件仍被进程占用）\n'
+        fi
+    fi
+
     if (( after < 200 )); then
-        warn "余量仍不足 200 MB。可再清：$XHY_BACKUP 里的手工大文件、apt/apk 缓存、/var/log"
+        warn "余量仍不足 200 MB。备份目录里最大的几份："
+        du -k "$XHY_BACKUP"/* 2>/dev/null | sort -rn | head -3 | while read -r k p; do
+            printf '  %8s  %s\n' "$(human_kb "$k")" "$(basename "$p")"
+        done
+        warn "还可清：apk/apt 缓存、/var/log 里的旧日志、手工传上来的 tar 包（/root）"
     fi
     return 0
 }
