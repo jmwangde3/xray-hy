@@ -135,8 +135,8 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.7.1"
-XHY_BUILD="0be59fd4d572"
+XHY_VERSION="1.7.2"
+XHY_BUILD="3ecc906236bd"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -154,7 +154,7 @@ fi
 # ===================== lib/common.sh =====================
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.7.1}"
+XHY_VERSION="${XHY_VERSION:-1.7.2}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -4636,7 +4636,7 @@ _clean_drop() {
 }
 
 cmd_clean() {
-    local what="${1:-all}" keep_bin=1 keep_snap=5 keep_bak=20 keep_tar=3 keep_big=2
+    local what="${1:-all}" keep_bin="${XHY_BACKUP_CORE:-0}" keep_snap=5 keep_bak=20 keep_tar=3 keep_big=2
     local before after f i k p
     local _keep=0
     local -a bins=() rt=() snaps=() baks=() bigs=() tars=() drop=()
@@ -4704,8 +4704,13 @@ cmd_clean() {
             _clean_drop "旧二进制备份" "${drop[@]}"
         fi
         if (( ${#bins[@]} > 0 )); then
-            _keep=$(( ${#bins[@]} > keep_bin ? keep_bin : ${#bins[@]} ))
-            info "保留 ${_keep} 份二进制备份：$(basename "${bins[0]}")（$(human_kb "$(file_kb "${bins[0]}")")）"
+            if (( keep_bin > 0 )); then
+                _keep=$(( ${#bins[@]} > keep_bin ? keep_bin : ${#bins[@]} ))
+                info "保留 ${_keep} 份二进制备份：$(basename "${bins[0]}")（$(human_kb "$(file_kb "${bins[0]}")")）"
+            else
+                info "二进制不进备份（可重下）。需要恢复：xhy core channel <版本> && xhy core update"
+                info "想留一份保险：XHY_BACKUP_CORE=1 xhy clean"
+            fi
         fi
     fi
 

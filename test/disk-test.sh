@@ -38,12 +38,12 @@ before_snap="$(ls -1 "$XHY_SNAPSHOTS"/state.*.tar.gz 2>/dev/null | wc -l | tr -d
 cmd_clean all >/dev/null 2>&1
 rc=$?
 chk "返回 0"                 '[[ $rc -eq 0 ]]'
-chk "二进制备份只剩 1 个"    '[[ $(ls -1 "$XHY_BACKUP"/xray-* 2>/dev/null | wc -l | tr -d " ") -eq 1 ]]'
+chk "二进制备份默认全清"    '[[ $(ls -1 "$XHY_BACKUP"/xray-* 2>/dev/null | wc -l | tr -d " ") -eq 0 ]]'
 chk "快照只剩 5 个"          '[[ $(ls -1 "$XHY_SNAPSHOTS"/state.*.tar.gz 2>/dev/null | wc -l | tr -d " ") -eq 5 ]]'
 chk "快照原本是 6 个"        '[[ $before_snap -eq 6 ]]'
 chk ".bak 只剩 20 个"        '[[ $(ls -1 "$XHY_BACKUP"/*.bak 2>/dev/null | wc -l | tr -d " ") -eq 20 ]]'
 chk "不认识的备份文件不动"   '[[ -f "$XHY_BACKUP/xhy-manual-keep.tar.gz" ]]'
-chk "保留的那份内容完整"     '[[ -s "$(ls -1 "$XHY_BACKUP"/xray-* | head -1)" ]]'
+chk "XHY_BACKUP_CORE=1 时留 1 份" 'XHY_BACKUP_CORE=1 cmd_clean backups >/dev/null 2>&1; [[ $(ls -1 "$XHY_BACKUP"/xray-* 2>/dev/null | wc -l | tr -d " ") -le 1 ]]' 
 
 echo "=== cmd_clean：没有多余文件时不报错 ==="
 cmd_clean all >/dev/null 2>&1
@@ -58,7 +58,7 @@ while (( i < 7 )); do
 done
 cmd_clean snapshots >/dev/null 2>&1
 chk "snapshots 清到 5 个"     '[[ $(ls -1 "$XHY_SNAPSHOTS"/state.*.tar.gz 2>/dev/null | wc -l | tr -d " ") -eq 5 ]]'
-chk "backups 不受影响"        '[[ $(ls -1 "$XHY_BACKUP"/xray-* 2>/dev/null | wc -l | tr -d " ") -eq 1 ]]'
+chk "backups 不受影响"        '[[ $(ls -1 "$XHY_BACKUP"/xray-* 2>/dev/null | wc -l | tr -d " ") -eq 0 ]]'
 
 echo "=== 源码接线 ==="
 chk "xray_install 有写前闸门"      'grep -q "disk_need 90" lib/core.sh'
@@ -96,7 +96,7 @@ head -c 4096 /dev/zero >"$XHY_BACKUP/xray-26.9.9-20251201000000"
 touch -t 202601030000 "$XHY_BACKUP/xray-26.9.9-20251201000000"
 touch -t 202601040000 "$XHY_BACKUP/xray-26.10.1-20260101000000"
 touch -t 202601050000 "$XHY_BACKUP/xray-rollback.Ab12Cd"   # 残留是最新的
-out="$(cmd_clean backups 2>&1)"
+out="$(XHY_BACKUP_CORE=1 cmd_clean backups 2>&1)"   # 显式要留 1 份保险
 chk "零字节残留被清掉"        '[[ ! -e "$XHY_BACKUP/xray-rollback.Ab12Cd" ]]'
 chk "最新真实备份保留"        '[[ -s "$XHY_BACKUP/xray-26.10.1-20260101000000" ]]'
 chk "较旧的真实备份被删"      '[[ ! -e "$XHY_BACKUP/xray-26.9.9-20251201000000" ]]'

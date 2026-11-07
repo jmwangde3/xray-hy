@@ -2,6 +2,12 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.7.2 — 2026-11-07
+
+- `xhy clean` 默认不再保留二进制备份：`xray` 也是「能上网重新下载」的东西，留一份就是 35 MB。想留保险设 `XHY_BACKUP_CORE=1`（只留最新 1 份）
+- 删完会打印恢复方法：`xhy core channel <版本> && xhy core update`
+- 至此 `backups/` 里只剩真正丢不起的东西：`config.json` / 节点 env / 证书 / `state.env`
+
 ## v1.7.1 — 2026-11-07
 
 - `xhy clean all` 现在会把 `geoip.dat.*.bak` / `geosite.dat.*.bak` 这类「可重新下载」的历史副本**全部清掉**（v1.7.0 是每类留 2 份，但那 29.5 MB 在 47.88.102.45 上正是主要占用）。现用的 dat 在 `/usr/local/share/xray`，`xhy geodata` 随时重下，留副本没有意义
