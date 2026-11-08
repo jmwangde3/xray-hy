@@ -145,7 +145,7 @@ fi
 set -Eeuo pipefail
 
 XHY_VERSION="1.13.2"
-XHY_BUILD="a8709dbbbd06"
+XHY_BUILD="3d0b6287996e"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -2194,17 +2194,24 @@ _apply_family() {
     fi
 
     if [[ "$guard" == "on" ]]; then
-        # 阈值按「正常人的使用量」定，不是按攻击者：VS Code Remote / scp 批量 /
-        # 运维工具一轮就是 5-10 个新连接。攻击者的特征是每小时成百上千次。
-        # 爆发窗口 10 次/60s，慢速窗口 25 次/小时 —— 误伤远小于拦截损失。
+        # 顺序与 --rcheck/--set 的选择是这套机制的全部要害：
+        #
+        #   rcheck(DROP) 在前、set 在后 —— 一旦命中 DROP，包就不再往下走，
+        #   时间戳停止新增，滑窗 60 秒后自然滚动清空，人静等一分钟即可解锁。
+        #
+        # 旧版写的是「先 set 再 --update --hitcount」，两个后果叠加成死锁：
+        #   1) --set 无条件执行，每一轮重试都往窗口顶一条新记录；
+        #   2) --update 命中时还会再刷新一次时间戳。
+        #   于是窗口永远满，越试越锁，只有 VNC 清 /proc/net/xt_recent 才能救。
+        # 实测硅谷一次会话被 DROP 674 次、家宽 IP 在表里顶满 32 条就是这个。
         if "$ipt" -w -A "$FW_CHAIN" -p tcp --dport "$XHY_SSH_PORT" -m conntrack --ctstate NEW \
-                -m recent --set --name "$tag" >/dev/null 2>&1; then
+                -m recent --rcheck --seconds "$SSH_BURST_WINDOW" --hitcount "$SSH_BURST_HITS" --name "$tag" -j DROP >/dev/null 2>&1; then
             "$ipt" -w -A "$FW_CHAIN" -p tcp --dport "$XHY_SSH_PORT" -m conntrack --ctstate NEW \
-                -m recent --update --seconds 60 --hitcount 10 --name "$tag" -j DROP 2>/dev/null || ok_recent=0
+                -m recent --set --name "$tag" >/dev/null 2>&1 || ok_recent=0
+            "$ipt" -w -A "$FW_CHAIN" -p tcp --dport "$XHY_SSH_PORT" -m conntrack --ctstate NEW \
+                -m recent --rcheck --seconds "$SSH_SLOW_WINDOW" --hitcount "$SSH_SLOW_HITS" --name "${tag}_SLOW" -j DROP >/dev/null 2>&1 || ok_recent=0
             "$ipt" -w -A "$FW_CHAIN" -p tcp --dport "$XHY_SSH_PORT" -m conntrack --ctstate NEW \
                 -m recent --set --name "${tag}_SLOW" >/dev/null 2>&1 || ok_recent=0
-            "$ipt" -w -A "$FW_CHAIN" -p tcp --dport "$XHY_SSH_PORT" -m conntrack --ctstate NEW \
-                -m recent --update --seconds 3600 --hitcount 25 --name "${tag}_SLOW" -j DROP 2>/dev/null || ok_recent=0
         else
             ok_recent=0
         fi
@@ -2340,7 +2347,8 @@ firewall_status() {
     local brief=""
     if [[ "${1:-}" == "--brief" ]]; then brief="1"; fi
     printf '工作模式 : %s\n' "$(state_get FIREWALL_MODE safe)"
-    printf 'SSH 防爆破: %s (端口 %s，60s/5 次 + 1h/8 次 双窗口)\n' "$(state_get SSH_GUARD_STATUS '?')" "$XHY_SSH_PORT"
+    printf 'SSH 防爆破: %s (端口 %s，%ss/%s 次 + %ss/%s 次 双窗口)\n' "$(state_get SSH_GUARD_STATUS '?')" "$XHY_SSH_PORT" \
+        "$SSH_BURST_WINDOW" "$SSH_BURST_HITS" "$SSH_SLOW_WINDOW" "$SSH_SLOW_HITS"
     printf '节点端口(TCP): %s\n' "$(firewall_node_ports | tr '\n' ' ')"
     printf '节点端口(UDP): %s\n' "$(firewall_udp_ports | tr '\n' ' ')"
     if [[ -n "$brief" ]]; then return 0; fi
@@ -6151,18 +6159,62 @@ relay_fw_chain() {
     fi
 }
 
+# 链里第一条「终止性」规则（DROP / RETURN）的行号。我们的 ACCEPT 必须排在它
+# 前面，否则包先被 RETURN 弹回 INPUT、或被 strict 模式的 DROP 吃掉，规则形同
+# 不存在 —— 而 `-C` 依然返回 0，于是 relay status 报「已放行」，实际断流。
+# 没有终止规则时输出空串，调用方退回 -A 追加。
+_relay_fw_term_pos() {
+    local t="$1" chain="$2" n=0 line
+    while IFS= read -r line; do
+        n=$(( n + 1 ))
+        case "$line" in
+            *" -j DROP"|*" -j RETURN") printf '%s' "$n"; return 0 ;;
+        esac
+    done < <($t -S "$chain" 2>/dev/null | grep -- "^-A $chain ")
+    return 1
+}
+
+# 我们这条（带 comment）当前所在行号；不在链里输出空。
+_relay_fw_own_pos() {
+    local t="$1" chain="$2" port="$3" n=0 line
+    while IFS= read -r line; do
+        n=$(( n + 1 ))
+        case "$line" in
+            *"xhy-relay-$port"*) printf '%s' "$n"; return 0 ;;
+        esac
+    done < <($t -S "$chain" 2>/dev/null | grep -- "^-A $chain ")
+    return 1
+}
+
 relay_fw_add() {
-    local port="$1" allow="$2" t chain
+    local port="$1" allow="$2" t chain pos
     t=iptables; [[ "$allow" == *:* ]] && t=ip6tables
     chain="$(relay_fw_chain "$t")"
     # 带 comment 一起比对：只比「端口+源」的话，一条别人加的同类规则会让 -C 命中，
     # 于是我们这条带注释的规则永远加不上，之后 relay_del 按注释删也删不掉。
-    $t -w -C "$chain" -p tcp --dport "$port" -s "$allow" \
-        -m comment --comment "xhy-relay-$port" -j ACCEPT 2>/dev/null && {
-        printf '%s' "$chain"; return 0; }
-    $t -w -A "$chain" -p tcp --dport "$port" -s "$allow" \
-        -m comment --comment "xhy-relay-$port" -j ACCEPT 2>/dev/null \
-        || { relay_say warn "防火墙规则写入失败（$t $chain）" "failed to add firewall rule ($t $chain)"; return 1; }
+    if $t -w -C "$chain" -p tcp --dport "$port" -s "$allow" \
+            -m comment --comment "xhy-relay-$port" -j ACCEPT >/dev/null 2>&1; then
+        # 已存在但可能位置是坏的（旧版本 -A 追加到 RETURN 之后），就地纠正。
+        local own term
+        own="$(_relay_fw_own_pos "$t" "$chain" "$port" || true)"
+        term="$(_relay_fw_term_pos "$t" "$chain" || true)"
+        if [[ -n "$own" && -n "$term" ]] && (( own >= term )); then
+            $t -w -D "$chain" -p tcp --dport "$port" -s "$allow" \
+                -m comment --comment "xhy-relay-$port" -j ACCEPT >/dev/null 2>&1 || true
+        else
+            printf '%s' "$chain"; return 0
+        fi
+    fi
+    pos="$(_relay_fw_term_pos "$t" "$chain" || true)"
+    if [[ -n "$pos" ]]; then
+        $t -w -I "$chain" "$pos" -p tcp --dport "$port" -s "$allow" \
+            -m comment --comment "xhy-relay-$port" -j ACCEPT >/dev/null 2>&1 \
+            || { relay_say warn "防火墙规则写入失败（$t $chain 第 $pos 行前）" "failed to insert firewall rule ($t $chain before line $pos)"; return 1; }
+    else
+        $t -w -A "$chain" -p tcp --dport "$port" -s "$allow" \
+            -m comment --comment "xhy-relay-$port" -j ACCEPT >/dev/null 2>&1 \
+            || { relay_say warn "防火墙规则写入失败（$t $chain）" "failed to add firewall rule ($t $chain)"; return 1; }
+    fi
     printf '%s' "$chain"
 }
 
@@ -6179,12 +6231,20 @@ relay_fw_del() {
     return 0
 }
 
+# 「已放行」= 规则存在 且 位置有效。只看 -C 会把排在 RETURN/DROP 之后的死规则
+# 误报成 OK —— relay status 绿灯、链路实际断在那条 RETURN 上。
 relay_fw_present() {
-    local port="$1" allow="$2" t chain
+    local port="$1" allow="$2" t chain own term
     t=iptables; [[ "$allow" == *:* ]] && t=ip6tables
     chain="${RELAY_FW_CHAIN:-$(relay_fw_chain "$t")}"
     $t -w -C "$chain" -p tcp --dport "$port" -s "$allow" \
-        -m comment --comment "xhy-relay-$port" -j ACCEPT >/dev/null 2>&1
+        -m comment --comment "xhy-relay-$port" -j ACCEPT >/dev/null 2>&1 || return 1
+    own="$(_relay_fw_own_pos "$t" "$chain" "$port" || true)"
+    term="$(_relay_fw_term_pos "$t" "$chain" || true)"
+    if [[ -n "$own" && -n "$term" ]] && (( own >= term )); then
+        return 1
+    fi
+    return 0
 }
 
 # ---------------------------------------------------------------------------
