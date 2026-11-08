@@ -2,6 +2,11 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.11.2 — 2026-11-08
+
+- fix(relay): land 入站补 sockopt（tcpFastOpen=true / tcpNoDelay / tcpKeepAliveIdle / tcpUserTimeout / tcpMptcp:false / BBR 跟随系统）。内核 net.ipv4.tcp_fastopen=3 只是允许位，服务端真开关是 listen socket 的 setsockopt(TCP_FASTOPEN)；此前只有 entry 出站开 TFO，实测两端 TcpExtTCPFastOpenPassive=0 / TCPFastOpenActive=0，这一跳省不到那个 107ms 握手 RTT
+- feat(relay): relay test 落地端新增入站 TFO 自检；relay-test 96 -> 106 项，全套回归全绿
+
 ## v1.11.1 — 2026-11-08
 
 - fix(relay): routing 规则指向 balancer 必须用 balancerTag（Xray 26.x 把 outboundTag 当出站 tag 查，写 us-relay-lb 报 non existing outTag 并丢包，AI 分类流量全 000）

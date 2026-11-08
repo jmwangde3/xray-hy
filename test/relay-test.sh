@@ -176,6 +176,12 @@ echo "===== relay land ====="
 relay_land --allow 198.51.100.20 --uuid land-uuid-0000 >/dev/null
 chk "land 生成入站片段"               '[ -f "$XHY_CONFDIR/relay_in_14430.json" ]'
 chk "片段是合法 JSON"                 'json_ok "$XHY_CONFDIR/relay_in_14430.json"'
+# v1.11.2：入站 listen socket 才是服务端 TFO 的真开关，必须与出站同源
+chk "land 入站带 sockopt"            'grep -q "\"sockopt\":{" "$XHY_CONFDIR/relay_in_14430.json"'
+chk "入站 TFO 默认开"                'grep -q "\"sockopt\":{\"tcpFastOpen\":true" "$XHY_CONFDIR/relay_in_14430.json"'
+chk "入站 sockopt 含 tcpNoDelay"     'grep -q "\"tcpNoDelay\":true" "$XHY_CONFDIR/relay_in_14430.json"'
+chk "入站 sockopt 含 tcpMptcp:false" 'grep -q "\"tcpMptcp\":false" "$XHY_CONFDIR/relay_in_14430.json"'
+chk "入站 sockopt 带 BBR"            'grep -q "\"tcpcongestion\":\"bbr\"" "$XHY_CONFDIR/relay_in_14430.json"'
 chk "config 含 in-relay-14430"        'grep -q "in-relay-14430" "$XHY_ETC/config.json"'
 chk "config 仍是合法 JSON"            'json_ok "$XHY_ETC/config.json"'
 chk "relay.env 角色=land"             'grep -q "^RELAY_ROLE=land$" "$XHY_NODES/relay.env"'
@@ -200,6 +206,13 @@ chk "land 片段不引用证书文件"       "! grep -q 'relay.crt' \"\$XHY_CONF
 chk "relay.env 记 none"             'grep -q "^RELAY_SECURITY=none$" "$XHY_NODES/relay.env"'
 chk "relay.env 不记 sni"            '! grep -q "^RELAY_SNI=" "$XHY_NODES/relay.env"'
 chk "片段仍是合法 JSON"             'json_ok "$XHY_CONFDIR/relay_in_14430.json"'
+
+echo "===== v1.11.2：入站 TFO 与出站共用同一开关 ====="
+chk "TFO=off 时入站为 false"         'RELAY_TFO=off relay_sockopt_json | grep -q "\"tcpFastOpen\":false"'
+chk "TFO=on 时入站为 true"           'RELAY_TFO=on relay_sockopt_json | grep -q "\"tcpFastOpen\":true"'
+chk "RELAY_TFO 未设置时默认开"       'relay_sockopt_json | grep -q "\"tcpFastOpen\":true"'
+chk "land 重跑后入站仍带 TFO"        'grep -q "\"tcpFastOpen\":true" "$XHY_CONFDIR/relay_in_14430.json"'
+chk "relay_test 报入站 TFO"          'relay_test 2>/dev/null | grep -q "入站 TFO 已开"'
 
 echo "===== 证书 pin 归一（函数保留，供将来跨公网复用） ====="
 PIN_HEX="$("$PY" -c 'print(bytes(range(32)).hex())')"

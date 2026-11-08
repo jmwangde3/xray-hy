@@ -264,15 +264,26 @@ relay_stream_server_json() {
 }
 
 # land 入站片段（一个标准 inbound 对象，被 rebuild_config 拼进 inbounds）
+#
+# v1.11.2：入站必须和出站一样带 sockopt。内核 net.ipv4.tcp_fastopen=3 只是允许位
+# （bit0=client / bit1=server），服务端真正的开关是 listen socket 上的
+# setsockopt(TCP_FASTOPEN, qlen)。之前只有 entry 出站写了 tcpFastOpen:true，
+# land 入站没写 → 东京发 TFO SYN（带 early data / cookie req），硅谷 listener
+# 按普通三次握手处理，early data 被丢弃，实测 TcpExtTCPFastOpenPassive=0 /
+# TCPFastOpenActive=0 —— 这一跳的 TFO 全程没生效，省不到那一个 107 ms RTT。
+# 两端都是自有机器，不存在「伪装站不支持被动 TFO」的兼容问题，故默认恒开，
+# 与 relay_sockopt_json 共用同一套开关（--no-tfo / RELAY_TFO=off 可关）。
 relay_fragment() {
-    local port="$1" uuid="$2" stream
+    local port="$1" uuid="$2" stream so
     stream="$(relay_stream_server_json)"
+    so="$(relay_sockopt_json)"
     cat <<EOF
 {
   "listen": "$(listen_addr)", "port": ${port}, "protocol": "vless",
   "tag": "in-relay-${port}",
   "settings": { "clients": [ { "id": "${uuid}" } ], "decryption": "none" },
-  "streamSettings": ${stream}
+  "streamSettings": ${stream},
+  "sockopt":${so}
 }
 EOF
 }
@@ -849,6 +860,13 @@ relay_test() {
             || relay_say warn "防火墙规则缺失" "firewall rule missing"
         relay_config_has "in-relay-${RELAY_PORT}" && relay_say ok "config 含 in-relay-${RELAY_PORT}" "config has in-relay-${RELAY_PORT}" \
             || relay_say warn "config 未含入站片段" "inbound fragment missing from config"
+        if grep -q '"sockopt":{"tcpFastOpen":true' "$XHY_CONFDIR/relay_in_${RELAY_PORT}.json" 2>/dev/null; then
+            relay_say ok "入站 TFO 已开（listen socket 启用 TCP_FASTOPEN）" \
+                        "inbound TFO enabled (TCP_FASTOPEN on listen socket)"
+        else
+            relay_say warn "入站缺 TFO sockopt（这一跳省不到握手 RTT，重跑 xhy relay land）" \
+                          "inbound lacks TFO sockopt (no handshake RTT saved; rerun xhy relay land)"
+        fi
         printf '%s\n' "  云安全组: 入方向 TCP ${RELAY_PORT} 源 ${RELAY_ALLOW}/32"
         return 0
     fi
