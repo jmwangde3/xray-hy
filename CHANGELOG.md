@@ -2,6 +2,11 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.13.1 — 2026-11-09
+
+- fix(core): geodata 下载 URL 补 release tag 的 v 前缀 —— `xray version` 输出 26.10.31，而 Xray 的 release tag 是 v26.10.31，`xhy update geodata --force` 因此 404（真实踩到：sanjose / singapore 升级后第一条 geodata 命令就报 22）；latest 分支改走 releases/latest/download/<asset>，不再拼 tag 段
+- test(geodata): 25 项，新增「release tag 补 v 前缀」「latest 走 /releases/latest/download」两条断言
+
 ## v1.13.0 — 2026-11-09
 
 - feat(core): geodata 默认源改回 **Xray 官方 release 内置的 dat**（v1.12.x 曾无条件覆盖成 Loyalsoldier 版）。实测两份标签集几乎相同（官方 1564 个 tag / Loyalsoldier 1562 个，openai、category-ai-!cn 214/218、google-gemini、github-copilot 两边都有），3.9 MB 的体积差几乎全在 category-ads-all（905 vs 199 451 条）；日常用的是 category-ads / geolocation-!cn / 各 AI 分类，为一张用不到的广告表多占 4 MB 没意义。安装/升级核心时 zip 里的官方 dat 直接铺好，不额外下载

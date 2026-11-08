@@ -55,7 +55,9 @@ chk "未知参数被拒"                   '! ( update_geodata --bogus ) >/dev/n
 echo "=== 版本跟随核心（不是 latest 盲跟） ==="
 chk "取已装核心版本"                 'grep -q "xray_installed_version 2>/dev/null | sed" lib/update.sh'
 chk "核心未装才退回 latest"          'grep -q "ver=\"latest\"" lib/update.sh'
-chk "辅助函数内部也留 latest 兜底"   'grep -q "\[\[ -n \"\$ver\" \]\] || ver=\"latest\"" lib/core.sh'
+chk "辅助函数内部也留 latest 兜底"   'grep -q "ver=\"latest\"" lib/core.sh'
+chk "release tag 补 v 前缀"           'grep -q "XHY_RELEASE_DL}/v\$ver/\$asset" lib/core.sh'
+chk "latest 走 /releases/latest/download" 'grep -q "latest/download/\$asset" lib/core.sh'
 
 echo "=== core status 只对异常体积告警 ==="
 chk "Loyalsoldier 版才提示换回"      'grep -q "疑似 Loyalsoldier 版" lib/core.sh'

@@ -65,18 +65,27 @@ xray_installed_version() {
 # 版本取「本机已装核心的版本」而不是 latest：dat 与核心同源，升核心不会悄悄换数据；
 # 核心没装时退回 latest。校验和沿用 xray_install 的严格口径（.dgst 必需）。
 geodata_install_official() {
-    local ver asset tmp unpack f sz
-    ver="${1#v}"
-    [[ -n "$ver" ]] || ver="latest"
+    local ver asset url tmp unpack f sz
+    ver="${1:-}"
+    [[ -n "$ver" && "$ver" != "未安装" && "$ver" != "latest" ]] || ver="latest"
     asset="Xray-linux-${XHY_ARCH}.zip"
+    # release tag 带 v 前缀（v26.10.31），而 `xray version` 输出不带（26.10.31）。
+    # latest 走 releases/latest/download/<asset>，不带 tag 段。
+    if [[ "$ver" == "latest" ]]; then
+        url="${XHY_RELEASE_DL%/download}/latest/download/$asset"
+    elif [[ "$ver" == v* ]]; then
+        url="${XHY_RELEASE_DL}/$ver/$asset"
+    else
+        url="${XHY_RELEASE_DL}/v$ver/$asset"
+    fi
     tmp="$(mktemp -d)" || die "无法创建临时目录"
     # shellcheck disable=SC2064
     trap "rm -rf '$tmp'" RETURN
 
     info "下载官方 geodata（取自 Xray $ver 的 $asset）"
-    fetch "${XHY_RELEASE_DL}/${ver}/${asset}" "$tmp/$asset" \
+    fetch "$url" "$tmp/$asset" \
         || die "geodata 下载失败（Xray $ver 的 $asset 是否存在？）"
-    fetch "${XHY_RELEASE_DL}/${ver}/${asset}.dgst" "$tmp/$asset.dgst" \
+    fetch "$url.dgst" "$tmp/$asset.dgst" \
         || die "摘要文件下载失败，拒绝安装未校验的 geodata"
     verify_release_digest "$tmp/$asset.dgst" "$tmp/$asset" || die "geodata 校验失败，已中止"
 

@@ -144,8 +144,8 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.13.0"
-XHY_BUILD="f967570c5991"
+XHY_VERSION="1.13.1"
+XHY_BUILD="721c52df7792"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -163,7 +163,7 @@ fi
 # ===================== lib/common.sh =====================
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.13.0}"
+XHY_VERSION="${XHY_VERSION:-1.13.1}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -1429,18 +1429,27 @@ xray_installed_version() {
 # 版本取「本机已装核心的版本」而不是 latest：dat 与核心同源，升核心不会悄悄换数据；
 # 核心没装时退回 latest。校验和沿用 xray_install 的严格口径（.dgst 必需）。
 geodata_install_official() {
-    local ver asset tmp unpack f sz
-    ver="${1#v}"
-    [[ -n "$ver" ]] || ver="latest"
+    local ver asset url tmp unpack f sz
+    ver="${1:-}"
+    [[ -n "$ver" && "$ver" != "未安装" && "$ver" != "latest" ]] || ver="latest"
     asset="Xray-linux-${XHY_ARCH}.zip"
+    # release tag 带 v 前缀（v26.10.31），而 `xray version` 输出不带（26.10.31）。
+    # latest 走 releases/latest/download/<asset>，不带 tag 段。
+    if [[ "$ver" == "latest" ]]; then
+        url="${XHY_RELEASE_DL%/download}/latest/download/$asset"
+    elif [[ "$ver" == v* ]]; then
+        url="${XHY_RELEASE_DL}/$ver/$asset"
+    else
+        url="${XHY_RELEASE_DL}/v$ver/$asset"
+    fi
     tmp="$(mktemp -d)" || die "无法创建临时目录"
     # shellcheck disable=SC2064
     trap "rm -rf '$tmp'" RETURN
 
     info "下载官方 geodata（取自 Xray $ver 的 $asset）"
-    fetch "${XHY_RELEASE_DL}/${ver}/${asset}" "$tmp/$asset" \
+    fetch "$url" "$tmp/$asset" \
         || die "geodata 下载失败（Xray $ver 的 $asset 是否存在？）"
-    fetch "${XHY_RELEASE_DL}/${ver}/${asset}.dgst" "$tmp/$asset.dgst" \
+    fetch "$url.dgst" "$tmp/$asset.dgst" \
         || die "摘要文件下载失败，拒绝安装未校验的 geodata"
     verify_release_digest "$tmp/$asset.dgst" "$tmp/$asset" || die "geodata 校验失败，已中止"
 
