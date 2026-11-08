@@ -18,7 +18,7 @@
 - fix(relay): regexp 规则里的反斜杠在写进 JSON 前转义为 \\，否则 regexp:^a\.b$ 会产出非法 JSON 让 xray 起不来
 - test(relay): 115 -> 131 项，新增裸域名补前缀 / 前缀原样保留 / 与 geosite 合并同规则 / 沿用旧值 / --no-domains 清空 / 引号与空格与空值被拒
 - feat(core): 统一 geodata 来源 —— xray 安装 / 升级后**一律**用 Loyalsoldier 版覆盖 release zip 自带的那份。实测两份**标签集几乎相同**（官方 1564 个 tag / Loyalsoldier 1562 个，`openai`、`category-ai-!cn` 等两边都有），7.5 MB vs 11.4 MB 的差几乎全在 `category-ads-all`（905 vs 199451 条）。统一的理由：`update geodata` 本就用 Loyalsoldier 而 install 用 zip 自带的，同机两份 geo 会对不上；且 19.9 万条广告表让 `geosite:category-ads-all → block` 真正有效。磁盘余量 <60 MB 或 `XHY_SKIP_GEODATA=1` 时跳过
-- feat(core): `xhy status` 对 <9 MB 的 geosite.dat 标注「release 自带版（category-ads-all 仅 905 条）」，不再需要人工比对体积
+- feat(core): `xhy core status` 对 <9 MB 的 geosite.dat 标注「release 自带版（category-ads-all 仅 905 条）」，不再需要人工比对体积
 
 ## v1.11.5 — 2026-11-08
 
