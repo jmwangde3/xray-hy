@@ -200,6 +200,15 @@ chk "keyword: 原样保留"               'grep -q "\"keyword:abc\"" "$XHY_ETC/c
 chk "regexp: 原样保留"                'grep -q "regexp:" "$XHY_ETC/config.json"'
 chk "混合前缀合法 JSON"               'json_ok "$XHY_ETC/config.json"'
 
+echo "===== ! 分类名（v1.12.1：category-ai-!cn） ====="
+relay_entry --to 203.0.113.10:14430 --uuid test-uuid-0000 \
+    --categories "category-ai-!cn,openai" --no-geoip-us >/dev/null 2>&1
+chk "category-ai-!cn 被接受"          'grep -q "geosite:category-ai-!cn" "$XHY_ETC/config.json"'
+chk "! 分类下仍是合法 JSON"           'json_ok "$XHY_ETC/config.json"'
+chk "! 通过 --domains 的 geosite: 前缀也可用" \
+    '( relay_entry --to 203.0.113.10:14430 --uuid u --categories none --domains "geosite:category-ai-!cn" >/dev/null 2>&1 )'
+chk "非法分类（含空格）仍被拒"        '! ( relay_entry --categories "a b" --uuid u ) >/dev/null 2>&1'
+
 chk "非法域名字符被拒"                '! ( relay_entry --to 203.0.113.10:14430 --uuid u --domains "a\"b.com" ) >/dev/null 2>&1'
 chk "空格被拒"                        '! ( relay_entry --to 203.0.113.10:14430 --uuid u --domains "a b.com" ) >/dev/null 2>&1'
 chk "空值规则被拒"                    '! ( relay_entry --to 203.0.113.10:14430 --uuid u --domains "full:" ) >/dev/null 2>&1'

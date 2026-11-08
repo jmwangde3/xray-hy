@@ -144,8 +144,8 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.12.0"
-XHY_BUILD="2666999062ee"
+XHY_VERSION="1.12.1"
+XHY_BUILD="05830cb923cd"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -163,7 +163,7 @@ fi
 # ===================== lib/common.sh =====================
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.12.0}"
+XHY_VERSION="${XHY_VERSION:-1.12.1}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -5771,9 +5771,11 @@ relay_norm_categories() {
         none)       in="" ;;
     esac
     for c in ${in//,/ }; do
-        if [[ ! "$c" =~ ^[A-Za-z0-9_-]+$ ]]; then
-            relay_say err "分类名不合法：$c（只允许字母数字下划线连字符）" \
-                         "invalid category: $c (letters, digits, _ and - only)"
+        # v1.12.1：放开 ! —— v2fly / Loyalsoldier 的 AI 分类就叫 category-ai-!cn，
+        # 卡掉 ! 等于把最有用的那条分类挡在门外。
+        if [[ ! "$c" =~ ^[A-Za-z0-9_!-]+$ ]]; then
+            relay_say err "分类名不合法：$c（只允许字母数字下划线连字符与 !）" \
+                         "invalid category: $c (letters, digits, _, - and !)"
             return 1
         fi
         [[ "$seen" == *" $c "* ]] && continue
@@ -5826,7 +5828,7 @@ relay_norm_domains() {
         else
             # domain/full/keyword/geosite：字母数字点横线星号，够用且写不坏 JSON
             case "$val" in
-                *[!A-Za-z0-9._*-]*)
+                *[!A-Za-z0-9._*!-]*)
                     relay_say err "域名字符非法：$d（只允许字母数字 . _ - *）" \
                                  "illegal chars in domain rule: $d (letters, digits, . _ - * only)"
                     return 1 ;;

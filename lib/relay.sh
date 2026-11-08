@@ -222,9 +222,11 @@ relay_norm_categories() {
         none)       in="" ;;
     esac
     for c in ${in//,/ }; do
-        if [[ ! "$c" =~ ^[A-Za-z0-9_-]+$ ]]; then
-            relay_say err "分类名不合法：$c（只允许字母数字下划线连字符）" \
-                         "invalid category: $c (letters, digits, _ and - only)"
+        # v1.12.1：放开 ! —— v2fly / Loyalsoldier 的 AI 分类就叫 category-ai-!cn，
+        # 卡掉 ! 等于把最有用的那条分类挡在门外。
+        if [[ ! "$c" =~ ^[A-Za-z0-9_!-]+$ ]]; then
+            relay_say err "分类名不合法：$c（只允许字母数字下划线连字符与 !）" \
+                         "invalid category: $c (letters, digits, _, - and !)"
             return 1
         fi
         [[ "$seen" == *" $c "* ]] && continue
@@ -277,7 +279,7 @@ relay_norm_domains() {
         else
             # domain/full/keyword/geosite：字母数字点横线星号，够用且写不坏 JSON
             case "$val" in
-                *[!A-Za-z0-9._*-]*)
+                *[!A-Za-z0-9._*!-]*)
                     relay_say err "域名字符非法：$d（只允许字母数字 . _ - *）" \
                                  "illegal chars in domain rule: $d (letters, digits, . _ - * only)"
                     return 1 ;;

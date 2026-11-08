@@ -2,6 +2,11 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.12.1 — 2026-11-08
+
+- feat(relay): --categories 放开 ! 字符 —— v2fly / Loyalsoldier 的 AI 分类真名就叫 category-ai-!cn（218 条域名，含 perplexity / x.ai / cursor / elevenlabs / huggingface / poe / midjourney），此前字符集把它挡在门外，只能用 --domains 一条条补；--domains 的 geosite: 前缀同样放开
+- test(relay): 131 -> 135 项，新增 category-ai-!cn 被接受 / geosite: 前缀可带 ! / 含空格分类仍被拒
+
 ## v1.12.0 — 2026-11-08
 
 - feat(relay): 新增 --domains 明文域名规则 —— geosite 分类覆盖不到的站（精简版 geosite.dat 缺 character.ai / replicate.com / suno.com 等，连 category-ai-!cn 名字都没有）现在可以直接写 domain/full/keyword/regexp/geosite 规则，与 geosite 分类同处一条 domain 数组；relay.env 持久化 RELAY_DOMAINS，不传 --domains 时沿用旧值，--no-domains 清空
