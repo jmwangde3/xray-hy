@@ -2,6 +2,14 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.14.1 — 2026-11-09
+
+- fix(core/update): geodata 切源不再被「1h 内跳过」静默吞掉 —— 新增 /usr/local/share/xray/.geodata-source 源标记，只在两个 dat 全部下载成功后写入；update_geodata 的跳过条件同时比对 age 与源标记，切 --source / 改 XHY_GEODATA_SOURCE 一小时内立即可生效，ok 文案也不再拿本次请求值冒充实际来源。xray_install 铺完 dat 后同步写标记，update all 不会重复下 30 MB
+- fix(core): Loyalsoldier geodata 补强制完整性校验 —— 下 release 附带的 .sha256sum 并逐个验 SHA-256（格式非法/不匹配即保留旧文件并计失败）；geodata_install_loyalsoldier / geodata_install_official 现在两个 dat 全成功才返回 0，部分失败不再被当成完成。core_status 把 <6 MB 标为「体积异常（疑似损坏/截断）」，不再把截断的 Loyalsoldier dat 误标成官方版
+- fix(relay): status/test 增加 config.json 与 relay.env 的一致性校验 —— 新增 relay_fallback_cfg_tag()，发现 config 的 fallbackTag 与期望值不符就告警并提示 xhy relay reapply。修掉 relay_test 里那条会破坏配置的错误提示命令（旧文案 'xhy relay entry --fallback-tag block' 缺必填 --to、且会重置 UUID 与分类），改为 xhy relay reapply
+- test: 修掉两处假通过 —— '显式 direct 有告警' 原来抓 relay_status 里的 direct 字样恒真（且 warn 走 stderr 被 2>/dev/null 吞掉），改为抓 relay_entry 的真实告警输出；'reapply 后不再报不一致' 同样修正输出流。新增切源不被跳过 / 切源后 stamp 更新 / 下载失败不写 stamp / config 与 env 不一致告警 等回归。geodata-test 31→41 项、relay-test 145→148 项，全套 18 文件 796 项断言全绿
+- docs(README): 全面更新与 v1.14.x 不符的陈旧内容 —— 删掉早已废弃的 git clone 安装方式与差别表、纠正 xhy 为普通文件非软链、SSH 双窗口阈值 60s/10+1h/25 → 60s/30+1h/120 且补 --rcheck 前置说明、补 --source/--force/--png/relay reapply、lib 清单补齐 6 个模块、目录树补 relay.env 与 .geodata-source、测试状态 158 项 → 18 文件约 800 项
+
 ## v1.14.0 — 2026-11-09
 
 - feat(core): geodata 默认源改回 **Loyalsoldier 完整版**（v1.13.x 曾改成官方版）。拆 protobuf 逐域名实测：Xray 官方 release 自带的 dat 是 Loyalsoldier 版的**真子集**，差异全部是「仅 Loyalsoldier 有」—— google 少 114 条（notebooklm / antigravity / geminiweb-pa / cloudcode-pa / scholar.google.* 等）、gfw 整个分类缺失 4433 条、geolocation-!cn 少 3819 条、category-ai-!cn 少 2（grokbot.com / Copilot azure host）、anthropic 少 1、xai 少 1、github-copilot 少 1、disney 少 2；官方「多出来」的只有 geolocation-!cn 里 13 条乱码/正则写法差异，实质 0 条。3.9 MB 的体积差全在 category-ads-all（905 vs 199451），但换来 AI/Google/gfw 覆盖不全，不值。XHY_GEODATA_SOURCE=official 或 --source official 仍可取官方版

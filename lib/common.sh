@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.14.0}"
+XHY_VERSION="${XHY_VERSION:-1.14.1}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -221,8 +221,9 @@ disk_need() {
     return 1
 }
 
-# 可重新下载 / 可再生的文件不进备份目录：xray 36 MB + geoip 19 MB + geosite 10 MB
-# ≈ 65 MB，在 427 MB 根分区上备份几次就是灾难，而它们一条命令就能重新拉回来。
+# 可重新下载 / 可再生的文件不进备份目录：xray 核心 + geoip 16.5 MB +
+# geosite 11.4 MB ≈ 60 MB（Loyalsoldier 默认源实测，v1.14.x），在 427 MB
+# 根分区上备份几次就是灾难，而它们一条命令就能重新拉回来。
 backup_is_redownloadable() {
     case "$(basename "$1")" in
         xray|xray.new|geoip.dat|geosite.dat|geoip.dat.new|geosite.dat.new) return 0 ;;

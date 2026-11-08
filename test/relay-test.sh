@@ -156,12 +156,20 @@ chk "relay.env 持久化 fallbackTag"    'grep -q "RELAY_FALLBACK_TAG=block" "$X
 
 echo "===== v1.14.0：--fallback-tag direct 才恢复旧行为 ====="
 relay_entry --to 203.0.113.10:14430 --uuid fb-uuid-0000 --categories openai \
-    --fallback-tag direct >/dev/null 2>&1
+    --fallback-tag direct >"$TEST_TMP/entry-direct.log" 2>&1
 chk "显式 direct 被接受"              'grep -q "\"fallbackTag\":\"direct\"" "$XHY_ETC/config.json"'
-chk "显式 direct 有告警"              'relay_status 2>/dev/null | grep -q "block\|direct"'
+chk "显式 direct 有告警"              'grep -q "失联回落 → direct" "$TEST_TMP/entry-direct.log"'
 chk "非法 --fallback-tag 被拒"        '! ( relay_entry --to 203.0.113.10:14430 --uuid u --categories openai --fallback-tag bogus ) >/dev/null 2>&1'
+
+echo "===== v1.14.1：config 与 relay.env 不一致时 status/test 必须告警 ====="
+# env=direct、config=direct，把 config 改成 block 制造「升级后没 reapply」的窗口
+sed -i 's/"fallbackTag":"direct"/"fallbackTag":"block"/' "$XHY_ETC/config.json"
+chk "status 报不一致"                 'relay_status 2>&1 | grep -q "不一致"'
+chk "test 报不一致"                   'relay_test 2>&1 | grep -q "不一致"'
+
 relay_entry --to 203.0.113.10:14430 --uuid test-uuid-0000 --categories openai >/dev/null 2>&1
 chk "不传参数回到 block"              'grep -q "\"fallbackTag\":\"block\"" "$XHY_ETC/config.json"'
+chk "reapply 后不再报不一致"          '! ( relay_status 2>&1 | grep -q "不一致" )'
 
 echo "===== --no-fallback / --no-tfo：回到 v1.10.x 行为 ====="
 relay_entry --to 203.0.113.10:14430 --uuid test-uuid-0000 --categories openai \

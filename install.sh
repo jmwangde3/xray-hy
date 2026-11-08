@@ -144,8 +144,8 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.14.0"
-XHY_BUILD="d187e8320f3b"
+XHY_VERSION="1.14.1"
+XHY_BUILD="a3c7ffae4946"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -163,7 +163,7 @@ fi
 # ===================== lib/common.sh =====================
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.14.0}"
+XHY_VERSION="${XHY_VERSION:-1.14.1}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -383,8 +383,9 @@ disk_need() {
     return 1
 }
 
-# 可重新下载 / 可再生的文件不进备份目录：xray 36 MB + geoip 19 MB + geosite 10 MB
-# ≈ 65 MB，在 427 MB 根分区上备份几次就是灾难，而它们一条命令就能重新拉回来。
+# 可重新下载 / 可再生的文件不进备份目录：xray 核心 + geoip 16.5 MB +
+# geosite 11.4 MB ≈ 60 MB（Loyalsoldier 默认源实测，v1.14.x），在 427 MB
+# 根分区上备份几次就是灾难，而它们一条命令就能重新拉回来。
 backup_is_redownloadable() {
     case "$(basename "$1")" in
         xray|xray.new|geoip.dat|geosite.dat|geoip.dat.new|geosite.dat.new) return 0 ;;
@@ -1436,39 +1437,49 @@ xray_installed_version() {
 #     anthropic 少 1、xai 少 1、github-copilot 少 1、disney 少 2；
 #   官方「多出来」的只有 geolocation-!cn 里 13 条乱码/正则写法差异，实质 0 条。
 # 官方版体积差 3.9 MB 全在 category-ads-all（905 vs 199451 条），但换来的代价
-# 是 AI / Google / gfw 覆盖不全。默认 donc 回到 Loyalsoldier 完整版。
+# 是 AI / Google / gfw 覆盖不全。默认回到 Loyalsoldier 完整版。
 geodata_source() {
     local v="${XHY_GEODATA_SOURCE:-loyalsoldier}"
     [[ "$v" == "loyalsoldier" || "$v" == "official" ]] || v="loyalsoldier"
     printf '%s' "$v"
 }
 
-# Loyalsoldier 直接单独发两个 dat，不需要下 16.7 MB 整包。
+# Loyalsoldier 直接单独发两个 dat（并附 .sha256sum），不需要下 16.7 MB 整包。
+# 两个 dat 都过 SHA-256 才落盘、全部成功才返回 0 —— 调用方据此写 .geodata-source。
 geodata_install_loyalsoldier() {
-    local f sz
+    local f sz sum expected actual failed=0 base
+    base="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download"
     for f in geoip.dat geosite.dat; do
         info "更新 $f（Loyalsoldier 完整版）"
-        if fetch "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/$f" \
-            "$XRAY_ASSET/$f.new"; then
+        if fetch "$base/$f" "$XRAY_ASSET/$f.new" \
+            && fetch "$base/$f.sha256sum" "$XRAY_ASSET/$f.sum"; then
             sz="$(stat -c%s "$XRAY_ASSET/$f.new" 2>/dev/null || echo 0)"
+            expected="$(awk 'NR==1 {print $1}' "$XRAY_ASSET/$f.sum" 2>/dev/null | tr 'A-F' 'a-f' || true)"
+            actual="$(sha256_file "$XRAY_ASSET/$f.new" 2>/dev/null | tr 'A-F' 'a-f' || true)"
             if (( sz < 102400 )); then
-                warn "$f 下载内容异常（${sz} bytes），保留现有文件"
-                rm -f "$XRAY_ASSET/$f.new"
-                continue
+                warn "$f 下载内容异常（${sz} bytes），保留现有文件"; failed=1
+            elif [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]]; then
+                warn "$f 摘要格式异常，拒绝安装未校验内容"; failed=1
+            elif [[ "$expected" != "$actual" ]]; then
+                warn "$f SHA-256 校验失败（期望 ${expected:0:16}… / 实际 ${actual:0:16}…），保留现有文件"; failed=1
+            else
+                mv -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f"
+                chmod 0644 "$XRAY_ASSET/$f"
+                ok "$f 已更新（$(( sz / 1024 )) KB，Loyalsoldier 版，SHA-256 通过）"
             fi
-            mv -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f"
-            chmod 0644 "$XRAY_ASSET/$f"
-            ok "$f 已更新（$(( sz / 1024 )) KB，Loyalsoldier 版）"
         else
-            rm -f "$XRAY_ASSET/$f.new"
-            warn "$f 下载失败，保留现有文件"
+            warn "$f 下载失败，保留现有文件"; failed=1
         fi
-        [[ -s "$XRAY_ASSET/$f" ]] || warn "$XRAY_ASSET/$f 仍缺失，geoip:private 等规则将不生效"
+        rm -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f.sum"
+        [[ -s "$XRAY_ASSET/$f" ]] || {
+            warn "$XRAY_ASSET/$f 仍缺失，geoip:private 等规则将不生效"; failed=1; }
     done
+    # 两个 dat 必须都成功：调用方据此决定是否写 .geodata-source 标记。
+    return "$failed"
 }
 
 geodata_install_official() {
-    local ver asset url tmp unpack f sz
+    local ver asset url tmp unpack f sz failed=0
     ver="${1:-}"
     [[ -n "$ver" && "$ver" != "未安装" && "$ver" != "latest" ]] || ver="latest"
     asset="Xray-linux-${XHY_ARCH}.zip"
@@ -1502,21 +1513,21 @@ geodata_install_official() {
     install -d -m 0755 "$XRAY_ASSET"
     for f in geoip.dat geosite.dat; do
         if [[ ! -s "$tmp/unpack/$f" ]]; then
-            warn "$asset 里没有 $f，保留现有文件"
-            continue
+            warn "$asset 里没有 $f，保留现有文件"; failed=1; continue
         fi
         sz="$(stat -c%s "$tmp/unpack/$f" 2>/dev/null || echo 0)"
         if (( sz < 102400 )); then
-            warn "$f 大小异常（${sz} bytes），保留现有文件"
-            continue
+            warn "$f 大小异常（${sz} bytes），保留现有文件"; failed=1; continue
         fi
         install -m 0644 "$tmp/unpack/$f" "$XRAY_ASSET/$f.new" 2>/dev/null \
-            || { rm -f "$XRAY_ASSET/$f.new"; warn "$f 写入失败（磁盘满？），保留旧文件"; continue; }
-        mv -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f" || { warn "$f 替换失败"; continue; }
+            || { rm -f "$XRAY_ASSET/$f.new"; warn "$f 写入失败（磁盘满？），保留旧文件"; failed=1; continue; }
+        mv -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f" || { warn "$f 替换失败"; failed=1; continue; }
         ok "$f 已更新（$(( sz / 1024 )) KB，官方版）"
     done
     rm -rf "$tmp"
     trap - RETURN
+    # 与 Loyalsoldier 分支一致：两个 dat 全成功才写 .geodata-source 标记。
+    return "$failed"
 }
 
 # Download a pinned-or-latest Xray release. The .dgst checksum is MANDATORY:
@@ -1602,15 +1613,22 @@ xray_install() {
                 || { rm -f "$XRAY_ASSET/$f.new"; warn "$f 写入失败（磁盘满？），保留旧文件"; continue; }
             mv -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f"
         done
-        if [[ "$(geodata_source)" == "loyalsoldier" ]]; then
+        local src; src="$(geodata_source)"
+        if [[ "$src" == "loyalsoldier" ]]; then
             # 覆盖失败不致命：zip 自带的官方 dat 已就位，xray 仍能起来。
+            # 成功才写源标记，避免 update all 里 update_geodata 误判「刚更新过」。
             if (( $(disk_free_mb /) >= 45 )); then
-                geodata_install_loyalsoldier
+                if geodata_install_loyalsoldier; then
+                    printf '%s\n' "$src" > "$XRAY_ASSET/.geodata-source"
+                else
+                    warn "Loyalsoldier 覆盖未完成，源标记未写入（下次 update geodata 会重试）"
+                fi
             else
                 warn "磁盘余量 $(disk_free_mb /) MB < 45 MB，跳过 Loyalsoldier 覆盖（保留官方版保底）"
             fi
         else
             info "XHY_GEODATA_SOURCE=official，保留 release 自带的官方版"
+            printf '%s\n' "$src" > "$XRAY_ASSET/.geodata-source"
         fi
         for f in geoip.dat geosite.dat; do
             [[ -s "$XRAY_ASSET/$f" ]] || warn "$XRAY_ASSET/$f 缺失，geoip:private 等规则将不生效"
@@ -1684,10 +1702,10 @@ core_status() {
             # 自带版（真子集，AI / Google / gfw 覆盖不全）；<1 MB = 文件坏了。
             if (( gssz > 9000000 )); then
                 printf '  ← Loyalsoldier 完整版（默认）'
-            elif (( gssz >= 1048576 )); then
+            elif (( gssz >= 6000000 )); then
                 printf '  ← 官方版（子集：缺 gfw / google 114 条等，xhy update geodata --force 换回）'
             else
-                printf '  ⚠ 异常小，跑 xhy update geodata --force 重下'
+                printf '  ⚠ 体积异常（< 6 MB，疑似损坏/截断），跑 xhy update geodata --force 重下'
             fi
         fi
         printf '\n'
@@ -5423,7 +5441,7 @@ update_core() {
 #   · 官方源仍走整包解出两个 dat（官方不单独发 dat 资产），强制校验 .dgst。
 update_geodata() {
     need_root
-    local force=0 ver src override=""
+    local force=0 ver src override="" stamp
     while (( $# > 0 )); do
         case "$1" in
             --force|-f) force=1; shift ;;
@@ -5432,6 +5450,7 @@ update_geodata() {
         esac
     done
     install -d -m 0755 "$XRAY_ASSET"
+    stamp="$XRAY_ASSET/.geodata-source"
     if [[ -n "$override" ]]; then
         [[ "$override" == "loyalsoldier" || "$override" == "official" ]] \
             || die "--source 只接受 loyalsoldier / official"
@@ -5442,10 +5461,15 @@ update_geodata() {
     ver="$(xray_installed_version 2>/dev/null | sed 's/^v//' || true)"
     [[ -n "$ver" && "$ver" != "未安装" ]] || ver="latest"
 
+    # v1.14.1：跳过必须同时满足「刚更新过」+「当前 dat 就是请求的源」。
+    # 旧版只看 mtime/age，切 --source / 改 XHY_GEODATA_SOURCE 后 1 小时内会被
+    # 静默吞掉，且提示里的 ${src} 是本次请求值而非实际来源 —— 等于撒谎。
+    # 源标记由 xray_install 与这里的下载成功后写入，失败不写 → 下次自动重试。
     if (( ! force )) && [[ -s "$XRAY_ASSET/geosite.dat" && -s "$XRAY_ASSET/geoip.dat" ]] \
         && [[ "$XRAY_ASSET/geosite.dat" -nt "$XRAY_BIN" ]]; then
         local age=$(( $(date +%s) - $(stat -c%Y "$XRAY_ASSET/geosite.dat" 2>/dev/null || echo 0) ))
-        if (( age < 3600 && age >= 0 )); then
+        if (( age < 3600 && age >= 0 )) && [[ -r "$stamp" ]] \
+            && [[ "$(cat "$stamp" 2>/dev/null || true)" == "$src" ]]; then
             ok "geodata 已是 ${src} 版且 ${age}s 前刚更新（geosite $(( $(stat -c%s "$XRAY_ASSET/geosite.dat") / 1024 )) KB），跳过；--force 可强制重下"
             return 0
         fi
@@ -5454,11 +5478,19 @@ update_geodata() {
     # Loyalsoldier 两个 dat 约 30 MB，官方整包 16.7 MB + 解出 11 MB，都要余量写 .new。
     disk_need 45 "更新 geodata（约 30 MB）" || die "已中止：现有 geo 数据继续生效"
     if [[ "$src" == "loyalsoldier" ]]; then
-        geodata_install_loyalsoldier
-        ok "Geodata 更新完成（Loyalsoldier 完整版）"
+        if geodata_install_loyalsoldier; then
+            printf '%s\n' "$src" > "$stamp"
+            ok "Geodata 更新完成（Loyalsoldier 完整版）"
+        else
+            warn "Loyalsoldier geodata 未完整更新，源标记未写入；下次 update geodata 会重试"
+        fi
     else
-        geodata_install_official "$ver"
-        ok "Geodata 更新完成（官方版，Xray $ver）"
+        if geodata_install_official "$ver"; then
+            printf '%s\n' "$src" > "$stamp"
+            ok "Geodata 更新完成（官方版，Xray $ver）"
+        else
+            warn "官方版 geodata 未完整更新，源标记未写入；下次 update geodata 会重试"
+        fi
     fi
 }
 
@@ -5475,7 +5507,8 @@ update_config() {
 update_all() {
     update_script || true
     update_core
-    # 核心安装已把官方 dat 一起铺好（zip 自带），这里只兜底「核心没变动 / 数据缺失」。
+    # 核心安装已按 geodata_source 铺好 dat 并写 .geodata-source；这里只兜底
+    # 「核心没变动 / 数据缺失 / 源标记缺失」—— 同源且 1 小时内会跳过，不重复下 30 MB。
     update_geodata
     update_config
     self_check
@@ -6120,6 +6153,15 @@ relay_fallback_tag() {
     printf '%s' "$t"
 }
 
+# 从 config.json 读取实际生效的 fallbackTag。status/test 拿它与 relay.env 的
+# 期望值对齐 —— update script 不重建 config，老机器可能 env=block 而 config=direct。
+relay_fallback_cfg_tag() {
+    local f="${XHY_ETC}/config.json"
+    [[ -r "$f" ]] || { printf ''; return 0; }
+    grep -o '"fallbackTag"[[:space:]]*:[[:space:]]*"[^"]*"' "$f" 2>/dev/null \
+        | head -1 | sed -E 's/.*"([^"]*)"$/\1/' || true
+}
+
 relay_lb_tag() { printf '%s-lb' "$(relay_out_tag)"; }
 
 # 路由规则该指向谁：开了回落指向 balancer，关掉直接指出站（v1.10.x 行为）
@@ -6700,7 +6742,7 @@ relay_status() {
                 || relay_say warn "config 未含入站（xhy relay reapply）" "config lacks inbound (xhy relay reapply)"
             ;;
         entry)
-            local n=0 fbs
+            local n=0 fbs cfg_tag=""
             relay_say info "角色: 入口端（转发）" "role: entry (forwarder)"
             printf '  上游   : %s\n' "$RELAY_UPSTREAM"
             printf '  传输   : none（明文 vless）\n' 
@@ -6714,6 +6756,11 @@ relay_status() {
                 fbs="off（死指 $(relay_out_tag)，失联即断）"
             fi
             printf '  回落   : %s\n' "$fbs"
+            cfg_tag="$(relay_fallback_cfg_tag)"
+            if relay_fallback_on && [[ -n "$cfg_tag" && "$cfg_tag" != "$(relay_fallback_tag)" ]]; then
+                relay_say warn "config 的 fallbackTag=$cfg_tag 与 relay.env（$(relay_fallback_tag)）不一致，跑 xhy relay reapply" \
+                              "config fallbackTag=$cfg_tag differs from relay.env ($(relay_fallback_tag)); run xhy relay reapply"
+            fi
             printf '  UUID   : %s\n' "$RELAY_UUID"
             n="$(grep -o "\"$(relay_out_tag)\"" "$XHY_ETC/config.json" 2>/dev/null | wc -l | tr -d ' ')"
             if [[ "${n:-0}" -ge 2 ]]; then
@@ -6761,8 +6808,16 @@ relay_test() {
             "fallback chain present: $(relay_lb_tag) -> $(relay_fallback_tag)" \
             || relay_say warn "回落开关是 on 但 config 没有 balancer（xhy relay reapply）" "fallback on but no balancer in config"
         if [[ "$(relay_fallback_tag)" == "direct" ]]; then
-            relay_say warn "fallbackTag=direct：落地失联会切东京 IP 直出（xhy relay entry --fallback-tag block 可改回断联）" \
-                          "fallbackTag=direct: traffic exits from Tokyo on landing failure (use --fallback-tag block)"
+            relay_say warn "fallbackTag=direct：落地失联会切东京 IP 直出（xhy relay reapply 可改回断联）" \
+                          "fallbackTag=direct: traffic exits from Tokyo on landing failure (run: xhy relay reapply)"
+        fi
+        # v1.14.1：status/test 读的是 relay.env 的「期望值」，config.json 可能还是
+        # 升级前渲染的旧值（update script 不重建 config）。这里对齐一次，避免
+        # 「页面报 block、实际 direct」的静默不一致。
+        local cfg_tag; cfg_tag="$(relay_fallback_cfg_tag)"
+        if [[ -n "$cfg_tag" && "$cfg_tag" != "$(relay_fallback_tag)" ]]; then
+            relay_say warn "config 的 fallbackTag=$cfg_tag 与 relay.env（$(relay_fallback_tag)）不一致，跑 xhy relay reapply" \
+                          "config fallbackTag=$cfg_tag differs from relay.env ($(relay_fallback_tag)); run xhy relay reapply"
         fi
         relay_config_has 'burstObservatory' && relay_say ok "探活器 burstObservatory 在位" \
             "prober burstObservatory present" \

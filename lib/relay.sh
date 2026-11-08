@@ -430,6 +430,15 @@ relay_fallback_tag() {
     printf '%s' "$t"
 }
 
+# 从 config.json 读取实际生效的 fallbackTag。status/test 拿它与 relay.env 的
+# 期望值对齐 —— update script 不重建 config，老机器可能 env=block 而 config=direct。
+relay_fallback_cfg_tag() {
+    local f="${XHY_ETC}/config.json"
+    [[ -r "$f" ]] || { printf ''; return 0; }
+    grep -o '"fallbackTag"[[:space:]]*:[[:space:]]*"[^"]*"' "$f" 2>/dev/null \
+        | head -1 | sed -E 's/.*"([^"]*)"$/\1/' || true
+}
+
 relay_lb_tag() { printf '%s-lb' "$(relay_out_tag)"; }
 
 # 路由规则该指向谁：开了回落指向 balancer，关掉直接指出站（v1.10.x 行为）
@@ -1010,7 +1019,7 @@ relay_status() {
                 || relay_say warn "config 未含入站（xhy relay reapply）" "config lacks inbound (xhy relay reapply)"
             ;;
         entry)
-            local n=0 fbs
+            local n=0 fbs cfg_tag=""
             relay_say info "角色: 入口端（转发）" "role: entry (forwarder)"
             printf '  上游   : %s\n' "$RELAY_UPSTREAM"
             printf '  传输   : none（明文 vless）\n' 
@@ -1024,6 +1033,11 @@ relay_status() {
                 fbs="off（死指 $(relay_out_tag)，失联即断）"
             fi
             printf '  回落   : %s\n' "$fbs"
+            cfg_tag="$(relay_fallback_cfg_tag)"
+            if relay_fallback_on && [[ -n "$cfg_tag" && "$cfg_tag" != "$(relay_fallback_tag)" ]]; then
+                relay_say warn "config 的 fallbackTag=$cfg_tag 与 relay.env（$(relay_fallback_tag)）不一致，跑 xhy relay reapply" \
+                              "config fallbackTag=$cfg_tag differs from relay.env ($(relay_fallback_tag)); run xhy relay reapply"
+            fi
             printf '  UUID   : %s\n' "$RELAY_UUID"
             n="$(grep -o "\"$(relay_out_tag)\"" "$XHY_ETC/config.json" 2>/dev/null | wc -l | tr -d ' ')"
             if [[ "${n:-0}" -ge 2 ]]; then
@@ -1071,8 +1085,16 @@ relay_test() {
             "fallback chain present: $(relay_lb_tag) -> $(relay_fallback_tag)" \
             || relay_say warn "回落开关是 on 但 config 没有 balancer（xhy relay reapply）" "fallback on but no balancer in config"
         if [[ "$(relay_fallback_tag)" == "direct" ]]; then
-            relay_say warn "fallbackTag=direct：落地失联会切东京 IP 直出（xhy relay entry --fallback-tag block 可改回断联）" \
-                          "fallbackTag=direct: traffic exits from Tokyo on landing failure (use --fallback-tag block)"
+            relay_say warn "fallbackTag=direct：落地失联会切东京 IP 直出（xhy relay reapply 可改回断联）" \
+                          "fallbackTag=direct: traffic exits from Tokyo on landing failure (run: xhy relay reapply)"
+        fi
+        # v1.14.1：status/test 读的是 relay.env 的「期望值」，config.json 可能还是
+        # 升级前渲染的旧值（update script 不重建 config）。这里对齐一次，避免
+        # 「页面报 block、实际 direct」的静默不一致。
+        local cfg_tag; cfg_tag="$(relay_fallback_cfg_tag)"
+        if [[ -n "$cfg_tag" && "$cfg_tag" != "$(relay_fallback_tag)" ]]; then
+            relay_say warn "config 的 fallbackTag=$cfg_tag 与 relay.env（$(relay_fallback_tag)）不一致，跑 xhy relay reapply" \
+                          "config fallbackTag=$cfg_tag differs from relay.env ($(relay_fallback_tag)); run xhy relay reapply"
         fi
         relay_config_has 'burstObservatory' && relay_say ok "探活器 burstObservatory 在位" \
             "prober burstObservatory present" \

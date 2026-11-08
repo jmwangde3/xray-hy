@@ -4,6 +4,8 @@
 
 > 仓库：`https://github.com/jmwangde3/xray-hy`（公开仓库，克隆不需要账号或 token）
 >
+> 本文对应 **v1.14.x**。安装只有一种方式：单文件 `install.sh` 直装；git clone 仅用于看源码 / 二次开发，**不能当安装方式**。
+>
 > **合规声明**：本项目是通用网络软件的配置自动化工具，仅供学习、研究及在**符合所在地法律法规与服务商条款**的前提下使用。在中国境内，未经主管部门批准自行建立或使用非法定信道进行国际联网属于违规行为；请勿将本脚本用于任何违法用途。使用者需自行承担合规责任。
 
 ---
@@ -23,15 +25,13 @@
 | REALITY | 上游官方警告：认证失败的流量会被转发到 target，CDN 后面的站点会让服务器变成开放转发器。因此内置 TLS 1.3 / H2 / 无跳转 / 非 CDN 校验，并默认加上 `limitFallback*` 限速。 |
 | 并发与磁盘 | 全局 `flock` 串行化所有配置变更，且服务命令显式关闭锁 fd（防 OpenRC 守护进程继承导致死锁）；**快照是整套状态 tar**（config + confs + nodes + state），回滚不会出现配置与节点注册表不一致；自动生成 logrotate 策略（weekly / 保留 4 份 / 32M 触发） |
 | 内存 | 依据物理内存与 cgroup `memory.max` 给 Xray 设 `GOMEMLIMIT`（取 1/4，下限 32MiB），128–256MB 小鸡不易被 OOM Kill |
-| 自更新 | `xhy update script` 下载新构建 → `bash -n` 语法检查 → 比对构建号 → 确认后原子替换；任一步失败本地脚本保持原样，旧版本自动备份在 `/etc/xray-hy/backups/`。克隆方式则走 `git pull --ff-only` |
+| 自更新 | `xhy update script` 下载新构建 → `bash -n` 语法检查 → 比对构建号 → 确认后原子替换；任一步失败本地脚本保持原样，旧版本自动备份在 `/etc/xray-hy/backups/`。脚本本体直装 `/usr/local/bin/xhy`（普通文件、非软链），git 工作树只用于开发 |
 
 ---
 
 ## 2. 快速开始
 
-两种方式任选其一，**都不要同时用**（会在两个位置各装一份 `xhy`）。
-
-### 方式 A：一条命令（推荐，不需要 git）
+只有一种安装方式：**单文件 `install.sh` 直装**。git clone 只用于看源码 / 二次开发，装出来的东西不是可运行的部署。
 
 ```sh
 # 以 root 执行
@@ -48,40 +48,9 @@ wget -qO- https://github.com/jmwangde3/xray-hy/releases/latest/download/install.
 
 脚本开头是 POSIX sh：检测到没有 bash 会自己 `apk add bash`，再带着完整安装流程重新执行，所以这两条命令行为完全一致。缺 curl 也不用装，`| sh` 这条用的是 wget。
 
-### 方式 B：git clone（想改代码、想随时看 diff）
+安装后布局：脚本本体是 **`/usr/local/bin/xhy` 这个普通文件（不是软链）**，`/usr/local/lib/xray-hy/` 只放内嵌 `conf/targets.tsv` 与 `tunnel-run` 辅助脚本，节点数据一律在 `/etc/xray-hy/`。旧版本曾把 `xhy` 做成指向 `/usr/local/lib/xray-hy/xhy` 的软链，升级后自愈逻辑会就地归位；判据是 `readlink -f $(which xhy)` 等于该路径且 `[ -L ... ]` 为假。
 
-```sh
-# 以 root 执行
-
-# 1) 补齐前提：仓库公开，git 不需要任何账号或 token
-#    Alpine（官方镜像默认没有 git 和 bash）：
-apk add --no-cache git bash
-#    Debian / Ubuntu（一般自带，缺了再补）：
-#    apt-get update && apt-get install -y git
-
-# 2) 克隆到固定目录（卸载 / 更新时路径别换）
-git clone https://github.com/jmwangde3/xray-hy.git /opt/xray-hy
-cd /opt/xray-hy
-
-# 3) 安装（仓库是模块化的，xhy 入口会加载 lib/，所以必须在克隆目录里跑）
-bash xhy install
-xhy                     # 打开交互菜单（install 已创建 /usr/local/bin/xhy 软链）
-```
-
-`bash xhy install` 与 `./xhy install` 等价；直接敲 `./xhy` 若报 `Permission denied`，先 `chmod +x xhy`。
-
-### 两种方式差别
-
-| | 方式 A（一条命令） | 方式 B（git clone） |
-|---|---|---|
-| 需要 git | 否 | 是 |
-| 需要先装 bash | 否（脚本自动装） | Alpine 需要 `apk add bash` |
-| 脚本位置 | `/usr/local/lib/xray-hy/xhy`（单文件，自包含） | `/opt/xray-hy/`（模块化工作树，`lib/` 必须保留） |
-| `xhy` 软链指向 | `/usr/local/lib/xray-hy/xhy` | `/opt/xray-hy/xhy` |
-| `xhy update script` | 下载新构建 → 语法检查 → 整文件替换 | `git pull --ff-only`（先看 diff） |
-| 适合 | 一次性部署、全新小鸡 | 二次开发、想审计每一行改动 |
-
-节点数据两种方式都存在 `/etc/xray-hy/`，与脚本位置无关。
+想改代码 / 审计：仍可 `git clone` 到任意目录看 `lib/` 与 `test/`，但**不要**在克隆目录里跑 `xhy install` 当部署用；开发态跑一次 `xhy update script` 就会自动转成单文件直装。
 
 ### 2.1 只想先体检、不安装
 
@@ -96,7 +65,7 @@ xhy check            # 已安装后的全量自检
 
 | 现象 | 含义 | 处理 |
 |---|---|---|
-| `curl: command not found`（Alpine 用了方式 A 第一条） | 没有 curl | 改用 `wget -qO- ... \| sh`，或 `apk add curl` 后重试 |
+| `curl: command not found`（Alpine 用了 curl 那条） | 没有 curl | 改用 `wget -qO- ... \| sh`，或 `apk add curl` 后重试 |
 | 卡在 `[1/7] 依赖` | 软件源/DNS 不通，或 apk 锁被占 | 另开会话跑 `apk update`、`ps w \| grep apk`；换源 `sed -i 's#dl-cdn.alpinelinux.org#mirrors.aliyun.com#g' /etc/apk/repositories` |
 | 卡在 `[2/7] 脚本本体` | GitHub release 地址 404 或线路不通 | `curl -I <install.sh 的 URL>` 看返回码；404 说明 release 还没发 |
 | 卡在 `[4/7] 下载并校验 Xray` | 到 GitHub 的线路不通 | `curl -I https://github.com` 验证；失败时按 `fetch` 打印的 curl 退出码处置 |
@@ -127,7 +96,8 @@ xhy add hy2     --port 8443 --sni www.bing.com --up 100mbps --down 300mbps
 xhy preflight                # 安装/加节点前先跑一遍只读预检
 xhy list
 xhy link --all                            # 导出 vless:// 链接
-xhy link --qr                            # 二维码（需 qrencode）
+xhy link --qr                            # 终端二维码（缺 qrencode 会自动装）
+xhy link --png /root/node.png             # 生成 PNG 文件（0600）
 xhy del reality 8443
 xhy check                                 # 全量环境自检
 ```
@@ -142,20 +112,20 @@ xhy check                                 # 全量环境自检
 |---|---|
 | 多系统 | Debian / Ubuntu / Devuan (systemd)、Alpine (OpenRC)、RHEL 系 (systemd)；x86_64 与 aarch64 |
 | BBR | Debian 写 `/etc/sysctl.d/`；**Alpine 额外**写 `/etc/modules-load.d/xray-hy.conf` 加载 `tcp_bbr`/`sch_fq`、追加 `/etc/sysctl.conf`、`rc-update add sysctl boot`（Alpine 的 sysctl 服务在 boot runlevel 且默认不加载 BBR 模块）。容器环境自动跳过并说明原因。**TFO 跟随 REALITY 伪装站自身的 SYN-ACK 自动对齐，不单独作为性能项宣传** |
-| Xray 版本 | `xhy core channel pinned`（钉死 **`v26.3.27`**，保 sing-box / mihomo 客户端兼容）/ `latest` / `vX.Y.Z` 自定义；切换时提示 #4520 与 MPTCP 两条边界，`xhy core update` 重装并校验配置兼容性 |
+| Xray 版本 | `xhy core channel pinned`（默认钉死 **`v26.3.27`**，保 sing-box / mihomo 客户端兼容）/ `latest` / `vX.Y.Z` 自定义；切换时提示 #4520 与 MPTCP 两条边界，`xhy core update` 重装并校验配置兼容性。客户端全是 Xray 系、且需要修 MPTCP CVE 时可切 `latest`（当前 26.10.31） |
 | 自动启动 | systemd unit 或 OpenRC init 脚本，`start_pre` 里先做配置校验；`Restart=on-failure` / OpenRC 自动重启策略 |
 | BT 阻断 | `sniffing` + `routing` 的 `protocol: ["bittorrent"]` → blackhole，开关 `BLOCK_BT` |
-| 防 SSH 爆破 | iptables `recent` **双窗口**：60 秒 10 次 + **1 小时 25 次**（阈值按正常运维用量校准——诊断工具/VS Code/scp 一轮就是 5-10 个连接；暴力破解是每小时成百上千次）；IPv4 / IPv6 双栈同时生效；缺 `xt_recent` 时降级并告警 |
+| 防 SSH 爆破 | iptables `recent` **双窗口**：60 秒 30 次 + **1 小时 120 次**（常量 `SSH_BURST_*` / `SSH_SLOW_*`；阈值按正常运维用量校准——VS Code Remote / scp 批量 / 家宽 NAT 共享一轮就是 5-10 个连接）。**`--rcheck`（只读）排在 `--set` 之前**：撞锁后命中 DROP 即停止记录，60 秒滑窗自然滚空，静默等一分钟自动解锁，不再「越试越锁」；IPv4 / IPv6 双栈同时生效；缺 `xt_recent` 时降级并告警 |
 | CF Tunnel | 可选；WS 只监听 `127.0.0.1`，cloudflared 由独立服务托管，Token 存 0600 文件；分享链接按 CF 边缘 TLS 生成 |
 | 防火墙 | `safe`（默认）/ `strict` / `off`；**同时构建 iptables 与 ip6tables 链** —— 只防 IPv4 等于给 `:::22` 留了后门；每次变更前备份两个 family 的规则转储 |
 | 伪装站 | 三档：**`xhy scan` 自动扫描本机机房网段**（RealiTLScanner + 真实 SNI 验证 + 结果缓存，见上节）、`conf/targets.tsv` 地区库按 VPS 出口国家匹配、`xhy target` 手动固定 target/SNI 或单独校验；三者都做 TLS 1.3 / HTTP/2 / 无重定向 / 非 CDN 校验，并支持「dest=源站 IP、SNI=域名」（`--target 1.2.3.4:443 --sni www.example.com`，交互菜单写作 `1.2.3.4:443,sni=www.example.com`）|
-| 后续更新 | `xhy update script`（单文件：新构建整文件替换；克隆：git ff-only）/ `core` / `geodata` / `config`（重建全部节点）/ `all` |
+| 后续更新 | `xhy update script`（新构建整文件替换）/ `core` / `geodata [--force] [--source loyalsoldier\|official]` / `config`（重建全部节点）/ `all`；涉及 relay 的升级另跑 `xhy relay reapply` |
 | 五种模式 | `direct`、`tunnel`、`reality`、`xhttp`、`hy2`（Xray 原生 Hysteria2 入站，UDP/QUIC + 自签证书 + `pinSHA256` 分享链接） |
-| 导出链接 | `xhy link --all` / `--uri` / `--qr`（服务器是 IPv4 字面量且开了双栈时自动附 **IPv6 变体链接**） |
+| 导出链接 | `xhy link --all` / `--uri` / `--qr` / `--png FILE`（终端二维码 65×33 列，PNG 0600；服务器是 IPv4 字面量且开了双栈时自动附 **IPv6 变体链接**） |
 | 导出客户端配置 | `xhy export clash|singbox [--out FILE]` —— 生成 mihomo/Clash.Meta 的 `proxies` YAML 或 sing-box 的 outbounds JSON；xHTTP 两边都暂不支持，自动跳过并提示 |
 | 备份 / 还原 | `xhy backup [--out FILE]` —— 打包 `/etc/xray-hy`（排除 snapshots/backups），**内含逐文件 SHA256 清单**；`xhy restore <文件>` 先全量校验、现状自动留底、从 nodes 重建配置并过 `xray -test`，失败整体回滚 |
 | 非交互更新 | `xhy update script --yes`（同一主版本序列自动确认；跨主版本再加 `--allow-major`） |
-| 额外补充 | 多节点并存与独立增删、**端口跨模式全局唯一检查**、**`DUAL_STACK=on` 双栈监听**、**`xhy preflight` 安装前只读预检**（内核修复线 / 端口 / 磁盘 / 内存 / MPTCP / GitHub 可达 / 依赖）、**Hysteria2 的 UDP 双栈放行与自签证书 pin**、节点注册表、**`flock` 并发锁（服务命令关闭锁 fd）**、配置变更原子校验+回滚、**最近 5 份整套状态快照 + `xhy rollback`**、更新 Xray 时二进制自动回滚、更新脚本后全量 `bash -n`、按内存/cgroup 设 `GOMEMLIMIT`、日志自动轮转、系统级关闭 MPTCP（钉死旧版的关键缓解）、私网/回国 IP/广告域名阻断开关、DoH 选择、日志级别与关闭、geodata 更新（带大小校验）、REALITY fallback 限速、系统自检报告、CLI 与菜单双入口、卸载可选保留配置 |
+| 额外补充 | 多节点并存与独立增删、**端口跨模式全局唯一检查**、**`DUAL_STACK=on` 双栈监听**、**`xhy preflight` 安装前只读预检**（内核修复线 / 端口 / 磁盘 / 内存 / MPTCP / GitHub 可达 / 依赖）、**Hysteria2 的 UDP 双栈放行与自签证书 pin**、节点注册表、**`flock` 并发锁（服务命令关闭锁 fd）**、配置变更原子校验+回滚、**最近 5 份整套状态快照 + `xhy rollback`**、更新 Xray 时二进制自动回滚、更新脚本后全量 `bash -n`、按内存/cgroup 设 `GOMEMLIMIT`、日志自动轮转、系统级关闭 MPTCP（钉死旧版的关键缓解）、私网/回国 IP/广告域名阻断开关、DoH 选择、日志级别与关闭、geodata 更新（Loyalsoldier 默认 + SHA-256 校验 + `.geodata-source` 源标记）、**relay 中继（entry → land，恒明文 `security=none`，失联 `fallbackTag=block` 断联绝不直出）**、REALITY fallback 限速、系统自检报告、CLI 与菜单双入口、卸载可选保留配置 |
 
 ### 伪装站：target / dest / SNI / serverNames 是什么
 
@@ -272,7 +242,15 @@ xhy config set LOG_LEVEL none       # warning / info / debug / none，默认 war
 xhy config set TARGET_REGION jp     # 或 auto
 ```
 
-注意：`BLOCK_PRIVATE` / `BLOCK_CN` / `BLOCK_ADS` 依赖 `geoip.dat` / `geosite.dat`。默认用 **Loyalsoldier 完整版**（`xhy update geodata [--force]` 单独重取；安装/升级核心时自动铺好）。Xray 官方 release 自带的 dat 是它的真子集（缺 `gfw` 全系、`google` 114 条、`geolocation-!cn` 3819 条、`category-ai-!cn` 2 条等），要用它设 `XHY_GEODATA_SOURCE=official`（或 `xhy update geodata --source official`）；`xhy core status` 会标出当前是哪份。
+注意：`BLOCK_PRIVATE` / `BLOCK_CN` / `BLOCK_ADS` 依赖 `geoip.dat` / `geosite.dat`。默认用 **Loyalsoldier 完整版**（安装/升级核心时自动铺好；两个 dat 都过 release 附带的 `.sha256sum` 校验）。Xray 官方 release 自带的 dat 是它的真子集（缺 `gfw` 全系、`google` 114 条、`geolocation-!cn` 3819 条、`category-ai-!cn` 2 条等），要用它设 `XHY_GEODATA_SOURCE=official`。
+
+```sh
+xhy update geodata --source official     # 切到官方版（整包解出，强制 .dgst 校验）
+xhy update geodata --force               # 忽略「1 小时内刚更新过」强制重下
+xhy core status                          # 标出当前是哪份（geosite >9 MB = Loyalsoldier）
+```
+
+源标记写在 `/usr/local/share/xray/.geodata-source`，只在两个 dat **全部下载成功**后写入。`update geodata` 的「1 小时跳过」会同时比对源标记，所以切 `--source` / 改环境变量不会被静默吞掉，`update all` 也不会重复下 30 MB。
 
 `xhy firewall strict` 会把除 SSH 与节点端口外的所有入站 TCP/UDP 丢弃，请**先确认 SSH 端口识别正确**（`xhy check` 会显示），并保留一条可用的带外控制台。任何模式下都不会改动系统已有的 iptables 规则。
 
@@ -281,7 +259,7 @@ xhy config set TARGET_REGION jp     # 或 auto
 ## 6. 目录结构
 
 ```
-本仓库（开发布局，方式 B 克隆下来的就是它）
+本仓库（开发布局，git clone 下来的就是它，仅供看源码 / 二次开发）
 ├── xhy                       开发入口：加载 lib/ 与 entry/main.sh
 ├── install.sh                构建产物：单文件、自包含（build.sh 生成，不手改）
 ├── build.sh                  拼接器：entry/ + lib/ + conf/ -> install.sh
@@ -291,20 +269,27 @@ xhy config set TARGET_REGION jp     # 或 auto
 ├── lib/
 │   ├── common.sh             日志/状态/原子写/校验/工具函数
 │   ├── platform.sh           发行版、init、架构、SSH 端口检测，依赖安装
-│   ├── core.sh               Xray 版本通道、下载+强制校验、x25519、cloudflared
+│   ├── core.sh               Xray 版本通道、下载+强制校验、geodata 双源、x25519、cloudflared
 │   ├── service.sh            systemd / OpenRC 服务与配置校验
-│   ├── hardening.sh          BBR、iptables 链、SSH 防爆破
+│   ├── hardening.sh          BBR、iptables 链、SSH 防爆破（双窗口 recent）
 │   ├── target.sh             伪装站地区库与在线校验
+│   ├── scanner.sh            RealiTLScanner 同网段伪装站扫描与缓存
+│   ├── sockopt.sh            streamSettings.sockopt（TFO / tcpNoDelay / keepalive）
 │   ├── nodes.sh              五种模式 inbound 渲染、节点注册表、整体重建、快照
-│   ├── links.sh              vless:// 链接与二维码
+│   ├── relay.sh              entry / land 中继、balancer、burstObservatory、放行规则
+│   ├── links.sh              vless:// 链接、终端二维码与 PNG
+│   ├── export.sh             clash / sing-box 客户端配置导出
+│   ├── backup.sh             快照、备份、回滚
+│   ├── i18n.sh               中英双语（按 tty 判定：SSH 中文 / VNC 英文）
 │   └── update.sh             脚本/核心/geodata/配置更新、自检
 ├── conf/targets.tsv          可自行编辑的地区伪装站候选（构建时内嵌进 install.sh）
 └── test/                     离线测试（无需 root / 网络 / 真实 Xray）
 
-方式 A 安装后（单文件布局，逻辑与仓库完全一致）
-/usr/local/lib/xray-hy/
-├── xhy                       install.sh 的副本
-└── conf/targets.tsv          首次用到伪装站时从内嵌数据生成（之后可直接编辑）
+安装后（单文件布局，逻辑与仓库完全一致）
+/usr/local/bin/xhy             脚本本体（普通文件、非软链；install.sh 的副本）
+/usr/local/lib/xray-hy/        数据目录
+├── conf/targets.tsv          首次用到伪装站时从内嵌数据生成（之后可直接编辑）
+└── tunnel-run                CF Tunnel 辅助脚本
 
 /etc/xray-hy/                 运行时数据（0700）
 ├── config.json               渲染后的完整配置（0600）
@@ -312,13 +297,13 @@ xhy config set TARGET_REGION jp     # 或 auto
 ├── tunnel.token              CF Tunnel Token（0600）
 ├── confs/<mode>_<port>.json  inbound 片段
 ├── nodes/<mode>_<port>.env   节点凭证（0600）
+├── nodes/relay.env           relay 角色 / 端口 / UUID / fallbackTag（0600）
 ├── certs/hy2_<port>.crt/key  Hysteria2 自签证书与私钥（0600，目录 0700）
 ├── snapshots/                最近 5 份整套状态（xhy rollback 用）
 └── backups/                  配置、iptables/ip6tables 与旧 Xray 二进制备份
 /usr/local/bin/xray           Xray 二进制
-/usr/local/share/xray/        geoip.dat / geosite.dat
+/usr/local/share/xray/        geoip.dat / geosite.dat / .geodata-source（源标记）
 /var/log/xray-hy/             日志
-/usr/local/bin/xhy            入口软链
 ```
 
 ---
@@ -326,15 +311,18 @@ xhy config set TARGET_REGION jp     # 或 auto
 ## 7. 更新与回滚
 
 ```sh
-xhy update script     # 单文件：下载新构建 -> bash -n -> 比对构建号 -> 确认后原子替换
-                      # 克隆方式：git fetch -> 展示 log/diff -> 确认 -> pull --ff-only
+xhy update script     # 下载新构建 -> bash -n -> 比对构建号 -> 确认后原子替换
 xhy update core       # 按版本通道重装 Xray（强制校验），自动验证现有配置兼容性
-xhy update geodata    # 只更新 geoip.dat / geosite.dat，失败保留旧文件
+xhy update geodata [--force] [--source loyalsoldier|official]
+                      # 更新 geoip.dat / geosite.dat；1 小时内同源跳过；失败保留旧文件
 xhy update config     # 从节点注册表重建全部 inbound + 重载 + 刷新防火墙
 xhy update all        # 以上全部 + 自检
+xhy relay reapply     # 涉及 relay 的升级：按 relay.env 重新注入 config.json
 ```
 
-脚本更新**不会**触碰 `/etc/xray-hy`。`update script` 拿到新脚本后先 `bash -n` 语法检查、再比对构建号，任一步不对就放弃且本地文件分毫未动；确认替换前旧版本会备份到 `/etc/xray-hy/backups/`。所有会改配置的命令都持有全局 `flock`，并发执行不会互相踩。
+脚本更新**不会**改动节点配置。`update script` 拿到新脚本后先 `bash -n` 语法检查、再比对构建号，任一步不对就放弃且本地文件分毫未动；确认替换前旧版本会备份到 `/etc/xray-hy/backups/`。所有会改配置的命令都持有全局 `flock`，并发执行不会互相踩。
+
+但 `update script` **不会自动重建 `config.json`** —— 涉及 relay 的变更（如 v1.14.0 把 `fallbackTag` 从 `direct` 改成 `block`）升级后要跑一次 `xhy relay reapply`，否则 `relay.env` 已是新值、`config.json` 还是旧值。`relay status` / `relay test` 会比对两者并提示不一致。
 
 若配置渲染或校验失败，新增节点会被回滚，已有配置保持原样。
 
@@ -376,13 +364,13 @@ tools/bump-version.sh major --note "破坏性变更"   # 1.3.1 -> 2.0.0
 
 ## 8. 已知限制与测试状态
 
-已在真实 VPS（Alpine 3.23 / OpenRC，`47.88.102.45`）上完成端到端部署：`install` 七步全过、REALITY 节点实测可连、`xhy scan` 实机扫出并应用了同机房伪装站。下面的离线测试仍保留，任何机器上都能复跑（不需要 root、不需要网络、不需要真实 Xray）：
+已在真实 VPS（Alpine 3.23 / OpenRC）上完成端到端部署：`install` 七步全过、REALITY 节点实测可连、`xhy scan` 实机扫出并应用了同机房伪装站；三台机跑 `xhy relay` 中继链路（东京 entry → 硅谷 land）并验收分流。下面的离线测试仍保留，任何机器上都能复跑（不需要 root、不需要网络、不需要真实 Xray）：
 
 ```sh
-bash test/run-all.sh     # bash -n + 渲染 + hy2 + 生命周期 + 伪装站/扫描，共 158 项断言
+bash test/run-all.sh     # 18 个测试文件、约 800 项断言（含 build.sh --check）
 ```
 
-覆盖：全部脚本语法；四种 VLESS 模式与 `hy2` 的 inbound 片段和合并 `config.json` 是否合法 JSON；`hy2` 自签证书生成与 `pinSHA256` 链接；UDP 端口是否进入防火墙；`add → snapshot → del → rollback` 的整套状态恢复；跨模式端口冲突；伪装站地区优先与 BOM 防御；IP+SNI 校验与删除节点选择器；扫描模块的网段换算 / 域名过滤 / 打分 / CSV 解析 / 缓存合并与过期 / 缓存优先选站；`sockopt` 是否按节点类型出现（`TFO=1/0` 对应 `tcpFastOpen` true/false、`hy2` 无 `sockopt`）、`policy.bufferSize` 取自 state、`ACCESS_LOG` 开关对 `log.access` 的影响、`sniffing.destOverride` 按模式裁剪、`hy2` 的 `masquerade.type` 默认 `string` 与 `--masq-proxy` 切 `proxy`。
+覆盖：全部脚本语法与单文件产物一致性；五种节点模式的 inbound 片段与合并 `config.json` 合法性；`hy2` 自签证书与 `pinSHA256` 链接；`link --qr/--png`；`i18n` 按 tty 分中英；`add → snapshot → del → rollback` 状态恢复；跨模式端口冲突；伪装站扫描 / 打分 / 缓存；**`hardening` 的 iptables 规则行序**（`--rcheck` 在 `--set` 前、relay 放行在 `RETURN` 前）；**`relay` 的恒明文 / balancer / `burstObservatory` / `fallbackTag` / `streamSettings.sockopt` 层级 / config 与 relay.env 一致性**；**`geodata` 的默认源 / `--source` 切换 / 源标记 / 失败不写标记**；`core` 下载与 `.dgst` 校验；磁盘闸门与 `clean` 行为；`bootstrap` 单文件直装与软链自愈。
 
 此外 `hy2` 的配置字段在真实 Xray **26.10.31** 上用 `xray run -test` 验证通过（`protocol: hysteria` / `version: 2` / `alpn: ["h3"]` / `masquerade` / `finalmask.quicParams`），`hysteria2://` 链接格式经人工核对。
 

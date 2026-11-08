@@ -72,39 +72,49 @@ xray_installed_version() {
 #     anthropic 少 1、xai 少 1、github-copilot 少 1、disney 少 2；
 #   官方「多出来」的只有 geolocation-!cn 里 13 条乱码/正则写法差异，实质 0 条。
 # 官方版体积差 3.9 MB 全在 category-ads-all（905 vs 199451 条），但换来的代价
-# 是 AI / Google / gfw 覆盖不全。默认 donc 回到 Loyalsoldier 完整版。
+# 是 AI / Google / gfw 覆盖不全。默认回到 Loyalsoldier 完整版。
 geodata_source() {
     local v="${XHY_GEODATA_SOURCE:-loyalsoldier}"
     [[ "$v" == "loyalsoldier" || "$v" == "official" ]] || v="loyalsoldier"
     printf '%s' "$v"
 }
 
-# Loyalsoldier 直接单独发两个 dat，不需要下 16.7 MB 整包。
+# Loyalsoldier 直接单独发两个 dat（并附 .sha256sum），不需要下 16.7 MB 整包。
+# 两个 dat 都过 SHA-256 才落盘、全部成功才返回 0 —— 调用方据此写 .geodata-source。
 geodata_install_loyalsoldier() {
-    local f sz
+    local f sz sum expected actual failed=0 base
+    base="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download"
     for f in geoip.dat geosite.dat; do
         info "更新 $f（Loyalsoldier 完整版）"
-        if fetch "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/$f" \
-            "$XRAY_ASSET/$f.new"; then
+        if fetch "$base/$f" "$XRAY_ASSET/$f.new" \
+            && fetch "$base/$f.sha256sum" "$XRAY_ASSET/$f.sum"; then
             sz="$(stat -c%s "$XRAY_ASSET/$f.new" 2>/dev/null || echo 0)"
+            expected="$(awk 'NR==1 {print $1}' "$XRAY_ASSET/$f.sum" 2>/dev/null | tr 'A-F' 'a-f' || true)"
+            actual="$(sha256_file "$XRAY_ASSET/$f.new" 2>/dev/null | tr 'A-F' 'a-f' || true)"
             if (( sz < 102400 )); then
-                warn "$f 下载内容异常（${sz} bytes），保留现有文件"
-                rm -f "$XRAY_ASSET/$f.new"
-                continue
+                warn "$f 下载内容异常（${sz} bytes），保留现有文件"; failed=1
+            elif [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]]; then
+                warn "$f 摘要格式异常，拒绝安装未校验内容"; failed=1
+            elif [[ "$expected" != "$actual" ]]; then
+                warn "$f SHA-256 校验失败（期望 ${expected:0:16}… / 实际 ${actual:0:16}…），保留现有文件"; failed=1
+            else
+                mv -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f"
+                chmod 0644 "$XRAY_ASSET/$f"
+                ok "$f 已更新（$(( sz / 1024 )) KB，Loyalsoldier 版，SHA-256 通过）"
             fi
-            mv -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f"
-            chmod 0644 "$XRAY_ASSET/$f"
-            ok "$f 已更新（$(( sz / 1024 )) KB，Loyalsoldier 版）"
         else
-            rm -f "$XRAY_ASSET/$f.new"
-            warn "$f 下载失败，保留现有文件"
+            warn "$f 下载失败，保留现有文件"; failed=1
         fi
-        [[ -s "$XRAY_ASSET/$f" ]] || warn "$XRAY_ASSET/$f 仍缺失，geoip:private 等规则将不生效"
+        rm -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f.sum"
+        [[ -s "$XRAY_ASSET/$f" ]] || {
+            warn "$XRAY_ASSET/$f 仍缺失，geoip:private 等规则将不生效"; failed=1; }
     done
+    # 两个 dat 必须都成功：调用方据此决定是否写 .geodata-source 标记。
+    return "$failed"
 }
 
 geodata_install_official() {
-    local ver asset url tmp unpack f sz
+    local ver asset url tmp unpack f sz failed=0
     ver="${1:-}"
     [[ -n "$ver" && "$ver" != "未安装" && "$ver" != "latest" ]] || ver="latest"
     asset="Xray-linux-${XHY_ARCH}.zip"
@@ -138,21 +148,21 @@ geodata_install_official() {
     install -d -m 0755 "$XRAY_ASSET"
     for f in geoip.dat geosite.dat; do
         if [[ ! -s "$tmp/unpack/$f" ]]; then
-            warn "$asset 里没有 $f，保留现有文件"
-            continue
+            warn "$asset 里没有 $f，保留现有文件"; failed=1; continue
         fi
         sz="$(stat -c%s "$tmp/unpack/$f" 2>/dev/null || echo 0)"
         if (( sz < 102400 )); then
-            warn "$f 大小异常（${sz} bytes），保留现有文件"
-            continue
+            warn "$f 大小异常（${sz} bytes），保留现有文件"; failed=1; continue
         fi
         install -m 0644 "$tmp/unpack/$f" "$XRAY_ASSET/$f.new" 2>/dev/null \
-            || { rm -f "$XRAY_ASSET/$f.new"; warn "$f 写入失败（磁盘满？），保留旧文件"; continue; }
-        mv -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f" || { warn "$f 替换失败"; continue; }
+            || { rm -f "$XRAY_ASSET/$f.new"; warn "$f 写入失败（磁盘满？），保留旧文件"; failed=1; continue; }
+        mv -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f" || { warn "$f 替换失败"; failed=1; continue; }
         ok "$f 已更新（$(( sz / 1024 )) KB，官方版）"
     done
     rm -rf "$tmp"
     trap - RETURN
+    # 与 Loyalsoldier 分支一致：两个 dat 全成功才写 .geodata-source 标记。
+    return "$failed"
 }
 
 # Download a pinned-or-latest Xray release. The .dgst checksum is MANDATORY:
@@ -238,15 +248,22 @@ xray_install() {
                 || { rm -f "$XRAY_ASSET/$f.new"; warn "$f 写入失败（磁盘满？），保留旧文件"; continue; }
             mv -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f"
         done
-        if [[ "$(geodata_source)" == "loyalsoldier" ]]; then
+        local src; src="$(geodata_source)"
+        if [[ "$src" == "loyalsoldier" ]]; then
             # 覆盖失败不致命：zip 自带的官方 dat 已就位，xray 仍能起来。
+            # 成功才写源标记，避免 update all 里 update_geodata 误判「刚更新过」。
             if (( $(disk_free_mb /) >= 45 )); then
-                geodata_install_loyalsoldier
+                if geodata_install_loyalsoldier; then
+                    printf '%s\n' "$src" > "$XRAY_ASSET/.geodata-source"
+                else
+                    warn "Loyalsoldier 覆盖未完成，源标记未写入（下次 update geodata 会重试）"
+                fi
             else
                 warn "磁盘余量 $(disk_free_mb /) MB < 45 MB，跳过 Loyalsoldier 覆盖（保留官方版保底）"
             fi
         else
             info "XHY_GEODATA_SOURCE=official，保留 release 自带的官方版"
+            printf '%s\n' "$src" > "$XRAY_ASSET/.geodata-source"
         fi
         for f in geoip.dat geosite.dat; do
             [[ -s "$XRAY_ASSET/$f" ]] || warn "$XRAY_ASSET/$f 缺失，geoip:private 等规则将不生效"
@@ -320,10 +337,10 @@ core_status() {
             # 自带版（真子集，AI / Google / gfw 覆盖不全）；<1 MB = 文件坏了。
             if (( gssz > 9000000 )); then
                 printf '  ← Loyalsoldier 完整版（默认）'
-            elif (( gssz >= 1048576 )); then
+            elif (( gssz >= 6000000 )); then
                 printf '  ← 官方版（子集：缺 gfw / google 114 条等，xhy update geodata --force 换回）'
             else
-                printf '  ⚠ 异常小，跑 xhy update geodata --force 重下'
+                printf '  ⚠ 体积异常（< 6 MB，疑似损坏/截断），跑 xhy update geodata --force 重下'
             fi
         fi
         printf '\n'

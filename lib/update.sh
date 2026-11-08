@@ -149,7 +149,7 @@ update_core() {
 #   · 官方源仍走整包解出两个 dat（官方不单独发 dat 资产），强制校验 .dgst。
 update_geodata() {
     need_root
-    local force=0 ver src override=""
+    local force=0 ver src override="" stamp
     while (( $# > 0 )); do
         case "$1" in
             --force|-f) force=1; shift ;;
@@ -158,6 +158,7 @@ update_geodata() {
         esac
     done
     install -d -m 0755 "$XRAY_ASSET"
+    stamp="$XRAY_ASSET/.geodata-source"
     if [[ -n "$override" ]]; then
         [[ "$override" == "loyalsoldier" || "$override" == "official" ]] \
             || die "--source 只接受 loyalsoldier / official"
@@ -168,10 +169,15 @@ update_geodata() {
     ver="$(xray_installed_version 2>/dev/null | sed 's/^v//' || true)"
     [[ -n "$ver" && "$ver" != "未安装" ]] || ver="latest"
 
+    # v1.14.1：跳过必须同时满足「刚更新过」+「当前 dat 就是请求的源」。
+    # 旧版只看 mtime/age，切 --source / 改 XHY_GEODATA_SOURCE 后 1 小时内会被
+    # 静默吞掉，且提示里的 ${src} 是本次请求值而非实际来源 —— 等于撒谎。
+    # 源标记由 xray_install 与这里的下载成功后写入，失败不写 → 下次自动重试。
     if (( ! force )) && [[ -s "$XRAY_ASSET/geosite.dat" && -s "$XRAY_ASSET/geoip.dat" ]] \
         && [[ "$XRAY_ASSET/geosite.dat" -nt "$XRAY_BIN" ]]; then
         local age=$(( $(date +%s) - $(stat -c%Y "$XRAY_ASSET/geosite.dat" 2>/dev/null || echo 0) ))
-        if (( age < 3600 && age >= 0 )); then
+        if (( age < 3600 && age >= 0 )) && [[ -r "$stamp" ]] \
+            && [[ "$(cat "$stamp" 2>/dev/null || true)" == "$src" ]]; then
             ok "geodata 已是 ${src} 版且 ${age}s 前刚更新（geosite $(( $(stat -c%s "$XRAY_ASSET/geosite.dat") / 1024 )) KB），跳过；--force 可强制重下"
             return 0
         fi
@@ -180,11 +186,19 @@ update_geodata() {
     # Loyalsoldier 两个 dat 约 30 MB，官方整包 16.7 MB + 解出 11 MB，都要余量写 .new。
     disk_need 45 "更新 geodata（约 30 MB）" || die "已中止：现有 geo 数据继续生效"
     if [[ "$src" == "loyalsoldier" ]]; then
-        geodata_install_loyalsoldier
-        ok "Geodata 更新完成（Loyalsoldier 完整版）"
+        if geodata_install_loyalsoldier; then
+            printf '%s\n' "$src" > "$stamp"
+            ok "Geodata 更新完成（Loyalsoldier 完整版）"
+        else
+            warn "Loyalsoldier geodata 未完整更新，源标记未写入；下次 update geodata 会重试"
+        fi
     else
-        geodata_install_official "$ver"
-        ok "Geodata 更新完成（官方版，Xray $ver）"
+        if geodata_install_official "$ver"; then
+            printf '%s\n' "$src" > "$stamp"
+            ok "Geodata 更新完成（官方版，Xray $ver）"
+        else
+            warn "官方版 geodata 未完整更新，源标记未写入；下次 update geodata 会重试"
+        fi
     fi
 }
 
@@ -201,7 +215,8 @@ update_config() {
 update_all() {
     update_script || true
     update_core
-    # 核心安装已把官方 dat 一起铺好（zip 自带），这里只兜底「核心没变动 / 数据缺失」。
+    # 核心安装已按 geodata_source 铺好 dat 并写 .geodata-source；这里只兜底
+    # 「核心没变动 / 数据缺失 / 源标记缺失」—— 同源且 1 小时内会跳过，不重复下 30 MB。
     update_geodata
     update_config
     self_check
