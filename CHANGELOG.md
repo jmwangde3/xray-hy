@@ -2,6 +2,11 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.13.2 — 2026-11-09
+
+- fix(relay): `relay status --brief` 的域名计数差一 —— `printf '%s' | tr ',' '\\n' | wc -l` 的最后一个字段没有换行，7 个域会报成「+6域」；改 `printf '%s\\n'` + `grep -c .`。实测东京 13 分类 7 域现在显示正确
+- test(relay): 135 -> 137 项，新增 brief 报 +3域 / 不出现 +2域 两条
+
 ## v1.13.1 — 2026-11-09
 
 - fix(core): geodata 下载 URL 补 release tag 的 v 前缀 —— `xray version` 输出 26.10.31，而 Xray 的 release tag 是 v26.10.31，`xhy update geodata --force` 因此 404（真实踩到：sanjose / singapore 升级后第一条 geodata 命令就报 22）；latest 分支改走 releases/latest/download/<asset>，不再拼 tag 段

@@ -6,6 +6,15 @@
 FW_CHAIN="XHY-IN"
 XHY_SYSCTL_FILE="/etc/sysctl.d/90-xray-hy.conf"
 
+# SSH 防爆破阈值。按「正常人的使用量」定，不是按攻击者：
+# VS Code Remote / scp 批量 / 运维工具一轮就是 5-10 个新连接，家宽 IP 又常被
+# 运营商 NAT 与其他用户共享。攻击者的特征是每小时成百上千次，不是一分钟 15 次。
+# 爆发窗口 30 次/60s，慢速窗口 120 次/小时 —— 误伤远小于被锁在门外的损失。
+SSH_BURST_WINDOW=60
+SSH_BURST_HITS=30
+SSH_SLOW_WINDOW=3600
+SSH_SLOW_HITS=120
+
 in_container() {
     [[ -r /proc/1/environ ]] && tr '\0' '\n' </proc/1/environ 2>/dev/null | grep -qE '^container=|^lxc'
 }
@@ -207,17 +216,24 @@ _apply_family() {
     fi
 
     if [[ "$guard" == "on" ]]; then
-        # 阈值按「正常人的使用量」定，不是按攻击者：VS Code Remote / scp 批量 /
-        # 运维工具一轮就是 5-10 个新连接。攻击者的特征是每小时成百上千次。
-        # 爆发窗口 10 次/60s，慢速窗口 25 次/小时 —— 误伤远小于拦截损失。
+        # 顺序与 --rcheck/--set 的选择是这套机制的全部要害：
+        #
+        #   rcheck(DROP) 在前、set 在后 —— 一旦命中 DROP，包就不再往下走，
+        #   时间戳停止新增，滑窗 60 秒后自然滚动清空，人静等一分钟即可解锁。
+        #
+        # 旧版写的是「先 set 再 --update --hitcount」，两个后果叠加成死锁：
+        #   1) --set 无条件执行，每一轮重试都往窗口顶一条新记录；
+        #   2) --update 命中时还会再刷新一次时间戳。
+        #   于是窗口永远满，越试越锁，只有 VNC 清 /proc/net/xt_recent 才能救。
+        # 实测硅谷一次会话被 DROP 674 次、家宽 IP 在表里顶满 32 条就是这个。
         if "$ipt" -w -A "$FW_CHAIN" -p tcp --dport "$XHY_SSH_PORT" -m conntrack --ctstate NEW \
-                -m recent --set --name "$tag" >/dev/null 2>&1; then
+                -m recent --rcheck --seconds "$SSH_BURST_WINDOW" --hitcount "$SSH_BURST_HITS" --name "$tag" -j DROP >/dev/null 2>&1; then
             "$ipt" -w -A "$FW_CHAIN" -p tcp --dport "$XHY_SSH_PORT" -m conntrack --ctstate NEW \
-                -m recent --update --seconds 60 --hitcount 10 --name "$tag" -j DROP 2>/dev/null || ok_recent=0
+                -m recent --set --name "$tag" >/dev/null 2>&1 || ok_recent=0
+            "$ipt" -w -A "$FW_CHAIN" -p tcp --dport "$XHY_SSH_PORT" -m conntrack --ctstate NEW \
+                -m recent --rcheck --seconds "$SSH_SLOW_WINDOW" --hitcount "$SSH_SLOW_HITS" --name "${tag}_SLOW" -j DROP >/dev/null 2>&1 || ok_recent=0
             "$ipt" -w -A "$FW_CHAIN" -p tcp --dport "$XHY_SSH_PORT" -m conntrack --ctstate NEW \
                 -m recent --set --name "${tag}_SLOW" >/dev/null 2>&1 || ok_recent=0
-            "$ipt" -w -A "$FW_CHAIN" -p tcp --dport "$XHY_SSH_PORT" -m conntrack --ctstate NEW \
-                -m recent --update --seconds 3600 --hitcount 25 --name "${tag}_SLOW" -j DROP 2>/dev/null || ok_recent=0
         else
             ok_recent=0
         fi
@@ -353,7 +369,8 @@ firewall_status() {
     local brief=""
     if [[ "${1:-}" == "--brief" ]]; then brief="1"; fi
     printf '工作模式 : %s\n' "$(state_get FIREWALL_MODE safe)"
-    printf 'SSH 防爆破: %s (端口 %s，60s/5 次 + 1h/8 次 双窗口)\n' "$(state_get SSH_GUARD_STATUS '?')" "$XHY_SSH_PORT"
+    printf 'SSH 防爆破: %s (端口 %s，%ss/%s 次 + %ss/%s 次 双窗口)\n' "$(state_get SSH_GUARD_STATUS '?')" "$XHY_SSH_PORT" \
+        "$SSH_BURST_WINDOW" "$SSH_BURST_HITS" "$SSH_SLOW_WINDOW" "$SSH_SLOW_HITS"
     printf '节点端口(TCP): %s\n' "$(firewall_node_ports | tr '\n' ' ')"
     printf '节点端口(UDP): %s\n' "$(firewall_udp_ports | tr '\n' ' ')"
     if [[ -n "$brief" ]]; then return 0; fi

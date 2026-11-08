@@ -144,8 +144,8 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.13.1"
-XHY_BUILD="721c52df7792"
+XHY_VERSION="1.13.2"
+XHY_BUILD="a8709dbbbd06"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -163,7 +163,7 @@ fi
 # ===================== lib/common.sh =====================
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.13.1}"
+XHY_VERSION="${XHY_VERSION:-1.13.2}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -1983,6 +1983,15 @@ config_reload() {
 
 FW_CHAIN="XHY-IN"
 XHY_SYSCTL_FILE="/etc/sysctl.d/90-xray-hy.conf"
+
+# SSH 防爆破阈值。按「正常人的使用量」定，不是按攻击者：
+# VS Code Remote / scp 批量 / 运维工具一轮就是 5-10 个新连接，家宽 IP 又常被
+# 运营商 NAT 与其他用户共享。攻击者的特征是每小时成百上千次，不是一分钟 15 次。
+# 爆发窗口 30 次/60s，慢速窗口 120 次/小时 —— 误伤远小于被锁在门外的损失。
+SSH_BURST_WINDOW=60
+SSH_BURST_HITS=30
+SSH_SLOW_WINDOW=3600
+SSH_SLOW_HITS=120
 
 in_container() {
     [[ -r /proc/1/environ ]] && tr '\0' '\n' </proc/1/environ 2>/dev/null | grep -qE '^container=|^lxc'
@@ -6516,7 +6525,7 @@ relay_status() {
     if [[ "$brief" == "1" ]]; then
         case "$RELAY_ROLE" in
             land)  printf 'relay     : land :%s ← %s\n' "$RELAY_PORT" "$RELAY_ALLOW" ;;
-            entry) printf 'relay     : entry → %s（%s%s）\n' "$RELAY_UPSTREAM" "${RELAY_CATEGORIES:-无分类}" "${RELAY_DOMAINS:+ +$(printf '%s' "$RELAY_DOMAINS" | tr ',' '\n' | wc -l)域}" ;;
+            entry) printf 'relay     : entry → %s（%s%s）\n' "$RELAY_UPSTREAM" "${RELAY_CATEGORIES:-无分类}" "${RELAY_DOMAINS:+ +$(printf '%s\n' "$RELAY_DOMAINS" | tr ',' '\n' | grep -c .)域}" ;;
         esac
         return 0
     fi

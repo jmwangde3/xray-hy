@@ -537,18 +537,62 @@ relay_fw_chain() {
     fi
 }
 
+# 链里第一条「终止性」规则（DROP / RETURN）的行号。我们的 ACCEPT 必须排在它
+# 前面，否则包先被 RETURN 弹回 INPUT、或被 strict 模式的 DROP 吃掉，规则形同
+# 不存在 —— 而 `-C` 依然返回 0，于是 relay status 报「已放行」，实际断流。
+# 没有终止规则时输出空串，调用方退回 -A 追加。
+_relay_fw_term_pos() {
+    local t="$1" chain="$2" n=0 line
+    while IFS= read -r line; do
+        n=$(( n + 1 ))
+        case "$line" in
+            *" -j DROP"|*" -j RETURN") printf '%s' "$n"; return 0 ;;
+        esac
+    done < <($t -S "$chain" 2>/dev/null | grep -- "^-A $chain ")
+    return 1
+}
+
+# 我们这条（带 comment）当前所在行号；不在链里输出空。
+_relay_fw_own_pos() {
+    local t="$1" chain="$2" port="$3" n=0 line
+    while IFS= read -r line; do
+        n=$(( n + 1 ))
+        case "$line" in
+            *"xhy-relay-$port"*) printf '%s' "$n"; return 0 ;;
+        esac
+    done < <($t -S "$chain" 2>/dev/null | grep -- "^-A $chain ")
+    return 1
+}
+
 relay_fw_add() {
-    local port="$1" allow="$2" t chain
+    local port="$1" allow="$2" t chain pos
     t=iptables; [[ "$allow" == *:* ]] && t=ip6tables
     chain="$(relay_fw_chain "$t")"
     # 带 comment 一起比对：只比「端口+源」的话，一条别人加的同类规则会让 -C 命中，
     # 于是我们这条带注释的规则永远加不上，之后 relay_del 按注释删也删不掉。
-    $t -w -C "$chain" -p tcp --dport "$port" -s "$allow" \
-        -m comment --comment "xhy-relay-$port" -j ACCEPT 2>/dev/null && {
-        printf '%s' "$chain"; return 0; }
-    $t -w -A "$chain" -p tcp --dport "$port" -s "$allow" \
-        -m comment --comment "xhy-relay-$port" -j ACCEPT 2>/dev/null \
-        || { relay_say warn "防火墙规则写入失败（$t $chain）" "failed to add firewall rule ($t $chain)"; return 1; }
+    if $t -w -C "$chain" -p tcp --dport "$port" -s "$allow" \
+            -m comment --comment "xhy-relay-$port" -j ACCEPT >/dev/null 2>&1; then
+        # 已存在但可能位置是坏的（旧版本 -A 追加到 RETURN 之后），就地纠正。
+        local own term
+        own="$(_relay_fw_own_pos "$t" "$chain" "$port" || true)"
+        term="$(_relay_fw_term_pos "$t" "$chain" || true)"
+        if [[ -n "$own" && -n "$term" ]] && (( own >= term )); then
+            $t -w -D "$chain" -p tcp --dport "$port" -s "$allow" \
+                -m comment --comment "xhy-relay-$port" -j ACCEPT >/dev/null 2>&1 || true
+        else
+            printf '%s' "$chain"; return 0
+        fi
+    fi
+    pos="$(_relay_fw_term_pos "$t" "$chain" || true)"
+    if [[ -n "$pos" ]]; then
+        $t -w -I "$chain" "$pos" -p tcp --dport "$port" -s "$allow" \
+            -m comment --comment "xhy-relay-$port" -j ACCEPT >/dev/null 2>&1 \
+            || { relay_say warn "防火墙规则写入失败（$t $chain 第 $pos 行前）" "failed to insert firewall rule ($t $chain before line $pos)"; return 1; }
+    else
+        $t -w -A "$chain" -p tcp --dport "$port" -s "$allow" \
+            -m comment --comment "xhy-relay-$port" -j ACCEPT >/dev/null 2>&1 \
+            || { relay_say warn "防火墙规则写入失败（$t $chain）" "failed to add firewall rule ($t $chain)"; return 1; }
+    fi
     printf '%s' "$chain"
 }
 
@@ -565,12 +609,20 @@ relay_fw_del() {
     return 0
 }
 
+# 「已放行」= 规则存在 且 位置有效。只看 -C 会把排在 RETURN/DROP 之后的死规则
+# 误报成 OK —— relay status 绿灯、链路实际断在那条 RETURN 上。
 relay_fw_present() {
-    local port="$1" allow="$2" t chain
+    local port="$1" allow="$2" t chain own term
     t=iptables; [[ "$allow" == *:* ]] && t=ip6tables
     chain="${RELAY_FW_CHAIN:-$(relay_fw_chain "$t")}"
     $t -w -C "$chain" -p tcp --dport "$port" -s "$allow" \
-        -m comment --comment "xhy-relay-$port" -j ACCEPT >/dev/null 2>&1
+        -m comment --comment "xhy-relay-$port" -j ACCEPT >/dev/null 2>&1 || return 1
+    own="$(_relay_fw_own_pos "$t" "$chain" "$port" || true)"
+    term="$(_relay_fw_term_pos "$t" "$chain" || true)"
+    if [[ -n "$own" && -n "$term" ]] && (( own >= term )); then
+        return 1
+    fi
+    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -911,7 +963,7 @@ relay_status() {
     if [[ "$brief" == "1" ]]; then
         case "$RELAY_ROLE" in
             land)  printf 'relay     : land :%s ← %s\n' "$RELAY_PORT" "$RELAY_ALLOW" ;;
-            entry) printf 'relay     : entry → %s（%s%s）\n' "$RELAY_UPSTREAM" "${RELAY_CATEGORIES:-无分类}" "${RELAY_DOMAINS:+ +$(printf '%s' "$RELAY_DOMAINS" | tr ',' '\n' | wc -l)域}" ;;
+            entry) printf 'relay     : entry → %s（%s%s）\n' "$RELAY_UPSTREAM" "${RELAY_CATEGORIES:-无分类}" "${RELAY_DOMAINS:+ +$(printf '%s\n' "$RELAY_DOMAINS" | tr ',' '\n' | grep -c .)域}" ;;
         esac
         return 0
     fi

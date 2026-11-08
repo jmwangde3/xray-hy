@@ -338,6 +338,12 @@ chk "换角色后 config 无 in-relay"     '! grep -q "in-relay" "$XHY_ETC/confi
 chk "换角色后 config 有 us-relay"     'grep -q "us-relay" "$XHY_ETC/config.json"'
 chk "换角色后仍是合法 JSON"           'json_ok "$XHY_ETC/config.json"'
 
+echo "===== --brief 域名计数（v1.13.2：wc -l 少算最后一个字段） ====="
+relay_entry --to 203.0.113.10:14430 --uuid cnt-uuid-0000 --categories none \
+    --domains "a.com,b.com,c.com" >/dev/null 2>&1
+chk "brief 报 3 个域"                 'relay_status --brief 2>/dev/null | grep -q "+3域"'
+chk "brief 不再差一（不出现 +2域）"    '! relay_status --brief 2>/dev/null | grep -q "+2域"'
+
 echo "===== reapply（快照回滚后兜底） ====="
 relay_entry --to 203.0.113.10:14430 --uuid switch-uuid-0000 --categories openai >/dev/null
 XHY_SKIP_SNAPSHOT=1 rebuild_config >/dev/null 2>&1
