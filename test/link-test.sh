@@ -105,6 +105,20 @@ LINK_QR=0
 link_all >/dev/null
 chk "不带 --qr 时零二维码"          '[[ ! -s "$QR_LOG" ]]'
 
+echo "=== 非节点 env（relay.env）跳过 ==="
+cat >"$XHY_NODES/relay.env" <<'EOF'
+RELAY_ROLE=land
+RELAY_PORT=14430
+RELAY_ALLOW=203.0.113.1
+EOF
+LINK_QR=1; LINK_QR_OUT=""; LINK_QR_MULTI=0
+: >"$QR_LOG"
+link_all >/dev/null
+chk "relay.env 不当节点导出"      '[[ $(grep -c "^CALL" "$QR_LOG") -eq 2 ]]'
+chk "relay.env 不报未知模式"      '! link_all 2>&1 | grep -q "未知模式"'
+chk "link_node_files 只列节点"    '[[ $(link_node_files | wc -l) -eq 2 ]]'
+rm -f "$XHY_NODES/relay.env"
+
 echo "=== cmd_link 静态形状 ==="
 chk "cmd_link 解析 --png"           'grep -q -- "--png" entry/main.sh'
 chk "cmd_link 设置 LINK_QR_MULTI"   'grep -q "LINK_QR_MULTI" entry/main.sh'

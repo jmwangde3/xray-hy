@@ -144,8 +144,8 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.12.2"
-XHY_BUILD="a117ef31c35a"
+XHY_VERSION="1.12.3"
+XHY_BUILD="2ba0e5642dd7"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -163,7 +163,7 @@ fi
 # ===================== lib/common.sh =====================
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.12.2}"
+XHY_VERSION="${XHY_VERSION:-1.12.3}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -4508,6 +4508,18 @@ _link_host() {
     if [[ "$h" == *:* && "$h" != \[* ]]; then printf '[%s]' "$h"; else printf '%s' "$h"; fi
 }
 
+# 节点 env 一定有 MODE= 行；同目录的 relay.env 是中继状态文件（无 MODE），
+# 不是节点。旧版 link_all 把 *.env 全遍历，遇到 relay.env 会让 link_uri 报
+# 「未知模式」并把 xhy link --qr 整个退出码带成 1（落地机必现）。
+link_node_files() {
+    local f
+    for f in "$XHY_NODES"/*.env; do
+        [[ -f "$f" ]] || continue
+        grep -q '^MODE=' "$f" 2>/dev/null || continue
+        printf '%s\n' "$f"
+    done
+}
+
 link_uri() {
     local envf="$1" host_ov="${2:-}" host="" q="" name=""
     node_load "$envf"
@@ -4588,11 +4600,10 @@ link_from_env() {
 
 link_all() {
     local f n=0
-    for f in "$XHY_NODES"/*.env; do
-        [[ -f "$f" ]] || continue
+    while IFS= read -r f; do
         n=$((n + 1))
         link_from_env "$f"
-    done
+    done < <(link_node_files)
     (( n > 0 )) || warn "暂无节点，先用 xhy add 添加一个。"
 }
 
@@ -7324,16 +7335,15 @@ cmd_link() {
     LINK_QR="$qr"; LINK_QR_OUT="$png"; LINK_QR_MULTI=0
     # --uri 只出链接文本，给脚本 / 剪贴板用，不掺二维码。
     if [[ "$want" == "--uri" ]]; then
-        for f in "$XHY_NODES"/*.env; do
-            [[ -f "$f" ]] || continue
+        while IFS= read -r f; do
             link_uri "$f"; n=1
-        done
+        done < <(link_node_files)
         (( n == 1 )) || warn "暂无节点，先用 xhy add 添加一个。"
         return 0
     fi
     if (( ${#pos[@]} == 0 )); then
         # 全节点；--png 时多节点各写一份带 MODE_PORT 后缀的 PNG。
-        for f in "$XHY_NODES"/*.env; do [[ -f "$f" ]] && cnt=$((cnt + 1)); done
+        cnt="$(link_node_files | wc -l | tr -d ' ')"
         (( cnt > 1 )) && [[ -n "$png" ]] && LINK_QR_MULTI=1
         link_all
         return 0

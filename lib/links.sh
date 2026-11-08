@@ -11,6 +11,18 @@ _link_host() {
     if [[ "$h" == *:* && "$h" != \[* ]]; then printf '[%s]' "$h"; else printf '%s' "$h"; fi
 }
 
+# 节点 env 一定有 MODE= 行；同目录的 relay.env 是中继状态文件（无 MODE），
+# 不是节点。旧版 link_all 把 *.env 全遍历，遇到 relay.env 会让 link_uri 报
+# 「未知模式」并把 xhy link --qr 整个退出码带成 1（落地机必现）。
+link_node_files() {
+    local f
+    for f in "$XHY_NODES"/*.env; do
+        [[ -f "$f" ]] || continue
+        grep -q '^MODE=' "$f" 2>/dev/null || continue
+        printf '%s\n' "$f"
+    done
+}
+
 link_uri() {
     local envf="$1" host_ov="${2:-}" host="" q="" name=""
     node_load "$envf"
@@ -91,11 +103,10 @@ link_from_env() {
 
 link_all() {
     local f n=0
-    for f in "$XHY_NODES"/*.env; do
-        [[ -f "$f" ]] || continue
+    while IFS= read -r f; do
         n=$((n + 1))
         link_from_env "$f"
-    done
+    done < <(link_node_files)
     (( n > 0 )) || warn "暂无节点，先用 xhy add 添加一个。"
 }
 

@@ -684,16 +684,15 @@ cmd_link() {
     LINK_QR="$qr"; LINK_QR_OUT="$png"; LINK_QR_MULTI=0
     # --uri 只出链接文本，给脚本 / 剪贴板用，不掺二维码。
     if [[ "$want" == "--uri" ]]; then
-        for f in "$XHY_NODES"/*.env; do
-            [[ -f "$f" ]] || continue
+        while IFS= read -r f; do
             link_uri "$f"; n=1
-        done
+        done < <(link_node_files)
         (( n == 1 )) || warn "暂无节点，先用 xhy add 添加一个。"
         return 0
     fi
     if (( ${#pos[@]} == 0 )); then
         # 全节点；--png 时多节点各写一份带 MODE_PORT 后缀的 PNG。
-        for f in "$XHY_NODES"/*.env; do [[ -f "$f" ]] && cnt=$((cnt + 1)); done
+        cnt="$(link_node_files | wc -l | tr -d ' ')"
         (( cnt > 1 )) && [[ -n "$png" ]] && LINK_QR_MULTI=1
         link_all
         return 0

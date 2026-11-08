@@ -2,6 +2,11 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.12.3 — 2026-11-09
+
+- fix(link): XHY_NODES 目录下的 relay.env 是中继状态文件（无 MODE），旧版 link_all 把它也当节点导出，link_uri 报「未知模式」并让 xhy link --qr / --png 退出码变 1 —— 落地机（硅谷）必现。新增 link_node_files() 只列带 ^MODE= 的 env，link_all / --uri / 多节点计数统一改用它
+- test(link): +3 项 relay.env 跳过断言，link-test 17 -> 20 项，全套回归全绿
+
 ## v1.12.2 — 2026-11-08
 
 - fix(docs): 纠正 geosite 说明 —— 实测官方 release 自带版与 Loyalsoldier 版**标签集几乎一致**（1564 vs 1562 个 tag，openai/category-ai-!cn 两边都有），7.5 MB vs 11.4 MB 的差全在 category-ads-all（905 vs 199451 条）。统一来源的真实收益是「同机两份 geo 不再打架」+ 广告表 220 倍，不是补分类
