@@ -126,7 +126,7 @@ assert "balancers" not in cfg, "balancer must live inside routing, not top level
 b=cfg["routing"]["balancers"][0]
 assert b["tag"]=="us-relay-lb", b
 assert b["selector"]==["us-relay"], b
-assert b["fallbackTag"]=="direct", b
+assert b["fallbackTag"]=="block", b
 assert b["strategy"]["type"]=="leastPing", b
 obs=cfg["burstObservatory"]
 assert obs["subjectSelector"]==["us-relay"], obs
@@ -149,6 +149,19 @@ chk "探活目标 gstatic 204"            'grep -q "generate_204" "$XHY_ETC/conf
 chk "回落配置仍合法"                  'json_ok "$XHY_ETC/config.json"'
 chk "status 报回落 on"                'relay_status | grep -q "回落   : on"'
 chk "test 报回落链路"                 'relay_test 2>/dev/null | grep -q "回落链路在位"'
+chk "默认 fallbackTag=block"          'grep -q "\"fallbackTag\":\"block\"" "$XHY_ETC/config.json"'
+chk "默认绝不回落 direct"             '! grep -q "\"fallbackTag\":\"direct\"" "$XHY_ETC/config.json"'
+chk "block 出站恒存在"                'grep -q "\"protocol\":\"blackhole\",\"tag\":\"block\"" "$XHY_ETC/config.json"'
+chk "relay.env 持久化 fallbackTag"    'grep -q "RELAY_FALLBACK_TAG=block" "$XHY_NODES/relay.env"'
+
+echo "===== v1.14.0：--fallback-tag direct 才恢复旧行为 ====="
+relay_entry --to 203.0.113.10:14430 --uuid fb-uuid-0000 --categories openai \
+    --fallback-tag direct >/dev/null 2>&1
+chk "显式 direct 被接受"              'grep -q "\"fallbackTag\":\"direct\"" "$XHY_ETC/config.json"'
+chk "显式 direct 有告警"              'relay_status 2>/dev/null | grep -q "block\|direct"'
+chk "非法 --fallback-tag 被拒"        '! ( relay_entry --to 203.0.113.10:14430 --uuid u --categories openai --fallback-tag bogus ) >/dev/null 2>&1'
+relay_entry --to 203.0.113.10:14430 --uuid test-uuid-0000 --categories openai >/dev/null 2>&1
+chk "不传参数回到 block"              'grep -q "\"fallbackTag\":\"block\"" "$XHY_ETC/config.json"'
 
 echo "===== --no-fallback / --no-tfo：回到 v1.10.x 行为 ====="
 relay_entry --to 203.0.113.10:14430 --uuid test-uuid-0000 --categories openai \

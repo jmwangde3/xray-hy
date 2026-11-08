@@ -225,6 +225,7 @@ Usage: xhy <command> [options]
   Version & update
     core [status|channel pinned|channel latest|channel vX.Y.Z|update [--force]]
     update [script|core|geodata|config|all]
+    update geodata [--force] [--source loyalsoldier|official]
     update script --yes [--allow-major]   Non-interactive (major bump needs flag)
 
   Backup, export & disk
@@ -351,6 +352,7 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
   版本与更新
     core [status|channel pinned|channel latest|channel vX.Y.Z|update [--force]]
     update [script|core|geodata|config|all]
+    update geodata [--force] [--source loyalsoldier|official]
     update script --yes [--allow-major]   非交互更新（跨主版本需 --allow-major）
 
   备份、导出与磁盘
@@ -893,7 +895,7 @@ main() {
                         script) shift; update_script "$@" ;;
                         core) shift; update_core "$@" ;;
                         geodata) shift; update_geodata "$@" ;; config) update_config ;;
-                        *) die "用法: xhy update [all|script [--yes] [--allow-major]|core [--force]|geodata [--force]|config]" ;;
+                        *) die "用法: xhy update [all|script [--yes] [--allow-major]|core [--force]|geodata [--force] [--source ...]|config]" ;;
                     esac ;;
         service)    case "${1:-status}" in
                         start|stop|restart) "svc_$1" "$SVC_XRAY" ;;

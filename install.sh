@@ -144,8 +144,8 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.13.3"
-XHY_BUILD="83e400ed02ba"
+XHY_VERSION="1.14.0"
+XHY_BUILD="d187e8320f3b"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -163,7 +163,7 @@ fi
 # ===================== lib/common.sh =====================
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.13.3}"
+XHY_VERSION="${XHY_VERSION:-1.14.0}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -1423,11 +1423,50 @@ xray_installed_version() {
     "$XRAY_BIN" version 2>/dev/null | head -1 | awk '{print $2}' | tr -d '\r' || true
 }
 
-# 从官方 Xray release 里取 geodata（v1.13.0 起的默认源）。
+# 从官方 Xray release 里取 geodata（v1.14.0 起为可选源，见 geodata_source）。
 # 官方**不单独发** dat 资产，只随各平台 zip 一起发 —— 所以只能下整包再解出这两个
 # 文件（linux-64 包 16.7 MB，解开后 geosite 7.55 MB + geoip 3.31 MB）。
 # 版本取「本机已装核心的版本」而不是 latest：dat 与核心同源，升核心不会悄悄换数据；
 # 核心没装时退回 latest。校验和沿用 xray_install 的严格口径（.dgst 必需）。
+# geodata 数据源（v1.14.0 起）。拆 protobuf 逐域名实测：Xray 官方 release
+# 自带的 dat 是 Loyalsoldier 版的**真子集**，差异全部是「仅 Loyalsoldier 有」——
+#   google 少 114 条（notebooklm / antigravity / geminiweb-pa / cloudcode-pa /
+#     scholar.google.* 等）、gfw 整个分类缺失（4433 条）、geolocation-!cn
+#     少 3819 条、category-ai-!cn 少 2（grokbot.com / Copilot azure host）、
+#     anthropic 少 1、xai 少 1、github-copilot 少 1、disney 少 2；
+#   官方「多出来」的只有 geolocation-!cn 里 13 条乱码/正则写法差异，实质 0 条。
+# 官方版体积差 3.9 MB 全在 category-ads-all（905 vs 199451 条），但换来的代价
+# 是 AI / Google / gfw 覆盖不全。默认 donc 回到 Loyalsoldier 完整版。
+geodata_source() {
+    local v="${XHY_GEODATA_SOURCE:-loyalsoldier}"
+    [[ "$v" == "loyalsoldier" || "$v" == "official" ]] || v="loyalsoldier"
+    printf '%s' "$v"
+}
+
+# Loyalsoldier 直接单独发两个 dat，不需要下 16.7 MB 整包。
+geodata_install_loyalsoldier() {
+    local f sz
+    for f in geoip.dat geosite.dat; do
+        info "更新 $f（Loyalsoldier 完整版）"
+        if fetch "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/$f" \
+            "$XRAY_ASSET/$f.new"; then
+            sz="$(stat -c%s "$XRAY_ASSET/$f.new" 2>/dev/null || echo 0)"
+            if (( sz < 102400 )); then
+                warn "$f 下载内容异常（${sz} bytes），保留现有文件"
+                rm -f "$XRAY_ASSET/$f.new"
+                continue
+            fi
+            mv -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f"
+            chmod 0644 "$XRAY_ASSET/$f"
+            ok "$f 已更新（$(( sz / 1024 )) KB，Loyalsoldier 版）"
+        else
+            rm -f "$XRAY_ASSET/$f.new"
+            warn "$f 下载失败，保留现有文件"
+        fi
+        [[ -s "$XRAY_ASSET/$f" ]] || warn "$XRAY_ASSET/$f 仍缺失，geoip:private 等规则将不生效"
+    done
+}
+
 geodata_install_official() {
     local ver asset url tmp unpack f sz
     ver="${1:-}"
@@ -1550,11 +1589,10 @@ xray_install() {
         mv -f "$XRAY_BIN.new" "$XRAY_BIN" || die "替换 $XRAY_BIN 失败；原文件未动"
     fi
     sync
-    # geodata 一律取 zip 自带的**官方版**（v1.13.0 起，v1.12.x 曾无条件覆盖成
-    # Loyalsoldier 版）。官方版 7.55 MB / 1564 个 tag，与 Loyalsoldier 版标签集
-    # 几乎一致（1562 个），差的 3.9 MB 全在 category-ads-all（905 vs 199 451 条）；
-    # 常用的是 category-ads / geolocation-!cn / 各 AI 分类，两边条数几乎相同，
-    # 所以没有理由为一张用不到的广告表多占 4 MB、多下一次 16.7 MB 整包。
+    # v1.14.0：zip 自带的官方 dat 先铺好保底，然后按 geodata_source 决定要不要
+    # 覆盖成 Loyalsoldier 完整版（默认）。官方版是它的真子集，缺 gfw 全系、
+    # google 114 条、geolocation-!cn 3819 条、category-ai-!cn 2 条等 ——
+    # 不是「差一张用不到的广告表」，是 AI / Google 覆盖真的少了。
     if [[ "${XHY_SKIP_GEODATA:-0}" == "1" ]]; then
         info "XHY_SKIP_GEODATA=1，保留现有 geodata 不覆盖"
     else
@@ -1564,6 +1602,16 @@ xray_install() {
                 || { rm -f "$XRAY_ASSET/$f.new"; warn "$f 写入失败（磁盘满？），保留旧文件"; continue; }
             mv -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f"
         done
+        if [[ "$(geodata_source)" == "loyalsoldier" ]]; then
+            # 覆盖失败不致命：zip 自带的官方 dat 已就位，xray 仍能起来。
+            if (( $(disk_free_mb /) >= 45 )); then
+                geodata_install_loyalsoldier
+            else
+                warn "磁盘余量 $(disk_free_mb /) MB < 45 MB，跳过 Loyalsoldier 覆盖（保留官方版保底）"
+            fi
+        else
+            info "XHY_GEODATA_SOURCE=official，保留 release 自带的官方版"
+        fi
         for f in geoip.dat geosite.dat; do
             [[ -s "$XRAY_ASSET/$f" ]] || warn "$XRAY_ASSET/$f 缺失，geoip:private 等规则将不生效"
         done
@@ -1632,11 +1680,13 @@ core_status() {
         gssz="$(stat -c%s "$XRAY_ASSET/geosite.dat" 2>/dev/null || echo 0)"
         printf '  geosite.dat %s bytes' "$gssz"
         if [[ "$gssz" =~ ^[0-9]+$ ]]; then
-            # 官方版 7.55 MB；>9 MB 只可能是手工换过的 Loyalsoldier 版
-            # （差在 category-ads-all 条数，用不到就换回官方版）。
+            # >9 MB = Loyalsoldier 完整版（默认）；7.5 MB 上下 = 官方 release
+            # 自带版（真子集，AI / Google / gfw 覆盖不全）；<1 MB = 文件坏了。
             if (( gssz > 9000000 )); then
-                printf '  ← 疑似 Loyalsoldier 版（xhy update geodata --force 换回官方版）'
-            elif (( gssz < 1048576 )); then
+                printf '  ← Loyalsoldier 完整版（默认）'
+            elif (( gssz >= 1048576 )); then
+                printf '  ← 官方版（子集：缺 gfw / google 114 条等，xhy update geodata --force 换回）'
+            else
                 printf '  ⚠ 异常小，跑 xhy update geodata --force 重下'
             fi
         fi
@@ -5365,33 +5415,51 @@ update_core() {
     ok "Xray 更新完成: $("$XRAY_BIN" version 2>/dev/null | head -1)"
 }
 
-# geodata 与核心同源：官方 Xray release 的 dat（v1.13.0 起的默认源）。
-# 官方不单独发 dat 资产，只能下整包解出来，所以：
-#   · 版本跟随已装核心，不跟 latest —— 升核心会顺带刷新 dat，数据不会漂；
-#   · 默认先判「dat 比核心二进制新」就跳过，避免 `xhy update all` 刚装完核心又
-#     多下一次 16.7 MB；要重下用 --force。
+# geodata 默认 = Loyalsoldier 完整版（v1.14.0 起）。官方 release 自带的 dat
+# 是它的真子集（缺 gfw 全系 / google 114 条 / geolocation-!cn 3819 条等），
+# 只在显式 XHY_GEODATA_SOURCE=official 或 --source official 时才取官方版。
+#   · --force 强制重下；否则 dat 比核心新且 1 小时内更新过就跳过，
+#     避免 `xhy update all` 刚装完核心又多下一次 30 MB。
+#   · 官方源仍走整包解出两个 dat（官方不单独发 dat 资产），强制校验 .dgst。
 update_geodata() {
     need_root
-    local force=0 ver
-    case "${1:-}" in
-        --force|-f) force=1 ;;
-        "") ;;
-        *) die "用法: xhy update geodata [--force]" ;;
-    esac
+    local force=0 ver src override=""
+    while (( $# > 0 )); do
+        case "$1" in
+            --force|-f) force=1; shift ;;
+            --source)   (( $# >= 2 )) || die "--source 缺少参数"; override="$2"; shift 2 ;;
+            *) die "用法: xhy update geodata [--force] [--source loyalsoldier|official]" ;;
+        esac
+    done
     install -d -m 0755 "$XRAY_ASSET"
+    if [[ -n "$override" ]]; then
+        [[ "$override" == "loyalsoldier" || "$override" == "official" ]] \
+            || die "--source 只接受 loyalsoldier / official"
+        src="$override"
+    else
+        src="$(geodata_source)"
+    fi
     ver="$(xray_installed_version 2>/dev/null | sed 's/^v//' || true)"
     [[ -n "$ver" && "$ver" != "未安装" ]] || ver="latest"
 
     if (( ! force )) && [[ -s "$XRAY_ASSET/geosite.dat" && -s "$XRAY_ASSET/geoip.dat" ]] \
         && [[ "$XRAY_ASSET/geosite.dat" -nt "$XRAY_BIN" ]]; then
-        ok "geodata 已与核心 v$ver 同源（geosite $(( $(stat -c%s "$XRAY_ASSET/geosite.dat") / 1024 )) KB），跳过；--force 可强制重下"
-        return 0
+        local age=$(( $(date +%s) - $(stat -c%Y "$XRAY_ASSET/geosite.dat" 2>/dev/null || echo 0) ))
+        if (( age < 3600 && age >= 0 )); then
+            ok "geodata 已是 ${src} 版且 ${age}s 前刚更新（geosite $(( $(stat -c%s "$XRAY_ASSET/geosite.dat") / 1024 )) KB），跳过；--force 可强制重下"
+            return 0
+        fi
     fi
 
-    # 整包 16.7 MB + 解出 11 MB，还要余量写 .new。不足就别下，旧文件继续用。
-    disk_need 45 "更新 geodata（约 28 MB）" || die "已中止：现有 geo 数据继续生效"
-    geodata_install_official "$ver"
-    ok "Geodata 更新完成（官方版，Xray $ver）"
+    # Loyalsoldier 两个 dat 约 30 MB，官方整包 16.7 MB + 解出 11 MB，都要余量写 .new。
+    disk_need 45 "更新 geodata（约 30 MB）" || die "已中止：现有 geo 数据继续生效"
+    if [[ "$src" == "loyalsoldier" ]]; then
+        geodata_install_loyalsoldier
+        ok "Geodata 更新完成（Loyalsoldier 完整版）"
+    else
+        geodata_install_official "$ver"
+        ok "Geodata 更新完成（官方版，Xray $ver）"
+    fi
 }
 
 update_config() {
@@ -5648,10 +5716,13 @@ RELAY_DEFAULT_PORT=14430
 RELAY_DEFAULT_CATEGORIES="openai,anthropic,google,tiktok,netflix"
 RELAY_DEFAULT_TAG="us-relay"
 
-# 落地失联自动回落（v1.11.0）：balancer 由 burstObservatory 探活，落地机不可达
-# 时把命中中继规则的连接交给 direct 出站，而不是黑洞掉。宁可拿到东京 IP，
-# 也别让家里的 AI 流量静默全断。
+# 落地失联（v1.14.0 起）：balancer 由 burstObservatory 探活，落地机不可达时
+# 把命中中继规则的连接交给 **block**（blackhole）出站 —— 直接断联。
+# v1.11.0~1.13.x 的 fallbackTag=direct 会让出口 IP 从硅谷切成东京，
+# AI / 流媒体站看到 IP 跳地区会触发风控；这里绝不允许。
+# 要硬死指（连 balancer 都不建）用 --no-fallback；两者都不会东京直出。
 RELAY_FALLBACK_DEFAULT="on"
+RELAY_FALLBACK_TAG_DEFAULT="block"
 RELAY_PROBE_URL_DEFAULT="https://www.gstatic.com/generate_204"
 RELAY_PROBE_INTERVAL_DEFAULT="1m"
 RELAY_PROBE_SAMPLING_DEFAULT="3"
@@ -5663,7 +5734,7 @@ RELAY_UPSTREAM=""; RELAY_CATEGORIES=""; RELAY_FW_CHAIN=""
 RELAY_DOMAINS=""
 RELAY_SECURITY=""; RELAY_SNI=""; RELAY_PIN=""
 RELAY_CERT=""; RELAY_KEY=""; RELAY_GEOIP_US=""; RELAY_TAG=""
-RELAY_FALLBACK=""; RELAY_TFO=""
+RELAY_FALLBACK=""; RELAY_FALLBACK_TAG=""; RELAY_TFO=""
 
 relay_reset_vars() {
     RELAY_ROLE=""; RELAY_PORT=""; RELAY_ALLOW=""; RELAY_UUID=""
@@ -5671,7 +5742,7 @@ relay_reset_vars() {
     RELAY_DOMAINS=""
     RELAY_SECURITY=""; RELAY_SNI=""; RELAY_PIN=""
     RELAY_CERT=""; RELAY_KEY=""; RELAY_GEOIP_US=""; RELAY_TAG=""
-    RELAY_FALLBACK=""; RELAY_TFO=""
+    RELAY_FALLBACK=""; RELAY_FALLBACK_TAG=""; RELAY_TFO=""
 }
 
 # ---------------------------------------------------------------------------
@@ -5706,7 +5777,7 @@ Usage: xhy relay <command> [options]
                           [--categories a,b,c|ai|media|none] [--no-geoip-us]
                           [--domains site.com,domain:x.com,full:y.com,regexp:^z\.]
                           [--no-domains] [--tag TAG]
-                          [--no-fallback] [--no-tfo]
+                          [--fallback-tag block|direct] [--no-fallback] [--no-tfo]
   reapply  Re-inject after the config was rebuilt / restored from a snapshot.
   status   Show this host's role, port, upstream and live checks.
   test     Self-check: config shape, listening port, firewall rule, TCP reachability.
@@ -5725,8 +5796,12 @@ Transport: security=none, always. Both ends are yours and this hop runs on the c
            backbone; client-to-site TLS is already end-to-end, so a second TLS layer
            only costs a handshake per connection and one AES pass per byte on the land.
            --tls/--sni/--pin are retired no-ops, kept only for script compatibility.
-Fallback: on by default. A balancer probes the landing host every 60s and switches
-          to direct when it is unreachable. --no-fallback restores the old hard pin.
+Fallback: on by default. A balancer probes the landing host every 60s. Since
+          v1.14.0 the fallback target is **block** (blackhole): if the landing host
+          dies, relayed traffic is dropped instead of leaking out from the entry
+          host's IP -- no region change for AI/media sites. --fallback-tag direct
+          restores the old (v1.11~1.13) Tokyo-exit behavior; --no-fallback removes
+          the balancer entirely and hard-pins the outbound (also drops, never exits).
 Cloud security group: allow TCP <port> from the entry IP only (iptables is not enough).
 EOF
         return 0
@@ -5742,7 +5817,7 @@ EOF
                           [--categories a,b,c|ai|media|none] [--no-geoip-us]
                           [--domains 站点.com,domain:x.com,full:y.com,regexp:^z\.]
                           [--no-domains] [--tag TAG]
-                          [--no-fallback] [--no-tfo]
+                          [--fallback-tag block|direct] [--no-fallback] [--no-tfo]
   reapply  配置被重建 / 从快照还原后重新注入（改造后一般用不到了，留作兜底）
   status   看本机角色、端口、上游与实时检查
   test     自检：配置形状、端口监听、防火墙规则、TCP 连通性与往返耗时
@@ -5759,8 +5834,10 @@ EOF
 传输：security=none，恒明文。两端自有、走云内网，客户端到目标站的 TLS 已端到端，
       再套一层只多一次握手 + 落地机每字节一遍 AES，还多四个故障面。
       --tls / --sni / --pin 已停用，只保留参数位以免老脚本报错。
-回落：默认开。balancer 每 60s 探活落地机，不可达时切 direct 出站，
-      不会让 AI 分类流量静默黑洞。--no-fallback 回到 v1.10.x 的死指行为。
+回落：默认开，但**失联目标是 block（blackhole）**。balancer 每 60s 探活落地机，
+      硅谷挂掉时命中中继规则的流量直接断联，绝不从东京 IP 直出（避免 AI / 流媒体
+      站看到出口地区跳变触发风控）。--fallback-tag direct 才回到 v1.11~1.13 的
+      「切东京直出」旧行为；--no-fallback 连 balancer 都不建，硬死指出站，同样断联。
 云安全组要单独放行：入方向 TCP <端口>，源只填入口机 IP（只改 iptables 不够）。
 EOF
 }
@@ -5787,6 +5864,7 @@ relay_env_save() {
         [[ -n "$RELAY_GEOIP_US" ]]   && printf 'RELAY_GEOIP_US=%s\n' "$RELAY_GEOIP_US"
         [[ -n "$RELAY_TAG" ]]        && printf 'RELAY_TAG=%s\n' "$RELAY_TAG"
         [[ -n "$RELAY_FALLBACK" ]]   && printf 'RELAY_FALLBACK=%s\n' "$RELAY_FALLBACK"
+        [[ -n "$RELAY_FALLBACK_TAG" ]] && printf 'RELAY_FALLBACK_TAG=%s\n' "$RELAY_FALLBACK_TAG"
         [[ -n "$RELAY_TFO" ]]        && printf 'RELAY_TFO=%s\n' "$RELAY_TFO"
     } | atomic_write "$XHY_NODES/relay.env" 0600 || return 1
     return 0
@@ -6033,6 +6111,15 @@ relay_fallback_on() {
     [[ "${RELAY_FALLBACK:-$RELAY_FALLBACK_DEFAULT}" != "off" ]]
 }
 
+# 落地失联时交给谁。默认 block（blackhole，断联）；只有显式
+# --fallback-tag direct 才回到 v1.11~1.13 的「切东京直出」旧行为 ——
+# 那会把出口 IP 从硅谷换成东京，AI / 流媒体站会看到地区跳变，通常不要。
+relay_fallback_tag() {
+    local t="${RELAY_FALLBACK_TAG:-$RELAY_FALLBACK_TAG_DEFAULT}"
+    [[ "$t" == "block" || "$t" == "direct" ]] || t="block"
+    printf '%s' "$t"
+}
+
 relay_lb_tag() { printf '%s-lb' "$(relay_out_tag)"; }
 
 # 路由规则该指向谁：开了回落指向 balancer，关掉直接指出站（v1.10.x 行为）
@@ -6097,8 +6184,8 @@ extra_routing_rules_json() {
 extra_routing_head_json() {
     relay_entry_active || return 0
     relay_fallback_on || return 0
-    printf '"balancers":[{"tag":"%s","selector":["%s"],"fallbackTag":"direct","strategy":{"type":"leastPing"}}]' \
-        "$(relay_lb_tag)" "$(relay_out_tag)"
+    printf '"balancers":[{"tag":"%s","selector":["%s"],"fallbackTag":"%s","strategy":{"type":"leastPing"}}]' \
+        "$(relay_lb_tag)" "$(relay_out_tag)" "$(relay_fallback_tag)"
 }
 
 # 顶层：探活器。探测目标必须选一个「从落地机看一定可达」的 204 端点，
@@ -6412,7 +6499,7 @@ relay_entry_hint() {
 }
 
 relay_entry() {
-    local upstream="" uuid="" categories="" domains="" domains_set=0 geoip="off" tls=0 sni="" pin="" tag="" fb="" tfo=""
+    local upstream="" uuid="" categories="" domains="" domains_set=0 geoip="off" tls=0 sni="" pin="" tag="" fb="" fbtag="" tfo=""
     while (( $# > 0 )); do
         case "$1" in
             --to)         (( $# >= 2 )) || die "--to 缺少参数"; upstream="$2"; shift 2 ;;
@@ -6428,6 +6515,7 @@ relay_entry() {
             --tag)        (( $# >= 2 )) || die "--tag 缺少参数"; tag="$2"; shift 2 ;;
             --fallback)   (( $# >= 2 )) || die "--fallback 缺少参数"; fb="$2"; shift 2 ;;
             --no-fallback) fb="off"; shift ;;
+            --fallback-tag) (( $# >= 2 )) || die "--fallback-tag 缺少参数"; fbtag="$2"; shift 2 ;;
             --tfo)        (( $# >= 2 )) || die "--tfo 缺少参数"; tfo="$2"; shift 2 ;;
             --no-tfo)     tfo="off"; shift ;;
             -h|--help)    relay_usage; return 0 ;;
@@ -6454,6 +6542,7 @@ relay_entry() {
     [[ "$geoip" == "on" || "$geoip" == "off" ]] || die "--geoip-us 只接受 on / off"
     [[ -n "$tag" ]] && { relay_valid_host "$tag" || die "--tag 不合法: $tag"; }
     [[ -z "$fb" || "$fb" == "on" || "$fb" == "off" ]] || die "--fallback 只接受 on / off"
+    [[ -z "$fbtag" || "$fbtag" == "block" || "$fbtag" == "direct" ]] || die "--fallback-tag 只接受 block / direct"
 
     # 同机原本是 land → 摘掉入站片段与防火墙规则（角色互斥）
     relay_env_load >/dev/null 2>&1 || true
@@ -6479,6 +6568,7 @@ relay_entry() {
     RELAY_GEOIP_US="$geoip"
     RELAY_TAG="$tag"
     RELAY_FALLBACK="${fb:-$RELAY_FALLBACK_DEFAULT}"
+    RELAY_FALLBACK_TAG="${fbtag:-$RELAY_FALLBACK_TAG_DEFAULT}"
     RELAY_TFO="${tfo:-on}"
     RELAY_SECURITY="none"
     RELAY_SNI=""; RELAY_PIN=""; RELAY_CERT=""; RELAY_KEY=""
@@ -6494,11 +6584,17 @@ relay_entry() {
     relay_say info "分类=${categories:-无}  域名规则=${RELAY_DOMAINS:-无}  geoip:us=${geoip}  标签=$(relay_out_tag)" \
                   "categories=${categories:-none}  domains=${RELAY_DOMAINS:-none}  geoip:us=${geoip}  tag=$(relay_out_tag)"
     if relay_fallback_on; then
-        relay_say info "失联回落已开：balancer $(relay_lb_tag) → direct（探活 ${RELAY_PROBE_INTERVAL:-$RELAY_PROBE_INTERVAL_DEFAULT}）" \
-                      "fallback on: balancer $(relay_lb_tag) -> direct (probe ${RELAY_PROBE_INTERVAL:-$RELAY_PROBE_INTERVAL_DEFAULT})"
+        local ftag; ftag="$(relay_fallback_tag)"
+        if [[ "$ftag" == "direct" ]]; then
+            relay_say warn "失联回落 → direct：硅谷挂掉时这些流量会改用东京 IP 直出（AI 站会看到地区跳变）" \
+                          "fallback -> direct: relayed traffic will exit from Tokyo when the landing host dies (region change)"
+        else
+            relay_say ok "失联回落 → block：硅谷挂掉时这些流量直接断联，绝不切东京直出" \
+                        "fallback -> block: relayed traffic is dropped when the landing host dies (no Tokyo exit)"
+        fi
     else
-        relay_say warn "失联回落已关：落地机不可达时这些流量直接断掉，不会切 direct" \
-                      "fallback off: relayed traffic blacks out when the landing host is unreachable"
+        relay_say ok "失联回落已关（--no-fallback）：落地机不可达时这些流量直接断，绝不切东京直出" \
+                    "fallback off: relayed traffic blacks out when the landing host dies (no Tokyo exit)"
     fi
     relay_say info "这一跳恒为明文（security=none），无 TLS 握手 / 无 AES 开销" \
                   "hop is always plaintext (security=none); no TLS handshake, no AES overhead"
@@ -6613,9 +6709,9 @@ relay_status() {
             printf '  geoip  : %s\n' "${RELAY_GEOIP_US:-off}"
             printf '  标签   : %s\n' "$(relay_out_tag)"
             if relay_fallback_on; then
-                fbs="on（$(relay_lb_tag) → direct，探活 $(relay_out_tag)）"
+                fbs="on（$(relay_lb_tag) → $(relay_fallback_tag)，探活 $(relay_out_tag)）"
             else
-                fbs="off（死指 $(relay_out_tag)）"
+                fbs="off（死指 $(relay_out_tag)，失联即断）"
             fi
             printf '  回落   : %s\n' "$fbs"
             printf '  UUID   : %s\n' "$RELAY_UUID"
@@ -6661,9 +6757,13 @@ relay_test() {
         "outbound sockopt present (TFO, tcpNoDelay, keepalive)" \
         || relay_say warn "出站缺 sockopt（每条新连接多一个 TCP 握手）" "outbound lacks sockopt"
     if relay_fallback_on; then
-        relay_config_has "\"$(relay_lb_tag)\"" && relay_say ok "回落链路在位：$(relay_lb_tag) → direct" \
-            "fallback chain present: $(relay_lb_tag) -> direct" \
+        relay_config_has "\"$(relay_lb_tag)\"" && relay_say ok "回落链路在位：$(relay_lb_tag) → $(relay_fallback_tag)" \
+            "fallback chain present: $(relay_lb_tag) -> $(relay_fallback_tag)" \
             || relay_say warn "回落开关是 on 但 config 没有 balancer（xhy relay reapply）" "fallback on but no balancer in config"
+        if [[ "$(relay_fallback_tag)" == "direct" ]]; then
+            relay_say warn "fallbackTag=direct：落地失联会切东京 IP 直出（xhy relay entry --fallback-tag block 可改回断联）" \
+                          "fallbackTag=direct: traffic exits from Tokyo on landing failure (use --fallback-tag block)"
+        fi
         relay_config_has 'burstObservatory' && relay_say ok "探活器 burstObservatory 在位" \
             "prober burstObservatory present" \
             || relay_say warn "缺 burstObservatory：balancer 拿不到延迟数据，回落不会触发" "burstObservatory missing; fallback will not trigger"
@@ -6989,6 +7089,7 @@ Usage: xhy <command> [options]
   Version & update
     core [status|channel pinned|channel latest|channel vX.Y.Z|update [--force]]
     update [script|core|geodata|config|all]
+    update geodata [--force] [--source loyalsoldier|official]
     update script --yes [--allow-major]   Non-interactive (major bump needs flag)
 
   Backup, export & disk
@@ -7115,6 +7216,7 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
   版本与更新
     core [status|channel pinned|channel latest|channel vX.Y.Z|update [--force]]
     update [script|core|geodata|config|all]
+    update geodata [--force] [--source loyalsoldier|official]
     update script --yes [--allow-major]   非交互更新（跨主版本需 --allow-major）
 
   备份、导出与磁盘
@@ -7657,7 +7759,7 @@ main() {
                         script) shift; update_script "$@" ;;
                         core) shift; update_core "$@" ;;
                         geodata) shift; update_geodata "$@" ;; config) update_config ;;
-                        *) die "用法: xhy update [all|script [--yes] [--allow-major]|core [--force]|geodata [--force]|config]" ;;
+                        *) die "用法: xhy update [all|script [--yes] [--allow-major]|core [--force]|geodata [--force] [--source ...]|config]" ;;
                     esac ;;
         service)    case "${1:-status}" in
                         start|stop|restart) "svc_$1" "$SVC_XRAY" ;;

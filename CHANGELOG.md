@@ -2,6 +2,13 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.14.0 — 2026-11-09
+
+- feat(core): geodata 默认源改回 **Loyalsoldier 完整版**（v1.13.x 曾改成官方版）。拆 protobuf 逐域名实测：Xray 官方 release 自带的 dat 是 Loyalsoldier 版的**真子集**，差异全部是「仅 Loyalsoldier 有」—— google 少 114 条（notebooklm / antigravity / geminiweb-pa / cloudcode-pa / scholar.google.* 等）、gfw 整个分类缺失 4433 条、geolocation-!cn 少 3819 条、category-ai-!cn 少 2（grokbot.com / Copilot azure host）、anthropic 少 1、xai 少 1、github-copilot 少 1、disney 少 2；官方「多出来」的只有 geolocation-!cn 里 13 条乱码/正则写法差异，实质 0 条。3.9 MB 的体积差全在 category-ads-all（905 vs 199451），但换来 AI/Google/gfw 覆盖不全，不值。XHY_GEODATA_SOURCE=official 或 --source official 仍可取官方版
+- feat(relay): **落地失联直接断联，绝不东京直出** —— balancer 的 fallbackTag 从 direct 改成 block（blackhole）。v1.11~1.13 的 direct 会让出口 IP 从硅谷 47.88.102.45 变成东京 47.245.14.31，AI/流媒体站看到地区跳变会触发风控。新增 --fallback-tag block|direct（默认 block，显式 direct 才恢复旧行为并告警）；--no-fallback 仍是硬死指，同样断联。RELAY_FALLBACK_TAG 持久化进 relay.env
+- feat(update): xhy update geodata 新增 --source loyalsoldier|official；默认 1 小时内刚更新过就跳过（update all 不重复下 30 MB），--force 强制。xhy core status 现在把 >9 MB 标「Loyalsoldier 完整版（默认）」、官方版标「子集：缺 gfw / google 114 条等」
+- test: geodata-test 31 项（默认源 / --source / env / 1h 跳过 / --force / 非法值回落）；relay-test 137 -> 145 项（fallbackTag=block / 绝不 direct / block 出站存在 / relay.env 持久化 / --fallback-tag direct 恢复旧行为 / 非法值被拒）
+
 ## v1.13.3 — 2026-11-09
 
 - fix(hardening): SSH 守卫改用 --rcheck 在前、--set 在后 —— 旧版先无条件 --set 再 --update --hitcount，撞锁后每个重试包都往滑窗顶时间戳，窗口永远满，越试越锁（实测硅谷单次会话被 DROP 674 次、家宽 IP 在 xt_recent 表里顶满 32 条）；顺序反转后命中 DROP 即停止记录，60 秒滑窗自然滚动，静默等一分钟自动解锁，不再需要 VNC 清表

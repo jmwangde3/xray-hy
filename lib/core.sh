@@ -59,11 +59,50 @@ xray_installed_version() {
     "$XRAY_BIN" version 2>/dev/null | head -1 | awk '{print $2}' | tr -d '\r' || true
 }
 
-# 从官方 Xray release 里取 geodata（v1.13.0 起的默认源）。
+# 从官方 Xray release 里取 geodata（v1.14.0 起为可选源，见 geodata_source）。
 # 官方**不单独发** dat 资产，只随各平台 zip 一起发 —— 所以只能下整包再解出这两个
 # 文件（linux-64 包 16.7 MB，解开后 geosite 7.55 MB + geoip 3.31 MB）。
 # 版本取「本机已装核心的版本」而不是 latest：dat 与核心同源，升核心不会悄悄换数据；
 # 核心没装时退回 latest。校验和沿用 xray_install 的严格口径（.dgst 必需）。
+# geodata 数据源（v1.14.0 起）。拆 protobuf 逐域名实测：Xray 官方 release
+# 自带的 dat 是 Loyalsoldier 版的**真子集**，差异全部是「仅 Loyalsoldier 有」——
+#   google 少 114 条（notebooklm / antigravity / geminiweb-pa / cloudcode-pa /
+#     scholar.google.* 等）、gfw 整个分类缺失（4433 条）、geolocation-!cn
+#     少 3819 条、category-ai-!cn 少 2（grokbot.com / Copilot azure host）、
+#     anthropic 少 1、xai 少 1、github-copilot 少 1、disney 少 2；
+#   官方「多出来」的只有 geolocation-!cn 里 13 条乱码/正则写法差异，实质 0 条。
+# 官方版体积差 3.9 MB 全在 category-ads-all（905 vs 199451 条），但换来的代价
+# 是 AI / Google / gfw 覆盖不全。默认 donc 回到 Loyalsoldier 完整版。
+geodata_source() {
+    local v="${XHY_GEODATA_SOURCE:-loyalsoldier}"
+    [[ "$v" == "loyalsoldier" || "$v" == "official" ]] || v="loyalsoldier"
+    printf '%s' "$v"
+}
+
+# Loyalsoldier 直接单独发两个 dat，不需要下 16.7 MB 整包。
+geodata_install_loyalsoldier() {
+    local f sz
+    for f in geoip.dat geosite.dat; do
+        info "更新 $f（Loyalsoldier 完整版）"
+        if fetch "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/$f" \
+            "$XRAY_ASSET/$f.new"; then
+            sz="$(stat -c%s "$XRAY_ASSET/$f.new" 2>/dev/null || echo 0)"
+            if (( sz < 102400 )); then
+                warn "$f 下载内容异常（${sz} bytes），保留现有文件"
+                rm -f "$XRAY_ASSET/$f.new"
+                continue
+            fi
+            mv -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f"
+            chmod 0644 "$XRAY_ASSET/$f"
+            ok "$f 已更新（$(( sz / 1024 )) KB，Loyalsoldier 版）"
+        else
+            rm -f "$XRAY_ASSET/$f.new"
+            warn "$f 下载失败，保留现有文件"
+        fi
+        [[ -s "$XRAY_ASSET/$f" ]] || warn "$XRAY_ASSET/$f 仍缺失，geoip:private 等规则将不生效"
+    done
+}
+
 geodata_install_official() {
     local ver asset url tmp unpack f sz
     ver="${1:-}"
@@ -186,11 +225,10 @@ xray_install() {
         mv -f "$XRAY_BIN.new" "$XRAY_BIN" || die "替换 $XRAY_BIN 失败；原文件未动"
     fi
     sync
-    # geodata 一律取 zip 自带的**官方版**（v1.13.0 起，v1.12.x 曾无条件覆盖成
-    # Loyalsoldier 版）。官方版 7.55 MB / 1564 个 tag，与 Loyalsoldier 版标签集
-    # 几乎一致（1562 个），差的 3.9 MB 全在 category-ads-all（905 vs 199 451 条）；
-    # 常用的是 category-ads / geolocation-!cn / 各 AI 分类，两边条数几乎相同，
-    # 所以没有理由为一张用不到的广告表多占 4 MB、多下一次 16.7 MB 整包。
+    # v1.14.0：zip 自带的官方 dat 先铺好保底，然后按 geodata_source 决定要不要
+    # 覆盖成 Loyalsoldier 完整版（默认）。官方版是它的真子集，缺 gfw 全系、
+    # google 114 条、geolocation-!cn 3819 条、category-ai-!cn 2 条等 ——
+    # 不是「差一张用不到的广告表」，是 AI / Google 覆盖真的少了。
     if [[ "${XHY_SKIP_GEODATA:-0}" == "1" ]]; then
         info "XHY_SKIP_GEODATA=1，保留现有 geodata 不覆盖"
     else
@@ -200,6 +238,16 @@ xray_install() {
                 || { rm -f "$XRAY_ASSET/$f.new"; warn "$f 写入失败（磁盘满？），保留旧文件"; continue; }
             mv -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f"
         done
+        if [[ "$(geodata_source)" == "loyalsoldier" ]]; then
+            # 覆盖失败不致命：zip 自带的官方 dat 已就位，xray 仍能起来。
+            if (( $(disk_free_mb /) >= 45 )); then
+                geodata_install_loyalsoldier
+            else
+                warn "磁盘余量 $(disk_free_mb /) MB < 45 MB，跳过 Loyalsoldier 覆盖（保留官方版保底）"
+            fi
+        else
+            info "XHY_GEODATA_SOURCE=official，保留 release 自带的官方版"
+        fi
         for f in geoip.dat geosite.dat; do
             [[ -s "$XRAY_ASSET/$f" ]] || warn "$XRAY_ASSET/$f 缺失，geoip:private 等规则将不生效"
         done
@@ -268,11 +316,13 @@ core_status() {
         gssz="$(stat -c%s "$XRAY_ASSET/geosite.dat" 2>/dev/null || echo 0)"
         printf '  geosite.dat %s bytes' "$gssz"
         if [[ "$gssz" =~ ^[0-9]+$ ]]; then
-            # 官方版 7.55 MB；>9 MB 只可能是手工换过的 Loyalsoldier 版
-            # （差在 category-ads-all 条数，用不到就换回官方版）。
+            # >9 MB = Loyalsoldier 完整版（默认）；7.5 MB 上下 = 官方 release
+            # 自带版（真子集，AI / Google / gfw 覆盖不全）；<1 MB = 文件坏了。
             if (( gssz > 9000000 )); then
-                printf '  ← 疑似 Loyalsoldier 版（xhy update geodata --force 换回官方版）'
-            elif (( gssz < 1048576 )); then
+                printf '  ← Loyalsoldier 完整版（默认）'
+            elif (( gssz >= 1048576 )); then
+                printf '  ← 官方版（子集：缺 gfw / google 114 条等，xhy update geodata --force 换回）'
+            else
                 printf '  ⚠ 异常小，跑 xhy update geodata --force 重下'
             fi
         fi

@@ -141,33 +141,51 @@ update_core() {
     ok "Xray 更新完成: $("$XRAY_BIN" version 2>/dev/null | head -1)"
 }
 
-# geodata 与核心同源：官方 Xray release 的 dat（v1.13.0 起的默认源）。
-# 官方不单独发 dat 资产，只能下整包解出来，所以：
-#   · 版本跟随已装核心，不跟 latest —— 升核心会顺带刷新 dat，数据不会漂；
-#   · 默认先判「dat 比核心二进制新」就跳过，避免 `xhy update all` 刚装完核心又
-#     多下一次 16.7 MB；要重下用 --force。
+# geodata 默认 = Loyalsoldier 完整版（v1.14.0 起）。官方 release 自带的 dat
+# 是它的真子集（缺 gfw 全系 / google 114 条 / geolocation-!cn 3819 条等），
+# 只在显式 XHY_GEODATA_SOURCE=official 或 --source official 时才取官方版。
+#   · --force 强制重下；否则 dat 比核心新且 1 小时内更新过就跳过，
+#     避免 `xhy update all` 刚装完核心又多下一次 30 MB。
+#   · 官方源仍走整包解出两个 dat（官方不单独发 dat 资产），强制校验 .dgst。
 update_geodata() {
     need_root
-    local force=0 ver
-    case "${1:-}" in
-        --force|-f) force=1 ;;
-        "") ;;
-        *) die "用法: xhy update geodata [--force]" ;;
-    esac
+    local force=0 ver src override=""
+    while (( $# > 0 )); do
+        case "$1" in
+            --force|-f) force=1; shift ;;
+            --source)   (( $# >= 2 )) || die "--source 缺少参数"; override="$2"; shift 2 ;;
+            *) die "用法: xhy update geodata [--force] [--source loyalsoldier|official]" ;;
+        esac
+    done
     install -d -m 0755 "$XRAY_ASSET"
+    if [[ -n "$override" ]]; then
+        [[ "$override" == "loyalsoldier" || "$override" == "official" ]] \
+            || die "--source 只接受 loyalsoldier / official"
+        src="$override"
+    else
+        src="$(geodata_source)"
+    fi
     ver="$(xray_installed_version 2>/dev/null | sed 's/^v//' || true)"
     [[ -n "$ver" && "$ver" != "未安装" ]] || ver="latest"
 
     if (( ! force )) && [[ -s "$XRAY_ASSET/geosite.dat" && -s "$XRAY_ASSET/geoip.dat" ]] \
         && [[ "$XRAY_ASSET/geosite.dat" -nt "$XRAY_BIN" ]]; then
-        ok "geodata 已与核心 v$ver 同源（geosite $(( $(stat -c%s "$XRAY_ASSET/geosite.dat") / 1024 )) KB），跳过；--force 可强制重下"
-        return 0
+        local age=$(( $(date +%s) - $(stat -c%Y "$XRAY_ASSET/geosite.dat" 2>/dev/null || echo 0) ))
+        if (( age < 3600 && age >= 0 )); then
+            ok "geodata 已是 ${src} 版且 ${age}s 前刚更新（geosite $(( $(stat -c%s "$XRAY_ASSET/geosite.dat") / 1024 )) KB），跳过；--force 可强制重下"
+            return 0
+        fi
     fi
 
-    # 整包 16.7 MB + 解出 11 MB，还要余量写 .new。不足就别下，旧文件继续用。
-    disk_need 45 "更新 geodata（约 28 MB）" || die "已中止：现有 geo 数据继续生效"
-    geodata_install_official "$ver"
-    ok "Geodata 更新完成（官方版，Xray $ver）"
+    # Loyalsoldier 两个 dat 约 30 MB，官方整包 16.7 MB + 解出 11 MB，都要余量写 .new。
+    disk_need 45 "更新 geodata（约 30 MB）" || die "已中止：现有 geo 数据继续生效"
+    if [[ "$src" == "loyalsoldier" ]]; then
+        geodata_install_loyalsoldier
+        ok "Geodata 更新完成（Loyalsoldier 完整版）"
+    else
+        geodata_install_official "$ver"
+        ok "Geodata 更新完成（官方版，Xray $ver）"
+    fi
 }
 
 update_config() {
