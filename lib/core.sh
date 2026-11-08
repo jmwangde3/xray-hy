@@ -59,6 +59,54 @@ xray_installed_version() {
     "$XRAY_BIN" version 2>/dev/null | head -1 | awk '{print $2}' | tr -d '\r' || true
 }
 
+# 从官方 Xray release 里取 geodata（v1.13.0 起的默认源）。
+# 官方**不单独发** dat 资产，只随各平台 zip 一起发 —— 所以只能下整包再解出这两个
+# 文件（linux-64 包 16.7 MB，解开后 geosite 7.55 MB + geoip 3.31 MB）。
+# 版本取「本机已装核心的版本」而不是 latest：dat 与核心同源，升核心不会悄悄换数据；
+# 核心没装时退回 latest。校验和沿用 xray_install 的严格口径（.dgst 必需）。
+geodata_install_official() {
+    local ver asset tmp unpack f sz
+    ver="${1#v}"
+    [[ -n "$ver" ]] || ver="latest"
+    asset="Xray-linux-${XHY_ARCH}.zip"
+    tmp="$(mktemp -d)" || die "无法创建临时目录"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$tmp'" RETURN
+
+    info "下载官方 geodata（取自 Xray $ver 的 $asset）"
+    fetch "${XHY_RELEASE_DL}/${ver}/${asset}" "$tmp/$asset" \
+        || die "geodata 下载失败（Xray $ver 的 $asset 是否存在？）"
+    fetch "${XHY_RELEASE_DL}/${ver}/${asset}.dgst" "$tmp/$asset.dgst" \
+        || die "摘要文件下载失败，拒绝安装未校验的 geodata"
+    verify_release_digest "$tmp/$asset.dgst" "$tmp/$asset" || die "geodata 校验失败，已中止"
+
+    mkdir -p "$tmp/unpack"
+    if have_cmd unzip; then
+        unzip -o -q "$tmp/$asset" -d "$tmp/unpack" geosite.dat geoip.dat || die "解压 geodata 失败"
+    else
+        busybox unzip -o -q "$tmp/$asset" -d "$tmp/unpack" geosite.dat geoip.dat || die "解压 geodata 失败"
+    fi
+
+    install -d -m 0755 "$XRAY_ASSET"
+    for f in geoip.dat geosite.dat; do
+        if [[ ! -s "$tmp/unpack/$f" ]]; then
+            warn "$asset 里没有 $f，保留现有文件"
+            continue
+        fi
+        sz="$(stat -c%s "$tmp/unpack/$f" 2>/dev/null || echo 0)"
+        if (( sz < 102400 )); then
+            warn "$f 大小异常（${sz} bytes），保留现有文件"
+            continue
+        fi
+        install -m 0644 "$tmp/unpack/$f" "$XRAY_ASSET/$f.new" 2>/dev/null \
+            || { rm -f "$XRAY_ASSET/$f.new"; warn "$f 写入失败（磁盘满？），保留旧文件"; continue; }
+        mv -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f" || { warn "$f 替换失败"; continue; }
+        ok "$f 已更新（$(( sz / 1024 )) KB，官方版）"
+    done
+    rm -rf "$tmp"
+    trap - RETURN
+}
+
 # Download a pinned-or-latest Xray release. The .dgst checksum is MANDATORY:
 # unlike most one-key scripts, a missing digest aborts instead of continuing.
 #
@@ -129,48 +177,23 @@ xray_install() {
         mv -f "$XRAY_BIN.new" "$XRAY_BIN" || die "替换 $XRAY_BIN 失败；原文件未动"
     fi
     sync
-    for f in geoip.dat geosite.dat; do
-        [[ -s "$unpack/$f" ]] || continue
-        install -m 0644 "$unpack/$f" "$XRAY_ASSET/$f.new" 2>/dev/null \
-            || { rm -f "$XRAY_ASSET/$f.new"; warn "$f 写入失败（磁盘满？），保留旧文件"; continue; }
-        mv -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f"
-    done
-
-    # v1.12.0：统一 geodata 来源。**注意两份的标签集几乎一样**（实测官方 zip
-    # 自带 1564 个 tag、Loyalsoldier 1562 个，openai / anthropic / category-ai-!cn
-    # 等分类两边都有），体积差 4 MB 几乎全部来自 category-ads-all：
-    # 官方 905 条 vs Loyalsoldier 199451 条。之所以仍然统一到 Loyalsoldier：
-    #   ① `xhy update geodata` 本来就用它，而 install 用 zip 自带的，
-    #      同一台机器上跑不同命令会得到两份不同的 geo，排障时对不上；
-    #   ② 那 19.9 万条广告表让 `geosite:category-ads-all -> block` 真正有效。
-    # 磁盘余量 <60 MB 或 XHY_SKIP_GEODATA=1 时跳过，失败只告警不中断。
+    # geodata 一律取 zip 自带的**官方版**（v1.13.0 起，v1.12.x 曾无条件覆盖成
+    # Loyalsoldier 版）。官方版 7.55 MB / 1564 个 tag，与 Loyalsoldier 版标签集
+    # 几乎一致（1562 个），差的 3.9 MB 全在 category-ads-all（905 vs 199 451 条）；
+    # 常用的是 category-ads / geolocation-!cn / 各 AI 分类，两边条数几乎相同，
+    # 所以没有理由为一张用不到的广告表多占 4 MB、多下一次 16.7 MB 整包。
     if [[ "${XHY_SKIP_GEODATA:-0}" == "1" ]]; then
-        info "XHY_SKIP_GEODATA=1，保留 release 自带的 geodata"
-        for f in geoip.dat geosite.dat; do
-            [[ -s "$XRAY_ASSET/$f" ]] || warn "$XRAY_ASSET/$f 缺失（已按跳过处理），geoip:private 等规则将不生效"
-        done
-    elif (( $(disk_free_mb /) >= 60 )); then
-        local gf gsz
-        for gf in geoip.dat geosite.dat; do
-            info "更新 $gf（完整版）"
-            if fetch "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/$gf" \
-                "$XRAY_ASSET/$gf.new"; then
-                gsz="$(stat -c%s "$XRAY_ASSET/$gf.new" 2>/dev/null || echo 0)"
-                if (( gsz < 102400 )); then
-                    warn "$gf 下载内容异常（${gsz} bytes），保留现有文件"
-                    rm -f "$XRAY_ASSET/$gf.new"
-                else
-                    mv -f "$XRAY_ASSET/$gf.new" "$XRAY_ASSET/$gf"
-                    chmod 0644 "$XRAY_ASSET/$gf"
-                fi
-            else
-                rm -f "$XRAY_ASSET/$gf.new"
-                warn "$gf 下载失败，保留现有文件"
-            fi
-            [[ -s "$XRAY_ASSET/$gf" ]] || warn "$XRAY_ASSET/$gf 仍缺失，相关路由规则将不生效"
-        done
+        info "XHY_SKIP_GEODATA=1，保留现有 geodata 不覆盖"
     else
-        warn "磁盘余量 $(disk_free_mb /) MB < 60 MB，跳过 geodata 更新（保留现有文件）"
+        for f in geoip.dat geosite.dat; do
+            [[ -s "$unpack/$f" ]] || continue
+            install -m 0644 "$unpack/$f" "$XRAY_ASSET/$f.new" 2>/dev/null \
+                || { rm -f "$XRAY_ASSET/$f.new"; warn "$f 写入失败（磁盘满？），保留旧文件"; continue; }
+            mv -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f"
+        done
+        for f in geoip.dat geosite.dat; do
+            [[ -s "$XRAY_ASSET/$f" ]] || warn "$XRAY_ASSET/$f 缺失，geoip:private 等规则将不生效"
+        done
     fi
 
     if [[ "v$got" != "$ver" ]]; then
@@ -235,10 +258,14 @@ core_status() {
         local gssz
         gssz="$(stat -c%s "$XRAY_ASSET/geosite.dat" 2>/dev/null || echo 0)"
         printf '  geosite.dat %s bytes' "$gssz"
-        # 低于 9 MB = release zip 自带的那份。分类标签和 Loyalsoldier 版一样，
-        # 差别只在 category-ads-all 的条数（905 vs 199451），所以只是提示。
-        if [[ "$gssz" =~ ^[0-9]+$ ]] && (( gssz < 9000000 )); then
-            printf '  ← release 自带版（category-ads-all 仅 905 条，xhy update geodata 可换 19.9 万条版）'
+        if [[ "$gssz" =~ ^[0-9]+$ ]]; then
+            # 官方版 7.55 MB；>9 MB 只可能是手工换过的 Loyalsoldier 版
+            # （差在 category-ads-all 条数，用不到就换回官方版）。
+            if (( gssz > 9000000 )); then
+                printf '  ← 疑似 Loyalsoldier 版（xhy update geodata --force 换回官方版）'
+            elif (( gssz < 1048576 )); then
+                printf '  ⚠ 异常小，跑 xhy update geodata --force 重下'
+            fi
         fi
         printf '\n'
     fi

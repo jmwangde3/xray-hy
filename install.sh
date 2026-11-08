@@ -144,8 +144,8 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.12.3"
-XHY_BUILD="2ba0e5642dd7"
+XHY_VERSION="1.13.0"
+XHY_BUILD="f967570c5991"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -163,7 +163,7 @@ fi
 # ===================== lib/common.sh =====================
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.12.3}"
+XHY_VERSION="${XHY_VERSION:-1.13.0}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -1423,6 +1423,54 @@ xray_installed_version() {
     "$XRAY_BIN" version 2>/dev/null | head -1 | awk '{print $2}' | tr -d '\r' || true
 }
 
+# 从官方 Xray release 里取 geodata（v1.13.0 起的默认源）。
+# 官方**不单独发** dat 资产，只随各平台 zip 一起发 —— 所以只能下整包再解出这两个
+# 文件（linux-64 包 16.7 MB，解开后 geosite 7.55 MB + geoip 3.31 MB）。
+# 版本取「本机已装核心的版本」而不是 latest：dat 与核心同源，升核心不会悄悄换数据；
+# 核心没装时退回 latest。校验和沿用 xray_install 的严格口径（.dgst 必需）。
+geodata_install_official() {
+    local ver asset tmp unpack f sz
+    ver="${1#v}"
+    [[ -n "$ver" ]] || ver="latest"
+    asset="Xray-linux-${XHY_ARCH}.zip"
+    tmp="$(mktemp -d)" || die "无法创建临时目录"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$tmp'" RETURN
+
+    info "下载官方 geodata（取自 Xray $ver 的 $asset）"
+    fetch "${XHY_RELEASE_DL}/${ver}/${asset}" "$tmp/$asset" \
+        || die "geodata 下载失败（Xray $ver 的 $asset 是否存在？）"
+    fetch "${XHY_RELEASE_DL}/${ver}/${asset}.dgst" "$tmp/$asset.dgst" \
+        || die "摘要文件下载失败，拒绝安装未校验的 geodata"
+    verify_release_digest "$tmp/$asset.dgst" "$tmp/$asset" || die "geodata 校验失败，已中止"
+
+    mkdir -p "$tmp/unpack"
+    if have_cmd unzip; then
+        unzip -o -q "$tmp/$asset" -d "$tmp/unpack" geosite.dat geoip.dat || die "解压 geodata 失败"
+    else
+        busybox unzip -o -q "$tmp/$asset" -d "$tmp/unpack" geosite.dat geoip.dat || die "解压 geodata 失败"
+    fi
+
+    install -d -m 0755 "$XRAY_ASSET"
+    for f in geoip.dat geosite.dat; do
+        if [[ ! -s "$tmp/unpack/$f" ]]; then
+            warn "$asset 里没有 $f，保留现有文件"
+            continue
+        fi
+        sz="$(stat -c%s "$tmp/unpack/$f" 2>/dev/null || echo 0)"
+        if (( sz < 102400 )); then
+            warn "$f 大小异常（${sz} bytes），保留现有文件"
+            continue
+        fi
+        install -m 0644 "$tmp/unpack/$f" "$XRAY_ASSET/$f.new" 2>/dev/null \
+            || { rm -f "$XRAY_ASSET/$f.new"; warn "$f 写入失败（磁盘满？），保留旧文件"; continue; }
+        mv -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f" || { warn "$f 替换失败"; continue; }
+        ok "$f 已更新（$(( sz / 1024 )) KB，官方版）"
+    done
+    rm -rf "$tmp"
+    trap - RETURN
+}
+
 # Download a pinned-or-latest Xray release. The .dgst checksum is MANDATORY:
 # unlike most one-key scripts, a missing digest aborts instead of continuing.
 #
@@ -1493,48 +1541,23 @@ xray_install() {
         mv -f "$XRAY_BIN.new" "$XRAY_BIN" || die "替换 $XRAY_BIN 失败；原文件未动"
     fi
     sync
-    for f in geoip.dat geosite.dat; do
-        [[ -s "$unpack/$f" ]] || continue
-        install -m 0644 "$unpack/$f" "$XRAY_ASSET/$f.new" 2>/dev/null \
-            || { rm -f "$XRAY_ASSET/$f.new"; warn "$f 写入失败（磁盘满？），保留旧文件"; continue; }
-        mv -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f"
-    done
-
-    # v1.12.0：统一 geodata 来源。**注意两份的标签集几乎一样**（实测官方 zip
-    # 自带 1564 个 tag、Loyalsoldier 1562 个，openai / anthropic / category-ai-!cn
-    # 等分类两边都有），体积差 4 MB 几乎全部来自 category-ads-all：
-    # 官方 905 条 vs Loyalsoldier 199451 条。之所以仍然统一到 Loyalsoldier：
-    #   ① `xhy update geodata` 本来就用它，而 install 用 zip 自带的，
-    #      同一台机器上跑不同命令会得到两份不同的 geo，排障时对不上；
-    #   ② 那 19.9 万条广告表让 `geosite:category-ads-all -> block` 真正有效。
-    # 磁盘余量 <60 MB 或 XHY_SKIP_GEODATA=1 时跳过，失败只告警不中断。
+    # geodata 一律取 zip 自带的**官方版**（v1.13.0 起，v1.12.x 曾无条件覆盖成
+    # Loyalsoldier 版）。官方版 7.55 MB / 1564 个 tag，与 Loyalsoldier 版标签集
+    # 几乎一致（1562 个），差的 3.9 MB 全在 category-ads-all（905 vs 199 451 条）；
+    # 常用的是 category-ads / geolocation-!cn / 各 AI 分类，两边条数几乎相同，
+    # 所以没有理由为一张用不到的广告表多占 4 MB、多下一次 16.7 MB 整包。
     if [[ "${XHY_SKIP_GEODATA:-0}" == "1" ]]; then
-        info "XHY_SKIP_GEODATA=1，保留 release 自带的 geodata"
-        for f in geoip.dat geosite.dat; do
-            [[ -s "$XRAY_ASSET/$f" ]] || warn "$XRAY_ASSET/$f 缺失（已按跳过处理），geoip:private 等规则将不生效"
-        done
-    elif (( $(disk_free_mb /) >= 60 )); then
-        local gf gsz
-        for gf in geoip.dat geosite.dat; do
-            info "更新 $gf（完整版）"
-            if fetch "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/$gf" \
-                "$XRAY_ASSET/$gf.new"; then
-                gsz="$(stat -c%s "$XRAY_ASSET/$gf.new" 2>/dev/null || echo 0)"
-                if (( gsz < 102400 )); then
-                    warn "$gf 下载内容异常（${gsz} bytes），保留现有文件"
-                    rm -f "$XRAY_ASSET/$gf.new"
-                else
-                    mv -f "$XRAY_ASSET/$gf.new" "$XRAY_ASSET/$gf"
-                    chmod 0644 "$XRAY_ASSET/$gf"
-                fi
-            else
-                rm -f "$XRAY_ASSET/$gf.new"
-                warn "$gf 下载失败，保留现有文件"
-            fi
-            [[ -s "$XRAY_ASSET/$gf" ]] || warn "$XRAY_ASSET/$gf 仍缺失，相关路由规则将不生效"
-        done
+        info "XHY_SKIP_GEODATA=1，保留现有 geodata 不覆盖"
     else
-        warn "磁盘余量 $(disk_free_mb /) MB < 60 MB，跳过 geodata 更新（保留现有文件）"
+        for f in geoip.dat geosite.dat; do
+            [[ -s "$unpack/$f" ]] || continue
+            install -m 0644 "$unpack/$f" "$XRAY_ASSET/$f.new" 2>/dev/null \
+                || { rm -f "$XRAY_ASSET/$f.new"; warn "$f 写入失败（磁盘满？），保留旧文件"; continue; }
+            mv -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f"
+        done
+        for f in geoip.dat geosite.dat; do
+            [[ -s "$XRAY_ASSET/$f" ]] || warn "$XRAY_ASSET/$f 缺失，geoip:private 等规则将不生效"
+        done
     fi
 
     if [[ "v$got" != "$ver" ]]; then
@@ -1599,10 +1622,14 @@ core_status() {
         local gssz
         gssz="$(stat -c%s "$XRAY_ASSET/geosite.dat" 2>/dev/null || echo 0)"
         printf '  geosite.dat %s bytes' "$gssz"
-        # 低于 9 MB = release zip 自带的那份。分类标签和 Loyalsoldier 版一样，
-        # 差别只在 category-ads-all 的条数（905 vs 199451），所以只是提示。
-        if [[ "$gssz" =~ ^[0-9]+$ ]] && (( gssz < 9000000 )); then
-            printf '  ← release 自带版（category-ads-all 仅 905 条，xhy update geodata 可换 19.9 万条版）'
+        if [[ "$gssz" =~ ^[0-9]+$ ]]; then
+            # 官方版 7.55 MB；>9 MB 只可能是手工换过的 Loyalsoldier 版
+            # （差在 category-ads-all 条数，用不到就换回官方版）。
+            if (( gssz > 9000000 )); then
+                printf '  ← 疑似 Loyalsoldier 版（xhy update geodata --force 换回官方版）'
+            elif (( gssz < 1048576 )); then
+                printf '  ⚠ 异常小，跑 xhy update geodata --force 重下'
+            fi
         fi
         printf '\n'
     fi
@@ -3590,8 +3617,11 @@ routing_json() {
         rules+=('{"type":"field","ip":["geoip:private"],"outboundTag":"block"}')
     [[ "$(state_get BLOCK_CN off)" == "on" ]] && \
         rules+=('{"type":"field","ip":["geoip:cn"],"outboundTag":"block"}')
+    # v1.13.0：官方 geosite 的 category-ads-all 只有 905 条（Loyalsoldier 版 199 451
+    # 条），单靠它会漏掉一大批。带上 category-ads（官方 845 / Loyalsoldier 849，
+    # 两边几乎一致），官方版也能挡住主体，不依赖某一家的大表。
     [[ "$(state_get BLOCK_ADS off)" == "on" ]] && \
-        rules+=('{"type":"field","domain":["geosite:category-ads-all"],"outboundTag":"block"}')
+        rules+=('{"type":"field","domain":["geosite:category-ads","geosite:category-ads-all"],"outboundTag":"block"}')
     local joined="" sep=""
     local r
     for r in "${rules[@]}"; do joined+="$sep$r"; sep=","; done
@@ -5309,31 +5339,33 @@ update_core() {
     ok "Xray 更新完成: $("$XRAY_BIN" version 2>/dev/null | head -1)"
 }
 
+# geodata 与核心同源：官方 Xray release 的 dat（v1.13.0 起的默认源）。
+# 官方不单独发 dat 资产，只能下整包解出来，所以：
+#   · 版本跟随已装核心，不跟 latest —— 升核心会顺带刷新 dat，数据不会漂；
+#   · 默认先判「dat 比核心二进制新」就跳过，避免 `xhy update all` 刚装完核心又
+#     多下一次 16.7 MB；要重下用 --force。
 update_geodata() {
     need_root
-    local f
+    local force=0 ver
+    case "${1:-}" in
+        --force|-f) force=1 ;;
+        "") ;;
+        *) die "用法: xhy update geodata [--force]" ;;
+    esac
     install -d -m 0755 "$XRAY_ASSET"
-    # 两个 dat 解开后约 30 MB，还要余量给 .new。不足就别下，旧文件继续用。
-    disk_need 45 "更新 geodata（约 30 MB）" || die "已中止：现有 geo 数据继续生效"
-    for f in geoip.dat geosite.dat; do
-        info "更新 $f"
-        if fetch "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/$f" "$XRAY_ASSET/$f.new"; then
-            local sz
-            sz="$(stat -c%s "$XRAY_ASSET/$f.new" 2>/dev/null || echo 0)"
-            if (( sz < 102400 )); then
-                warn "$f 下载内容异常 (${sz} bytes)，保留旧文件"
-                rm -f "$XRAY_ASSET/$f.new"
-                continue
-            fi
-            backup_file "$XRAY_ASSET/$f"
-            mv "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f"
-            chmod 0644 "$XRAY_ASSET/$f"
-        else
-            rm -f "$XRAY_ASSET/$f.new"
-            warn "$f 更新失败，保留旧文件"
-        fi
-    done
-    ok "Geodata 更新完成"
+    ver="$(xray_installed_version 2>/dev/null | sed 's/^v//' || true)"
+    [[ -n "$ver" && "$ver" != "未安装" ]] || ver="latest"
+
+    if (( ! force )) && [[ -s "$XRAY_ASSET/geosite.dat" && -s "$XRAY_ASSET/geoip.dat" ]] \
+        && [[ "$XRAY_ASSET/geosite.dat" -nt "$XRAY_BIN" ]]; then
+        ok "geodata 已与核心 v$ver 同源（geosite $(( $(stat -c%s "$XRAY_ASSET/geosite.dat") / 1024 )) KB），跳过；--force 可强制重下"
+        return 0
+    fi
+
+    # 整包 16.7 MB + 解出 11 MB，还要余量写 .new。不足就别下，旧文件继续用。
+    disk_need 45 "更新 geodata（约 28 MB）" || die "已中止：现有 geo 数据继续生效"
+    geodata_install_official "$ver"
+    ok "Geodata 更新完成（官方版，Xray $ver）"
 }
 
 update_config() {
@@ -5349,6 +5381,7 @@ update_config() {
 update_all() {
     update_script || true
     update_core
+    # 核心安装已把官方 dat 一起铺好（zip 自带），这里只兜底「核心没变动 / 数据缺失」。
     update_geodata
     update_config
     self_check
@@ -5690,9 +5723,10 @@ EOF
   export   打印对端要执行的那条命令（以及 vless:// 链接）
   del      移除本机 relay 配置、防火墙规则、入站片段
 
-域名规则：--domains 收明文规则，专治 geosite 里没分类的站（精简版 geosite.dat 缺
-      一大堆，比如 character.ai / suno.com）。裸域名 = domain:（含子域），也认
-      domain:/full:/keyword:/regexp:/geosite: 前缀。存进 relay.env，--no-domains 清空。
+域名规则：--domains 收明文规则，专治"任何 geosite 分类里都没有"的站（官方版和
+      Loyalsoldier 版都一样，比如 character.ai / suno.com / replicate.com）。
+      裸域名 = domain:（含子域），也认 domain:/full:/keyword:/regexp:/geosite:
+      前缀。存进 relay.env，--no-domains 清空。
 默认值：端口 14430、分类 openai,anthropic,google,tiktok,netflix、出站标签 us-relay、
       geoip:us 默认 off（只按 geosite 分类转发，不再把美国 CDN IP 全量绕中继）；
       要恢复旧行为必须显式 --geoip-us on，--no-geoip-us 保留为等价别名。
@@ -5799,9 +5833,10 @@ relay_norm_categories() {
     printf '%s' "$out"
 }
 
-# 明文域名规则（v1.12.0）。geosite 是别人维护的清单，总有站点没进分类——尤其
-# 精简版 geosite.dat（部分镜像只带 category-ai-!cn 的子集，连 category-ai-!cn
-# 这个名字本身都不在）。这类站只能靠明文规则兜：--domains 允许
+# 明文域名规则（v1.12.0）。geosite 是别人维护的清单，总有站点没进任何分类——
+# 实测 character.ai / replicate.com / suno.com / runwayml.com 在官方版和
+# Loyalsoldier 版里都只出现在 geolocation-!cn / gfw，不在 AI 分类里。这类站
+# 只能靠明文规则兜：--domains 允许
 #   bare.com                  → domain:bare.com（裸域名 = 含子域，最常用）
 #   domain:x.com / full:x.com / keyword:xx / regexp:^a\.b$ / geosite:tag
 # 全部拼进同一条 domain 数组，命中即转发，顺序无影响。
@@ -7442,7 +7477,7 @@ EOF
            14) local ua; ua="$(ask 'all / script / core / geodata / config' 'all')"
                case "$ua" in
                    all) update_all ;; script) update_script ;; core) update_core ;;
-                   geodata) update_geodata ;; config) update_config ;;
+                   geodata) shift; update_geodata "$@" ;; config) update_config ;;
                esac ;;
            15) cmd_uninstall; return 0 ;;
            16) local ba
@@ -7543,8 +7578,8 @@ main() {
                         all) update_all ;;
                         script) shift; update_script "$@" ;;
                         core) shift; update_core "$@" ;;
-                        geodata) update_geodata ;; config) update_config ;;
-                        *) die "用法: xhy update [all|script [--yes] [--allow-major]|core [--force]|geodata|config]" ;;
+                        geodata) shift; update_geodata "$@" ;; config) update_config ;;
+                        *) die "用法: xhy update [all|script [--yes] [--allow-major]|core [--force]|geodata [--force]|config]" ;;
                     esac ;;
         service)    case "${1:-status}" in
                         start|stop|restart) "svc_$1" "$SVC_XRAY" ;;

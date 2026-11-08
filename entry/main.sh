@@ -791,7 +791,7 @@ EOF
            14) local ua; ua="$(ask 'all / script / core / geodata / config' 'all')"
                case "$ua" in
                    all) update_all ;; script) update_script ;; core) update_core ;;
-                   geodata) update_geodata ;; config) update_config ;;
+                   geodata) shift; update_geodata "$@" ;; config) update_config ;;
                esac ;;
            15) cmd_uninstall; return 0 ;;
            16) local ba
@@ -892,8 +892,8 @@ main() {
                         all) update_all ;;
                         script) shift; update_script "$@" ;;
                         core) shift; update_core "$@" ;;
-                        geodata) update_geodata ;; config) update_config ;;
-                        *) die "用法: xhy update [all|script [--yes] [--allow-major]|core [--force]|geodata|config]" ;;
+                        geodata) shift; update_geodata "$@" ;; config) update_config ;;
+                        *) die "用法: xhy update [all|script [--yes] [--allow-major]|core [--force]|geodata [--force]|config]" ;;
                     esac ;;
         service)    case "${1:-status}" in
                         start|stop|restart) "svc_$1" "$SVC_XRAY" ;;

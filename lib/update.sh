@@ -141,31 +141,33 @@ update_core() {
     ok "Xray 更新完成: $("$XRAY_BIN" version 2>/dev/null | head -1)"
 }
 
+# geodata 与核心同源：官方 Xray release 的 dat（v1.13.0 起的默认源）。
+# 官方不单独发 dat 资产，只能下整包解出来，所以：
+#   · 版本跟随已装核心，不跟 latest —— 升核心会顺带刷新 dat，数据不会漂；
+#   · 默认先判「dat 比核心二进制新」就跳过，避免 `xhy update all` 刚装完核心又
+#     多下一次 16.7 MB；要重下用 --force。
 update_geodata() {
     need_root
-    local f
+    local force=0 ver
+    case "${1:-}" in
+        --force|-f) force=1 ;;
+        "") ;;
+        *) die "用法: xhy update geodata [--force]" ;;
+    esac
     install -d -m 0755 "$XRAY_ASSET"
-    # 两个 dat 解开后约 30 MB，还要余量给 .new。不足就别下，旧文件继续用。
-    disk_need 45 "更新 geodata（约 30 MB）" || die "已中止：现有 geo 数据继续生效"
-    for f in geoip.dat geosite.dat; do
-        info "更新 $f"
-        if fetch "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/$f" "$XRAY_ASSET/$f.new"; then
-            local sz
-            sz="$(stat -c%s "$XRAY_ASSET/$f.new" 2>/dev/null || echo 0)"
-            if (( sz < 102400 )); then
-                warn "$f 下载内容异常 (${sz} bytes)，保留旧文件"
-                rm -f "$XRAY_ASSET/$f.new"
-                continue
-            fi
-            backup_file "$XRAY_ASSET/$f"
-            mv "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f"
-            chmod 0644 "$XRAY_ASSET/$f"
-        else
-            rm -f "$XRAY_ASSET/$f.new"
-            warn "$f 更新失败，保留旧文件"
-        fi
-    done
-    ok "Geodata 更新完成"
+    ver="$(xray_installed_version 2>/dev/null | sed 's/^v//' || true)"
+    [[ -n "$ver" && "$ver" != "未安装" ]] || ver="latest"
+
+    if (( ! force )) && [[ -s "$XRAY_ASSET/geosite.dat" && -s "$XRAY_ASSET/geoip.dat" ]] \
+        && [[ "$XRAY_ASSET/geosite.dat" -nt "$XRAY_BIN" ]]; then
+        ok "geodata 已与核心 v$ver 同源（geosite $(( $(stat -c%s "$XRAY_ASSET/geosite.dat") / 1024 )) KB），跳过；--force 可强制重下"
+        return 0
+    fi
+
+    # 整包 16.7 MB + 解出 11 MB，还要余量写 .new。不足就别下，旧文件继续用。
+    disk_need 45 "更新 geodata（约 28 MB）" || die "已中止：现有 geo 数据继续生效"
+    geodata_install_official "$ver"
+    ok "Geodata 更新完成（官方版，Xray $ver）"
 }
 
 update_config() {
@@ -181,6 +183,7 @@ update_config() {
 update_all() {
     update_script || true
     update_core
+    # 核心安装已把官方 dat 一起铺好（zip 自带），这里只兜底「核心没变动 / 数据缺失」。
     update_geodata
     update_config
     self_check

@@ -89,8 +89,11 @@ routing_json() {
         rules+=('{"type":"field","ip":["geoip:private"],"outboundTag":"block"}')
     [[ "$(state_get BLOCK_CN off)" == "on" ]] && \
         rules+=('{"type":"field","ip":["geoip:cn"],"outboundTag":"block"}')
+    # v1.13.0：官方 geosite 的 category-ads-all 只有 905 条（Loyalsoldier 版 199 451
+    # 条），单靠它会漏掉一大批。带上 category-ads（官方 845 / Loyalsoldier 849，
+    # 两边几乎一致），官方版也能挡住主体，不依赖某一家的大表。
     [[ "$(state_get BLOCK_ADS off)" == "on" ]] && \
-        rules+=('{"type":"field","domain":["geosite:category-ads-all"],"outboundTag":"block"}')
+        rules+=('{"type":"field","domain":["geosite:category-ads","geosite:category-ads-all"],"outboundTag":"block"}')
     local joined="" sep=""
     local r
     for r in "${rules[@]}"; do joined+="$sep$r"; sep=","; done

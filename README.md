@@ -272,7 +272,7 @@ xhy config set LOG_LEVEL none       # warning / info / debug / none，默认 war
 xhy config set TARGET_REGION jp     # 或 auto
 ```
 
-注意：`BLOCK_PRIVATE` / `BLOCK_CN` / `BLOCK_ADS` 依赖 `geoip.dat` / `geosite.dat`。若 Xray 发布包未附带，安装时会自动从 `Loyalsoldier/v2ray-rules-dat` 补齐，也可随时 `xhy update geodata`。
+注意：`BLOCK_PRIVATE` / `BLOCK_CN` / `BLOCK_ADS` 依赖 `geoip.dat` / `geosite.dat`。默认一律用 **Xray 官方 release 包自带的那份**（与核心同源，安装/升级时一起铺好）；`xhy update geodata [--force]` 可单独重取。想换 `category-ads-all` 更全的 Loyalsoldier 版就手工替换，`xhy core status` 会标出当前是哪份。
 
 `xhy firewall strict` 会把除 SSH 与节点端口外的所有入站 TCP/UDP 丢弃，请**先确认 SSH 端口识别正确**（`xhy check` 会显示），并保留一条可用的带外控制台。任何模式下都不会改动系统已有的 iptables 规则。
 

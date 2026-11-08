@@ -2,6 +2,14 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.13.0 — 2026-11-09
+
+- feat(core): geodata 默认源改回 **Xray 官方 release 内置的 dat**（v1.12.x 曾无条件覆盖成 Loyalsoldier 版）。实测两份标签集几乎相同（官方 1564 个 tag / Loyalsoldier 1562 个，openai、category-ai-!cn 214/218、google-gemini、github-copilot 两边都有），3.9 MB 的体积差几乎全在 category-ads-all（905 vs 199 451 条）；日常用的是 category-ads / geolocation-!cn / 各 AI 分类，为一张用不到的广告表多占 4 MB 没意义。安装/升级核心时 zip 里的官方 dat 直接铺好，不额外下载
+- feat(update): xhy update geodata 重写 —— 官方不单独发 dat 资产，改为下载对应版本的 Xray-linux-<arch>.zip（16.7 MB）解出两个 dat，同样强制校验 .dgst；版本跟随已装核心（未装才退回 latest），dat 比核心二进制新就跳过，避免 xhy update all 重复下载，--force 强制重下
+- test(geodata): 新增 test/geodata-test.sh 23 项 —— 官方源接线、整包校验、同源跳过 / --force / 陈旧重下三分支、版本跟随核心、core status 只对异常体积告警
+- fix(nodes): `BLOCK_ADS=on` 的拦截规则从 `geosite:category-ads-all` 一条改成 `category-ads` + `category-ads-all` 两条 —— 官方 dat 的 `category-ads-all` 只有 905 条，单押它会漏一大批；`category-ads` 官方 845 / Loyalsoldier 849，两边几乎一致，官方版也能挡住主体
+- docs: relay --domains 的用法文案去掉「精简版 geosite 缺分类」的错误说法（真相：那些站在官方版和 Loyalsoldier 版里都不属于任何 AI 分类）；xhy core status 对 >9 MB 的 geosite.dat 标「疑似 Loyalsoldier 版」
+
 ## v1.12.3 — 2026-11-09
 
 - fix(link): XHY_NODES 目录下的 relay.env 是中继状态文件（无 MODE），旧版 link_all 把它也当节点导出，link_uri 报「未知模式」并让 xhy link --qr / --png 退出码变 1 —— 落地机（硅谷）必现。新增 link_node_files() 只列带 ^MODE= 的 env，link_all / --uri / 多节点计数统一改用它

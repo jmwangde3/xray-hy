@@ -127,9 +127,10 @@ EOF
   export   打印对端要执行的那条命令（以及 vless:// 链接）
   del      移除本机 relay 配置、防火墙规则、入站片段
 
-域名规则：--domains 收明文规则，专治 geosite 里没分类的站（精简版 geosite.dat 缺
-      一大堆，比如 character.ai / suno.com）。裸域名 = domain:（含子域），也认
-      domain:/full:/keyword:/regexp:/geosite: 前缀。存进 relay.env，--no-domains 清空。
+域名规则：--domains 收明文规则，专治"任何 geosite 分类里都没有"的站（官方版和
+      Loyalsoldier 版都一样，比如 character.ai / suno.com / replicate.com）。
+      裸域名 = domain:（含子域），也认 domain:/full:/keyword:/regexp:/geosite:
+      前缀。存进 relay.env，--no-domains 清空。
 默认值：端口 14430、分类 openai,anthropic,google,tiktok,netflix、出站标签 us-relay、
       geoip:us 默认 off（只按 geosite 分类转发，不再把美国 CDN IP 全量绕中继）；
       要恢复旧行为必须显式 --geoip-us on，--no-geoip-us 保留为等价别名。
@@ -236,9 +237,10 @@ relay_norm_categories() {
     printf '%s' "$out"
 }
 
-# 明文域名规则（v1.12.0）。geosite 是别人维护的清单，总有站点没进分类——尤其
-# 精简版 geosite.dat（部分镜像只带 category-ai-!cn 的子集，连 category-ai-!cn
-# 这个名字本身都不在）。这类站只能靠明文规则兜：--domains 允许
+# 明文域名规则（v1.12.0）。geosite 是别人维护的清单，总有站点没进任何分类——
+# 实测 character.ai / replicate.com / suno.com / runwayml.com 在官方版和
+# Loyalsoldier 版里都只出现在 geolocation-!cn / gfw，不在 AI 分类里。这类站
+# 只能靠明文规则兜：--domains 允许
 #   bare.com                  → domain:bare.com（裸域名 = 含子域，最常用）
 #   domain:x.com / full:x.com / keyword:xx / regexp:^a\.b$ / geosite:tag
 # 全部拼进同一条 domain 数组，命中即转发，顺序无影响。
