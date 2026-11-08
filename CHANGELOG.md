@@ -2,6 +2,13 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.13.3 — 2026-11-09
+
+- fix(hardening): SSH 守卫改用 --rcheck 在前、--set 在后 —— 旧版先无条件 --set 再 --update --hitcount，撞锁后每个重试包都往滑窗顶时间戳，窗口永远满，越试越锁（实测硅谷单次会话被 DROP 674 次、家宽 IP 在 xt_recent 表里顶满 32 条）；顺序反转后命中 DROP 即停止记录，60 秒滑窗自然滚动，静默等一分钟自动解锁，不再需要 VNC 清表
+- fix(hardening): 阈值放宽 60s/10→60s/30、1h/25→1h/120。VS Code Remote / scp 批量 / 家宽运营商 NAT 共享一轮就是 5-10 个新连接，10 次一分钟是误伤不是防护；阈值提为 SSH_BURST_WINDOW/HITS + SSH_SLOW_WINDOW/HITS 常量，status 文案从硬编码改成读常量（旧文案还挂着早已失效的 5/8）
+- fix(relay): 落地机放行规则用 -I 插到链尾 RETURN/DROP 之前 —— 旧版 -A 追加到 XHY-IN 末尾，落在 -j RETURN 之后永不命中，而 -C 仍返回 0，relay status 报「已放行」实际靠 INPUT 默认策略兜底；新增 _relay_fw_term_pos/_relay_fw_own_pos，relay_fw_add 就地纠正错位旧规则，relay_fw_present 改为「存在且位置有效」
+- test(hardening): 新增 test/hardening-test.sh 42 项 —— 有状态假 iptables（真支持 -N/-F/-A/-I/-D/-C/-S）断言规则行序：rcheck 在 set 前、无 --update、两窗口阈值、strict 下 SSH/relay 均在 DROP 前、RETURN 之后死规则被识别并迁移、无 RETURN 链退回 -A；run-all 从 17 个测试文件增至 18
+
 ## v1.13.2 — 2026-11-09
 
 - fix(relay): `relay status --brief` 的域名计数差一 —— `printf '%s' | tr ',' '\\n' | wc -l` 的最后一个字段没有换行，7 个域会报成「+6域」；改 `printf '%s\\n'` + `grep -c .`。实测东京 13 分类 7 域现在显示正确
