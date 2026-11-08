@@ -146,7 +146,21 @@ ensure_optional() {
         qrencode)
             if ! have_cmd qrencode; then
                 case "$XHY_DISTRO" in
-                    alpine) pkg_install libqrencode libqrencode-tools 2>/dev/null || true ;;
+                    alpine)
+                        # qrencode 在 Alpine 的 community 源；精简镜像常把 community
+                        # 注释掉（/etc/apk/repositories 只留 main），直接 apk add
+                        # 会报 "no such package"。按已启用的 main 行推 community，
+                        # 用 -X 临时附加，不改系统源、不引入常驻配置。
+                        local _repo=""
+                        _repo="$(sed -n 's#^\([^#][^#]*\)/main[[:space:]]*$#\1/community#p' \
+                                    /etc/apk/repositories 2>/dev/null | head -1)"
+                        if [[ -n "$_repo" ]]; then
+                            run_lim "$XHY_PKG_TIMEOUT" apk add --no-cache -X "$_repo" \
+                                libqrencode-tools 2>/dev/null || \
+                                pkg_install libqrencode libqrencode-tools 2>/dev/null || true
+                        else
+                            pkg_install libqrencode libqrencode-tools 2>/dev/null || true
+                        fi ;;
                     debian) pkg_install qrencode 2>/dev/null || true ;;
                     rhel)   pkg_install qrencode 2>/dev/null || true ;;
                 esac

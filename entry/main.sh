@@ -110,7 +110,7 @@ cmd_lang() {
         printf '当前语言 : %s（state: %s）\n' "$XHY_LANG_EFFECTIVE" "$(state_get XHY_LANG auto)"
         printf '  xhy lang en    强制英文（纯 ASCII；云 VNC 控制台中文是小方块时用）\n'
         printf '  xhy lang zh    强制中文\n'
-        printf '  xhy lang auto  按终端 / locale 自动判定（默认）\n'
+        printf '  xhy lang auto  自动判定（默认；VNC 控制台英文 / SSH 中文）\n'
         printf '  单次强制：XHY_LANG=en xhy  或  XHY_ASCII=1 xhy\n'
         return 0
     fi
@@ -137,7 +137,10 @@ Usage: xhy <command> [options]
     add <mode> [--port N] [opts]  Add a node
     edit [mode] [port]            Edit a node; no args = pick by number
     list                          List nodes
-    link [--all|--uri|--qr]       Export vless:// links
+    link [--all|--uri] [--qr] [--png FILE]  Export vless:// links; --qr prints a
+                                            scannable QR for phone apps; --png
+                                            writes a 0600 QR PNG (keeps secrets)
+    link <mode> [port] [--qr] [--png FILE]  Same, for one node
     del [mode] [port]             Delete node; no args = pick by number
     menu                          Interactive menu
 
@@ -213,9 +216,11 @@ Usage: xhy <command> [options]
     XHY_LANG=en xhy <command>   Force English for one run; XHY_ASCII=1 is the same
     XHY_LANG=zh xhy <command>   Force Chinese for one run
     English mode guarantees printable ASCII; Chinese mode is byte-for-byte
-    unchanged. auto checks LANG/TERM/charmap: C locale, non-UTF-8 and
-    linux/vt100 style consoles switch to English; ordinary UTF-8 SSH
-    terminals stay Chinese.
+    unchanged. auto checks LANG/TERM/charmap/tty: C locale, non-UTF-8 and
+    console ttys (/dev/tty1..6, /dev/ttyS0) switch to English; ordinary
+    UTF-8 SSH sessions (/dev/pts/N) stay Chinese. Use auto, NOT 'lang en',
+    for a VNC-only English setting -- 'en' is persisted globally and also
+    turns SSH output English.
 
   Version & update
     core [status|channel pinned|channel latest|channel vX.Y.Z|update [--force]]
@@ -268,7 +273,10 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
     add <mode> [--port N] [选项] 添加节点
     edit [mode] [port]          编辑已有节点；省略参数时列出编号选择（回车=不改）
     list                        列出所有节点
-    link [--all|--uri|--qr]     导出 vless:// 链接
+    link [--all|--uri] [--qr] [--png FILE] 导出 vless:// 链接；--qr 打印可扫二维码
+                                           （手机 App 直接导入）；--png 存成 0600
+                                           二维码图片（含凭证，勿公开）
+    link <mode> [port] [--qr] [--png FILE]  单个节点同上
     del [mode] [port]           删除节点；省略参数时列出编号选择
     menu                        交互式菜单
 
@@ -336,8 +344,9 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
     XHY_LANG=en xhy <命令>      单次强制英文；XHY_ASCII=1 同义
     XHY_LANG=zh xhy <命令>      单次强制中文
     英文模式下所有输出保证是可打印 ASCII；中文模式下输出逐字节不变。
-    auto 会按 LANG/TERM/charmap 判定：C locale、非 UTF-8、linux/vt100 之类
-    控制台终端自动切英文，普通 UTF-8 SSH 终端保持中文。
+    auto 会按 LANG/TERM/charmap/tty 判定：C locale、非 UTF-8、控制台 tty
+    （/dev/tty1..6、/dev/ttyS0）自动切英文，普通 UTF-8 SSH（/dev/pts/N）保持中文。
+    VNC 只想英文请用 auto，别用 lang en —— en 会全局持久化，把 SSH 也变英文。
 
   版本与更新
     core [status|channel pinned|channel latest|channel vX.Y.Z|update [--force]]
@@ -659,22 +668,41 @@ cmd_config_menu() {
 }
 
 cmd_link() {
-    local what="${1:---all}" f
-    case "$what" in
-        --uri)
-            for f in "$XHY_NODES"/*.env; do
-                [[ -f "$f" ]] || continue
-                link_uri "$f"
-            done
-            return 0 ;;
-        --all|"") link_all; return ;;
-        --qr)
-            local n=0; for f in "$XHY_NODES"/*.env; do [[ -f "$f" ]] || continue; link_qr "$f"; n=1; done
-            (( n == 1 )) || warn "暂无节点"; return ;;
-    esac
-    # link <mode> <port>
-    f="$(node_file "$what" "${2:-}")"
-    [[ -f "$f" ]] || die "节点不存在: ${what}_${2:-}"
+    local qr=0 png="" want="" f a n=0 cnt=0
+    local -a pos=()
+    while (($#)); do
+        a="$1"
+        case "$a" in
+            --qr)     qr=1; shift ;;
+            --png)    png="${2:?--png 需要文件路径}"; qr=1; shift 2 ;;
+            --uri)    want="--uri"; shift ;;
+            --all)    want="--all"; shift ;;
+            --*)      die "未知参数: $a" ;;
+            *)        pos+=("$a"); shift ;;
+        esac
+    done
+    LINK_QR="$qr"; LINK_QR_OUT="$png"; LINK_QR_MULTI=0
+    # --uri 只出链接文本，给脚本 / 剪贴板用，不掺二维码。
+    if [[ "$want" == "--uri" ]]; then
+        for f in "$XHY_NODES"/*.env; do
+            [[ -f "$f" ]] || continue
+            link_uri "$f"; n=1
+        done
+        (( n == 1 )) || warn "暂无节点，先用 xhy add 添加一个。"
+        return 0
+    fi
+    if (( ${#pos[@]} == 0 )); then
+        # 全节点；--png 时多节点各写一份带 MODE_PORT 后缀的 PNG。
+        for f in "$XHY_NODES"/*.env; do [[ -f "$f" ]] && cnt=$((cnt + 1)); done
+        (( cnt > 1 )) && [[ -n "$png" ]] && LINK_QR_MULTI=1
+        link_all
+        return 0
+    fi
+    # link <mode> [port] [--qr] [--png FILE]（标志可放任意位置）
+    local mode="${pos[0]}" port=""
+    (( ${#pos[@]} > 1 )) && port="${pos[1]}"
+    f="$(node_file "$mode" "$port")"
+    [[ -f "$f" ]] || die "节点不存在: ${mode}_${port}"
     link_from_env "$f"
 }
 
@@ -778,56 +806,6 @@ EOF
             0) return 0 ;;
         esac
     done
-}
-
-cmd_link() {
-    local what="${1:---all}" f
-    case "$what" in
-        --uri)
-            for f in "$XHY_NODES"/*.env; do
-                [[ -f "$f" ]] || continue
-                link_uri "$f"
-            done
-            return 0 ;;
-        --all|"") link_all; return ;;
-        --qr)
-            local n=0; for f in "$XHY_NODES"/*.env; do [[ -f "$f" ]] || continue; link_qr "$f"; n=1; done
-            (( n == 1 )) || warn "暂无节点"; return ;;
-    esac
-    # link <mode> <port>
-    f="$(node_file "$what" "${2:-}")"
-    [[ -f "$f" ]] || die "节点不存在: ${what}_${2:-}"
-    link_from_env "$f"
-}
-
-cmd_uninstall() {
-    need_root
-    warn "这将停止 Xray / cloudflared 服务并移除 xray-hy 的开机项与防火墙链。"
-    confirm "确定卸载？" "n" || { info "已取消"; return 0; }
-    svc_stop "$SVC_CF"; svc_stop "$SVC_XRAY"
-    svc_disable "$SVC_CF"; svc_disable "$SVC_XRAY"
-    remove_cf_service 2>/dev/null || true
-    firewall_off
-    rm -f /etc/systemd/system/xray-hy.service /etc/systemd/system/xray-hy-firewall.service \
-          /etc/init.d/xray-hy /etc/init.d/xray-hy-firewall \
-          /usr/local/lib/xray-hy/tunnel-run /usr/local/bin/xhy \
-          "$XHY_SELF" /etc/sysctl.d/90-xray-hy.conf /etc/modules-load.d/xray-hy.conf
-    # 扫描器是下载来的独立工具，不在 git 工作树里，卸载时单独清。
-    rm -rf "$XHY_TOOLS_DIR"
-    # 仓库内运行时 XHY_APP_DIR 就是工作树：只删入口，不碰 conf/ 和目录本身。
-    if [[ "${XHY_DEV:-0}" != "1" ]]; then
-        rm -rf "$XHY_APP_DIR/conf"
-        rmdir "$XHY_APP_DIR" 2>/dev/null || true
-    fi
-    [[ "$XHY_INIT" == "systemd" ]] && systemctl daemon-reload
-    if confirm "同时删除 Xray 二进制与所有节点配置/凭证？" "n"; then
-        rm -f "$XRAY_BIN" "$CF_BIN"
-        rm -rf "$XRAY_ASSET" "$XHY_ETC"
-        ok "配置与凭证已删除"
-    else
-        ok "已保留 $XHY_ETC（内含节点凭证，权限 0600/0700）"
-    fi
-    ok "卸载完成"
 }
 
 main() {

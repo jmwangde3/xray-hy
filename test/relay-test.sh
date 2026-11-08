@@ -181,6 +181,34 @@ chk "域名分类仍在"                    'grep -q "geosite:openai" "$XHY_ETC/
 chk "出站仍在"                        'grep -q "us-relay" "$XHY_ETC/config.json"'
 chk "仍是合法 JSON"                   'json_ok "$XHY_ETC/config.json"'
 
+echo "===== --domains 明文规则（v1.12.0） ====="
+relay_entry --to 203.0.113.10:14430 --uuid test-uuid-0000 --categories ai \
+    --domains character.ai,replicate.com,suno.com --no-geoip-us >/dev/null
+chk "裸域名补 domain: 前缀"           'grep -q "\"domain:character.ai\"" "$XHY_ETC/config.json"'
+chk "多个域名都在"                    'grep -q "\"domain:suno.com\"" "$XHY_ETC/config.json"'
+chk "文字规则写进 relay.env"          'grep -q "^RELAY_DOMAINS=domain:character.ai,domain:replicate.com,domain:suno.com$" "$XHY_NODES/relay.env"'
+chk "域名规则与 geosite 同一条规则"   'grep -q "\"domain\":\[\"geosite:openai\".*\"domain:character.ai\"" "$XHY_ETC/config.json"'
+chk "带域名规则仍是合法 JSON"         'json_ok "$XHY_ETC/config.json"'
+
+relay_entry --to 203.0.113.10:14430 --uuid test-uuid-0000 --categories ai --no-geoip-us >/dev/null
+chk "不传 --domains 时沿用旧值"       'grep -q "domain:character.ai" "$XHY_ETC/config.json"'
+
+relay_entry --to 203.0.113.10:14430 --uuid test-uuid-0000 --categories ai \
+    --domains "full:exact.com,keyword:abc,regexp:^a\\.b$" --no-geoip-us >/dev/null
+chk "full: 原样保留"                  'grep -q "\"full:exact.com\"" "$XHY_ETC/config.json"'
+chk "keyword: 原样保留"               'grep -q "\"keyword:abc\"" "$XHY_ETC/config.json"'
+chk "regexp: 原样保留"                'grep -q "regexp:" "$XHY_ETC/config.json"'
+chk "混合前缀合法 JSON"               'json_ok "$XHY_ETC/config.json"'
+
+chk "非法域名字符被拒"                '! ( relay_entry --to 203.0.113.10:14430 --uuid u --domains "a\"b.com" ) >/dev/null 2>&1'
+chk "空格被拒"                        '! ( relay_entry --to 203.0.113.10:14430 --uuid u --domains "a b.com" ) >/dev/null 2>&1'
+chk "空值规则被拒"                    '! ( relay_entry --to 203.0.113.10:14430 --uuid u --domains "full:" ) >/dev/null 2>&1'
+
+relay_entry --to 203.0.113.10:14430 --uuid test-uuid-0000 --categories ai --no-domains >/dev/null
+chk "--no-domains 清空"               '! grep -q "domain:character.ai\|full:exact.com" "$XHY_ETC/config.json"'
+chk "清空后 env 无 RELAY_DOMAINS"     '! grep -q "^RELAY_DOMAINS=" "$XHY_NODES/relay.env"'
+chk "清空后 geosite 仍在"             'grep -q "geosite:openai" "$XHY_ETC/config.json"'
+
 echo "===== --geoip-us on（显式恢复旧行为） ====="
 relay_entry --to 203.0.113.10:14430 --uuid test-uuid-0000 --categories ai --geoip-us on >/dev/null
 chk "显式 on 出现 geoip:us 规则"      'grep -q "geoip:us" "$XHY_ETC/config.json"'

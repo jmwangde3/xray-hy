@@ -6,7 +6,8 @@
 # 两种角色（同一台机器只扮其一）：
 #   land  : 落地/接收端（例：硅谷）。开一个 vless/tcp 入站，仅放行入口机公网 IP，
 #           出站走默认 freedom（直连落地机本地出口）。
-#   entry : 入口/转发端（例：东京）。把 geosite(AI/美区) + 可选 geoip:us 的流量，
+#   entry : 入口/转发端（例：东京）。把 geosite(AI/美区) + --domains 明文规则 +
+#           可选 geoip:us 的流量，
 #           经 vless 出站转发到落地机的中继端口；其余海外流量本地 freedom 直出。
 #
 # 配置管线（v1.9.4 重构，重要）：
@@ -37,6 +38,7 @@ RELAY_PROBE_TIMEOUT_DEFAULT="5s"
 # 全局状态（relay_env_save 之前由各子命令赋值；relay_env_load 从文件读回）
 RELAY_ROLE=""; RELAY_PORT=""; RELAY_ALLOW=""; RELAY_UUID=""
 RELAY_UPSTREAM=""; RELAY_CATEGORIES=""; RELAY_FW_CHAIN=""
+RELAY_DOMAINS=""
 RELAY_SECURITY=""; RELAY_SNI=""; RELAY_PIN=""
 RELAY_CERT=""; RELAY_KEY=""; RELAY_GEOIP_US=""; RELAY_TAG=""
 RELAY_FALLBACK=""; RELAY_TFO=""
@@ -44,6 +46,7 @@ RELAY_FALLBACK=""; RELAY_TFO=""
 relay_reset_vars() {
     RELAY_ROLE=""; RELAY_PORT=""; RELAY_ALLOW=""; RELAY_UUID=""
     RELAY_UPSTREAM=""; RELAY_CATEGORIES=""; RELAY_FW_CHAIN=""
+    RELAY_DOMAINS=""
     RELAY_SECURITY=""; RELAY_SNI=""; RELAY_PIN=""
     RELAY_CERT=""; RELAY_KEY=""; RELAY_GEOIP_US=""; RELAY_TAG=""
     RELAY_FALLBACK=""; RELAY_TFO=""
@@ -79,7 +82,8 @@ Usage: xhy relay <command> [options]
   entry    Forward AI/US traffic to the landing host.
            xhy relay entry --to <land-ip>:<port> [--uuid UUID]
                           [--categories a,b,c|ai|media|none] [--no-geoip-us]
-                          [--tls] [--sni NAME] [--pin HEX] [--tag TAG]
+                          [--domains site.com,domain:x.com,full:y.com,regexp:^z\.]
+                          [--no-domains] [--tag TAG]
                           [--no-fallback] [--no-tfo]
   reapply  Re-inject after the config was rebuilt / restored from a snapshot.
   status   Show this host's role, port, upstream and live checks.
@@ -87,6 +91,10 @@ Usage: xhy relay <command> [options]
   export   Print the command to run on the peer host (and a vless:// link).
   del      Remove this host's relay config, firewall rule and fragment.
 
+Domains: --domains takes plaintext rules for sites no geosite category covers
+         (trimmed geosite.dat builds are missing many, e.g. character.ai / suno.com).
+         Bare name = domain: (any subdomain). Also accepts domain:/full:/keyword:/
+         regexp:/geosite: prefixes. Kept in relay.env; --no-domains clears it.
 Defaults: port 14430, categories openai,anthropic,google,tiktok,netflix, tag us-relay,
           geoip:us OFF -- only geosite rules are forwarded by default. Use
           --geoip-us on to restore the old "all US IPs through the relay" behavior;
@@ -110,7 +118,8 @@ EOF
   entry    把 AI / 美区流量转发到落地机。
            xhy relay entry --to <落地机IP>:<端口> [--uuid UUID]
                           [--categories a,b,c|ai|media|none] [--no-geoip-us]
-                          [--tls] [--sni NAME] [--pin HEX] [--tag TAG]
+                          [--domains 站点.com,domain:x.com,full:y.com,regexp:^z\.]
+                          [--no-domains] [--tag TAG]
                           [--no-fallback] [--no-tfo]
   reapply  配置被重建 / 从快照还原后重新注入（改造后一般用不到了，留作兜底）
   status   看本机角色、端口、上游与实时检查
@@ -118,6 +127,9 @@ EOF
   export   打印对端要执行的那条命令（以及 vless:// 链接）
   del      移除本机 relay 配置、防火墙规则、入站片段
 
+域名规则：--domains 收明文规则，专治 geosite 里没分类的站（精简版 geosite.dat 缺
+      一大堆，比如 character.ai / suno.com）。裸域名 = domain:（含子域），也认
+      domain:/full:/keyword:/regexp:/geosite: 前缀。存进 relay.env，--no-domains 清空。
 默认值：端口 14430、分类 openai,anthropic,google,tiktok,netflix、出站标签 us-relay、
       geoip:us 默认 off（只按 geosite 分类转发，不再把美国 CDN IP 全量绕中继）；
       要恢复旧行为必须显式 --geoip-us on，--no-geoip-us 保留为等价别名。
@@ -142,6 +154,7 @@ relay_env_save() {
         [[ -n "$RELAY_UUID" ]]       && printf 'RELAY_UUID=%s\n' "$RELAY_UUID"
         [[ -n "$RELAY_UPSTREAM" ]]   && printf 'RELAY_UPSTREAM=%s\n' "$RELAY_UPSTREAM"
         [[ -n "$RELAY_CATEGORIES" ]] && printf 'RELAY_CATEGORIES=%s\n' "$RELAY_CATEGORIES"
+        [[ -n "$RELAY_DOMAINS" ]]    && printf 'RELAY_DOMAINS=%s\n' "$RELAY_DOMAINS"
         [[ -n "$RELAY_FW_CHAIN" ]]   && printf 'RELAY_FW_CHAIN=%s\n' "$RELAY_FW_CHAIN"
         [[ -n "$RELAY_SECURITY" ]]   && printf 'RELAY_SECURITY=%s\n' "$RELAY_SECURITY"
         [[ -n "$RELAY_SNI" ]]        && printf 'RELAY_SNI=%s\n' "$RELAY_SNI"
@@ -217,6 +230,62 @@ relay_norm_categories() {
         [[ "$seen" == *" $c "* ]] && continue
         seen+="$c "
         out+="${out:+,}$c"
+    done
+    printf '%s' "$out"
+}
+
+# 明文域名规则（v1.12.0）。geosite 是别人维护的清单，总有站点没进分类——尤其
+# 精简版 geosite.dat（部分镜像只带 category-ai-!cn 的子集，连 category-ai-!cn
+# 这个名字本身都不在）。这类站只能靠明文规则兜：--domains 允许
+#   bare.com                  → domain:bare.com（裸域名 = 含子域，最常用）
+#   domain:x.com / full:x.com / keyword:xx / regexp:^a\.b$ / geosite:tag
+# 全部拼进同一条 domain 数组，命中即转发，顺序无影响。
+relay_norm_domains() {
+    local in="${1:-}" d kind val out="" seen=$'\n'
+    [[ -n "$in" ]] || { printf ''; return 0; }
+    # 带空格就没法「逗号分隔」了（下面 for 会按空白再切一次），直接拒掉更明确
+    case "$in" in
+        *[[:space:]]*)
+            relay_say err "域名规则不能含空格：$in" "domain rules must not contain spaces: $in"
+            return 1 ;;
+    esac
+    for d in ${in//,/ }; do
+        [[ -n "$d" ]] || continue
+        case "$d" in
+            domain:*|full:*|keyword:*|regexp:*|geosite:*) ;;
+            *) d="domain:$d" ;;
+        esac
+        kind="${d%%:*}"; val="${d#*:}"
+        if [[ -z "$val" ]]; then
+            relay_say err "域名规则缺少值：$d" "domain rule has no value: $d"
+            return 1
+        fi
+        if [[ "$kind" == "regexp" ]]; then
+            # 正则要允许 ^ $ . * + ? ( ) | { } [ ] \ - /，所以不能用白名单。
+            # 只挡真正会破坏 JSON / 分词的三类：引号、空白、逗号。
+            case "$val" in
+                *\"*|*\'*|*[[:space:]]*|*,*)
+                    relay_say err "正则域名含非法字符（引号/空白/逗号）：$d" \
+                                 "regexp rule contains quote, space or comma: $d"
+                    return 1 ;;
+            esac
+            # xray 的 regexp: 走 Go 正则，只做基本可读性约束：必须能看出非空
+            if [[ ${#val} -gt 200 ]]; then
+                relay_say err "正则太长（>200 字符）：$d" "regexp rule too long (>200): $d"
+                return 1
+            fi
+        else
+            # domain/full/keyword/geosite：字母数字点横线星号，够用且写不坏 JSON
+            case "$val" in
+                *[!A-Za-z0-9._*-]*)
+                    relay_say err "域名字符非法：$d（只允许字母数字 . _ - *）" \
+                                 "illegal chars in domain rule: $d (letters, digits, . _ - * only)"
+                    return 1 ;;
+            esac
+        fi
+        [[ "$seen" == *$'\n'"$d"$'\n'* ]] && continue
+        seen+="$d"$'\n'
+        out+="${out:+,}$d"
     done
     printf '%s' "$out"
 }
@@ -358,6 +427,13 @@ relay_routing_rules_json() {
     for c in ${RELAY_CATEGORIES//,/ }; do
         [[ -n "$c" ]] || continue
         doms+="${sep}\"geosite:${c}\""; sep=","
+    done
+    # v1.12.0：明文域名规则与 geosite 分类同处一条 domain 数组，谁命中都转发。
+    # 这样 geosite.dat 缺哪个分类都不影响这些站，换机器重建也不会失效。
+    for c in ${RELAY_DOMAINS//,/ }; do
+        [[ -n "$c" ]] || continue
+        # regexp 里可能有 \（如 regexp:^a\.b$），写进 JSON 前必须转义成 \\
+        doms+="${sep}\"${c//\\/\\\\}\""; sep=","
     done
     if [[ -n "$doms" ]]; then
         out="{\"type\":\"field\",\"domain\":[${doms}],\"${key}\":\"${tgt}\"}"
@@ -658,12 +734,14 @@ relay_entry_hint() {
 }
 
 relay_entry() {
-    local upstream="" uuid="" categories="" geoip="off" tls=0 sni="" pin="" tag="" fb="" tfo=""
+    local upstream="" uuid="" categories="" domains="" domains_set=0 geoip="off" tls=0 sni="" pin="" tag="" fb="" tfo=""
     while (( $# > 0 )); do
         case "$1" in
             --to)         (( $# >= 2 )) || die "--to 缺少参数"; upstream="$2"; shift 2 ;;
             --uuid)       (( $# >= 2 )) || die "--uuid 缺少参数"; uuid="$2"; shift 2 ;;
             --categories) (( $# >= 2 )) || die "--categories 缺少参数"; categories="$2"; shift 2 ;;
+            --domains)    (( $# >= 2 )) || die "--domains 缺少参数"; domains="$2"; domains_set=1; shift 2 ;;
+            --no-domains) domains=""; domains_set=1; shift ;;
             --geoip-us)   (( $# >= 2 )) || die "--geoip-us 缺少参数"; geoip="$2"; shift 2 ;;
             --no-geoip-us) geoip="off"; shift ;;
             --tls)        tls=1; shift ;;
@@ -690,6 +768,11 @@ relay_entry() {
     [[ -n "$uuid" ]] || uuid="$(uuid_gen)"
     [[ "$uuid" =~ ^[A-Za-z0-9-]+$ ]] || die "UUID 不合法: $uuid"
     categories="$(relay_norm_categories "${categories:-$RELAY_DEFAULT_CATEGORIES}")" || return 1
+    # 域名规则先校验再动手：非法字符要在快照/写配置之前就退出去
+    local dom_norm=""
+    if (( domains_set )) && [[ -n "$domains" && "$domains" != "none" ]]; then
+        dom_norm="$(relay_norm_domains "$domains")" || return 1
+    fi
     [[ "$geoip" == "on" || "$geoip" == "off" ]] || die "--geoip-us 只接受 on / off"
     [[ -n "$tag" ]] && { relay_valid_host "$tag" || die "--tag 不合法: $tag"; }
     [[ -z "$fb" || "$fb" == "on" || "$fb" == "off" ]] || die "--fallback 只接受 on / off"
@@ -697,7 +780,11 @@ relay_entry() {
     # 同机原本是 land → 摘掉入站片段与防火墙规则（角色互斥）
     relay_env_load >/dev/null 2>&1 || true
     local prev_role="${RELAY_ROLE:-}" prev_port="${RELAY_PORT:-}" prev_allow="${RELAY_ALLOW:-}"
+    local prev_domains="${RELAY_DOMAINS:-}"
     relay_reset_vars
+    # 没传 --domains 时沿用 relay.env 里的旧值（它只是一层补丁，不该被顺手清掉）；
+    # 要清空得显式 --no-domains。
+    if (( domains_set )); then RELAY_DOMAINS="$dom_norm"; else RELAY_DOMAINS="$prev_domains"; fi
     if [[ "$prev_role" == "land" ]]; then
         relay_remove_fragments
         [[ -n "$prev_port" ]] && relay_fw_del "$prev_port" "$prev_allow" ""
@@ -726,8 +813,8 @@ relay_entry() {
 
     relay_say ok "中继出站已就绪：流量 → ${RELAY_UPSTREAM}" \
                 "relay outbound ready: traffic -> ${RELAY_UPSTREAM}"
-    relay_say info "分类=${categories:-无}  geoip:us=${geoip}  标签=$(relay_out_tag)" \
-                  "categories=${categories:-none}  geoip:us=${geoip}  tag=$(relay_out_tag)"
+    relay_say info "分类=${categories:-无}  域名规则=${RELAY_DOMAINS:-无}  geoip:us=${geoip}  标签=$(relay_out_tag)" \
+                  "categories=${categories:-none}  domains=${RELAY_DOMAINS:-none}  geoip:us=${geoip}  tag=$(relay_out_tag)"
     if relay_fallback_on; then
         relay_say info "失联回落已开：balancer $(relay_lb_tag) → direct（探活 ${RELAY_PROBE_INTERVAL:-$RELAY_PROBE_INTERVAL_DEFAULT}）" \
                       "fallback on: balancer $(relay_lb_tag) -> direct (probe ${RELAY_PROBE_INTERVAL:-$RELAY_PROBE_INTERVAL_DEFAULT})"
@@ -820,7 +907,7 @@ relay_status() {
     if [[ "$brief" == "1" ]]; then
         case "$RELAY_ROLE" in
             land)  printf 'relay     : land :%s ← %s\n' "$RELAY_PORT" "$RELAY_ALLOW" ;;
-            entry) printf 'relay     : entry → %s（%s）\n' "$RELAY_UPSTREAM" "${RELAY_CATEGORIES:-无分类}" ;;
+            entry) printf 'relay     : entry → %s（%s%s）\n' "$RELAY_UPSTREAM" "${RELAY_CATEGORIES:-无分类}" "${RELAY_DOMAINS:+ +$(printf '%s' "$RELAY_DOMAINS" | tr ',' '\n' | wc -l)域}" ;;
         esac
         return 0
     fi
@@ -844,6 +931,7 @@ relay_status() {
             printf '  上游   : %s\n' "$RELAY_UPSTREAM"
             printf '  传输   : none（明文 vless）\n' 
             printf '  分类   : %s\n' "${RELAY_CATEGORIES:-（无分类）}"
+            printf '  域名   : %s\n' "${RELAY_DOMAINS:-（无）}"
             printf '  geoip  : %s\n' "${RELAY_GEOIP_US:-off}"
             printf '  标签   : %s\n' "$(relay_out_tag)"
             if relay_fallback_on; then

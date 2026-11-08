@@ -2,6 +2,20 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.12.0 — 2026-11-08
+
+- feat(relay): 新增 --domains 明文域名规则 —— geosite 分类覆盖不到的站（精简版 geosite.dat 缺 character.ai / replicate.com / suno.com 等，连 category-ai-!cn 名字都没有）现在可以直接写 domain/full/keyword/regexp/geosite 规则，与 geosite 分类同处一条 domain 数组；relay.env 持久化 RELAY_DOMAINS，不传 --domains 时沿用旧值，--no-domains 清空
+- fix(relay): regexp 规则里的反斜杠在写进 JSON 前转义为 \\，否则 regexp:^a\.b$ 会产出非法 JSON 让 xray 起不来
+- test(relay): 115 -> 131 项，新增裸域名补前缀 / 前缀原样保留 / 与 geosite 合并同规则 / 沿用旧值 / --no-domains 清空 / 引号与空格与空值被拒
+- feat(core): xray 安装 / 升级后**一律**用 Loyalsoldier 完整版覆盖 release zip 自带的 geosite.dat（zip 里那份只有 7.5 MB，缺 `category-ai-!cn` 等一大批分类，relay 的 `--categories` 会静默命中不到、域名直接走本地出口）。磁盘余量 <60 MB 或 `XHY_SKIP_GEODATA=1` 时跳过，失败只告警不中断
+- feat(core): `xhy status` 对 <9 MB 的 geosite.dat 直接标「⚠ 疑似精简版」，装完不用猜
+
+## v1.11.5 — 2026-11-08
+
+- fix(i18n): xhy lang en 是全局持久化的，VNC 乱码时设一次会把普通 SSH 会话也变成英文。auto 新增 tty 设备判定（/dev/tty1..6、/dev/ttyS0 -> en；/dev/pts/N -> zh），并修正 POSIX prelude 把空 LANG 当 C locale 的旧误判。VNC 只想要英文请用 xhy lang auto，不要 lang en
+- feat(link): 分享链接导出加二维码。xhy link [--all|--uri] [--qr] [--png FILE] 与 xhy link <mode> [port] [--qr] [--png FILE]：--qr 在终端打印可扫二维码（UTF-8 用 ANSIUTF8，控制台/英文模式用 ANSI），--png 存 0600 PNG（多节点自动加 MODE_PORT 后缀）。ensure_optional 在 Alpine 用 -X 临时 community 源装 libqrencode-tools，绕开精简镜像注释掉 community 导致 no such package
+- chore: 删掉 entry/main.sh 里重复的 cmd_link/cmd_uninstall 定义块（50 行）；test: 新增 link-test.sh 17 项，i18n-test 增 4 项 tty 判定，全套回归全绿
+
 ## v1.11.4 — 2026-11-08
 
 - fix(relay): RELAY_GEOIP_US 默认从 on 改为 off —— 此前 relay entry 不带 --no-geoip-us 就把 Cloudflare/AWS/GitHub 等美国 CDN IP 全量绕东京→硅谷一圈（55ms→162ms 且跨 region 双倍计费）；现只按 geosite 分类转发，要恢复旧行为必须显式 --geoip-us on

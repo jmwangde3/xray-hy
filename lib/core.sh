@@ -136,15 +136,39 @@ xray_install() {
         mv -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f"
     done
 
-    # Older/newer release archives occasionally omit geodata. geoip:private
-    # routing rules need it, so fetch the community dat files as a fallback.
-    for f in geoip.dat geosite.dat; do
-        if [[ ! -s "$XRAY_ASSET/$f" ]]; then
-            info "补充下载 $f"
-            fetch "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/$f" \
-                "$XRAY_ASSET/$f" || warn "$f 下载失败，相关路由规则将不生效"
-        fi
-    done
+    # v1.12.0：官方 release zip 自带的 geosite.dat 是**精简版**（7.5 MB，缺
+    # category-ai-!cn 等一大批分类），装了它 relay 的 --categories 会静默命中
+    # 不到、域名直接走本地出口。Loyalsoldier 的完整版 11.4 MB 才是齐的，所以
+    # 只要没显式跳过，就一律用它覆盖 zip 自带的那份；下载失败再退回 zip 里的。
+    # 这样「每次重装都得手工换 geosite」的问题在源头消失。
+    if [[ "${XHY_SKIP_GEODATA:-0}" == "1" ]]; then
+        info "XHY_SKIP_GEODATA=1，保留 release 自带的 geodata"
+        for f in geoip.dat geosite.dat; do
+            [[ -s "$XRAY_ASSET/$f" ]] || warn "$XRAY_ASSET/$f 缺失（已按跳过处理），geoip:private 等规则将不生效"
+        done
+    elif (( $(disk_free_mb /) >= 60 )); then
+        local gf gsz
+        for gf in geoip.dat geosite.dat; do
+            info "更新 $gf（完整版）"
+            if fetch "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/$gf" \
+                "$XRAY_ASSET/$gf.new"; then
+                gsz="$(stat -c%s "$XRAY_ASSET/$gf.new" 2>/dev/null || echo 0)"
+                if (( gsz < 102400 )); then
+                    warn "$gf 下载内容异常（${gsz} bytes），保留现有文件"
+                    rm -f "$XRAY_ASSET/$gf.new"
+                else
+                    mv -f "$XRAY_ASSET/$gf.new" "$XRAY_ASSET/$gf"
+                    chmod 0644 "$XRAY_ASSET/$gf"
+                fi
+            else
+                rm -f "$XRAY_ASSET/$gf.new"
+                warn "$gf 下载失败，保留现有文件"
+            fi
+            [[ -s "$XRAY_ASSET/$gf" ]] || warn "$XRAY_ASSET/$gf 仍缺失，相关路由规则将不生效"
+        done
+    else
+        warn "磁盘余量 $(disk_free_mb /) MB < 60 MB，跳过 geodata 更新（保留现有文件）"
+    fi
 
     if [[ "v$got" != "$ver" ]]; then
         warn "版本校验: 请求 $ver，实际 v$got（预发布版或镜像差异时可能不同，请确认）"
@@ -204,7 +228,17 @@ core_status() {
     printf '二进制   : %s\n' "$XRAY_BIN"
     printf 'Geodata  : %s\n' "$XRAY_ASSET"
     [[ -s "$XRAY_ASSET/geoip.dat" ]] && printf '  geoip.dat   %s bytes\n' "$(stat -c%s "$XRAY_ASSET/geoip.dat" 2>/dev/null || echo '?')"
-    [[ -s "$XRAY_ASSET/geosite.dat" ]] && printf '  geosite.dat %s bytes\n' "$(stat -c%s "$XRAY_ASSET/geosite.dat" 2>/dev/null || echo '?')"
+    if [[ -s "$XRAY_ASSET/geosite.dat" ]]; then
+        local gssz
+        gssz="$(stat -c%s "$XRAY_ASSET/geosite.dat" 2>/dev/null || echo 0)"
+        printf '  geosite.dat %s bytes' "$gssz"
+        # 完整版（Loyalsoldier）11.4 MB 上下；低于 9 MB 基本就是 release zip 里
+        # 那份精简版，relay 的 --categories 会静默命中不到。
+        if [[ "$gssz" =~ ^[0-9]+$ ]] && (( gssz < 9000000 )); then
+            printf '  ⚠ 疑似精简版（缺分类，跑 xhy update geodata 换完整版）'
+        fi
+        printf '\n'
+    fi
     if [[ -x "$CF_BIN" ]]; then
         printf 'cloudflared: %s\n' "$("$CF_BIN" --version 2>&1 | head -1)"
     fi

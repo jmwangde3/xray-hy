@@ -35,10 +35,19 @@ case "${XHY_LANG:-}" in
     zh|ZH|cn|CN|chinese)       _XHY_POSIX_LANG=zh ;;
     *)
         _xhy_lc="${LC_ALL:-${LC_CTYPE:-${LANG:-}}}"
+        # 空 locale ≠ 非 UTF-8：Alpine 出厂没有 LANG，普通 ssh 照样显示中文，
+        # 早期把空值当 C locale 会让 ssh 会话一律变英文（与 lib/i18n.sh 同源）。
         case "$_xhy_lc" in
-            zh*|ZH*) ;;
-            C|POSIX|c|posix|"") _XHY_POSIX_LANG=en ;;
+            zh*|ZH*) _XHY_POSIX_LANG=zh ;;
+            C|POSIX|c|posix) _XHY_POSIX_LANG=en ;;
+            "") : ;;
             *) case "${TERM:-}" in linux|vt100|vt102|ansi|cons25|sun) _XHY_POSIX_LANG=en ;; esac ;;
+        esac
+        # tty 设备名比 TERM 可靠：VNC/串口 getty 是 /dev/tty1..6、/dev/ttyS0，
+        # SSH 是 /dev/pts/N。VNC 控制台没有中文字形，这里切英文。
+        _xhy_tty="$(tty 2>/dev/null || true)"
+        case "$_xhy_tty" in
+            /dev/tty[0-9]*|/dev/ttyS*|/dev/ttyAMA*|/dev/hvc*) _XHY_POSIX_LANG=en ;;
         esac
         _cm="$(locale charmap 2>/dev/null || true)"
         case "$_cm" in
@@ -135,8 +144,8 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.11.4"
-XHY_BUILD="c575eeefe5f9"
+XHY_VERSION="1.12.0"
+XHY_BUILD="2666999062ee"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -154,7 +163,7 @@ fi
 # ===================== lib/common.sh =====================
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.11.4}"
+XHY_VERSION="${XHY_VERSION:-1.12.0}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -579,6 +588,7 @@ verify_release_digest() {
 # 不带 declare：本文件是在 load_libs() 函数内被 source 的，显式 declare 会创建
 # 局部变量，函数返回后数组就丢了（同一个坑 scanner.sh 的 XHY_TFO_CACHE 踩过）。
 XHY_T_ZH=(
+    "  xhy lang auto  自动判定（默认；VNC 控制台英文 / SSH 中文）"
     "菜单 1 / 2 的地域名单也可选择「只要 TFO」：逐站实测，不支持的不兜底；"
     "该选择会保存，之后新建节点继续沿用。大网站不等于支持 TFO，以实测为准。"
     "地域名单里没有通过校验且支持被动 TFO 的站点。"
@@ -695,6 +705,7 @@ XHY_T_ZH=(
 )
 
 XHY_T_EN=(
+    "  xhy lang auto  detect (default; VNC console: en / SSH: zh)"
     "Region menus 1 / 2 can also require TFO: probe each site and never fall back to one without it;"
     "The choice is saved for future nodes. Big-name sites do not necessarily support TFO; live probing decides."
     "No candidate in the region list both passed validation and supports passive TFO."
@@ -905,6 +916,13 @@ xhy_lang_init() {
             # 控制台，输出中文给日志和管道读完全没问题，不该切成英文。
             # 中文 locale 明确出现时尊重用户（他自己配了字形）。
             case "${TERM:-}" in linux|vt100|vt102|ansi|cons25|sun) console=1 ;; esac
+            # tty 设备名比 TERM 更可靠：getty 起在 /dev/tty1..6 或 /dev/ttyS0，
+            # SSH 一定是 /dev/pts/N。VNC 里 TERM 被改成 xterm 也照样判成控制台。
+            # 「xhy lang en 存进 state.env」是全局的，会连 SSH 一起变英文；
+            # 现在用 auto + 这层判定即可「VNC 英文 / SSH 中文」两者兼得。
+            case "$(tty 2>/dev/null || true)" in
+                /dev/tty[0-9]*|/dev/ttyS*|/dev/ttyAMA*|/dev/hvc*) console=1 ;;
+            esac
             if (( no_utf8 == 1 )); then
                 # 脚本输出是 UTF-8、终端却不是：中文只会更乱，直接英文。
                 XHY_LANG_EFFECTIVE="en"
@@ -1307,7 +1325,21 @@ ensure_optional() {
         qrencode)
             if ! have_cmd qrencode; then
                 case "$XHY_DISTRO" in
-                    alpine) pkg_install libqrencode libqrencode-tools 2>/dev/null || true ;;
+                    alpine)
+                        # qrencode 在 Alpine 的 community 源；精简镜像常把 community
+                        # 注释掉（/etc/apk/repositories 只留 main），直接 apk add
+                        # 会报 "no such package"。按已启用的 main 行推 community，
+                        # 用 -X 临时附加，不改系统源、不引入常驻配置。
+                        local _repo=""
+                        _repo="$(sed -n 's#^\([^#][^#]*\)/main[[:space:]]*$#\1/community#p' \
+                                    /etc/apk/repositories 2>/dev/null | head -1)"
+                        if [[ -n "$_repo" ]]; then
+                            run_lim "$XHY_PKG_TIMEOUT" apk add --no-cache -X "$_repo" \
+                                libqrencode-tools 2>/dev/null || \
+                                pkg_install libqrencode libqrencode-tools 2>/dev/null || true
+                        else
+                            pkg_install libqrencode libqrencode-tools 2>/dev/null || true
+                        fi ;;
                     debian) pkg_install qrencode 2>/dev/null || true ;;
                     rhel)   pkg_install qrencode 2>/dev/null || true ;;
                 esac
@@ -1468,15 +1500,39 @@ xray_install() {
         mv -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f"
     done
 
-    # Older/newer release archives occasionally omit geodata. geoip:private
-    # routing rules need it, so fetch the community dat files as a fallback.
-    for f in geoip.dat geosite.dat; do
-        if [[ ! -s "$XRAY_ASSET/$f" ]]; then
-            info "补充下载 $f"
-            fetch "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/$f" \
-                "$XRAY_ASSET/$f" || warn "$f 下载失败，相关路由规则将不生效"
-        fi
-    done
+    # v1.12.0：官方 release zip 自带的 geosite.dat 是**精简版**（7.5 MB，缺
+    # category-ai-!cn 等一大批分类），装了它 relay 的 --categories 会静默命中
+    # 不到、域名直接走本地出口。Loyalsoldier 的完整版 11.4 MB 才是齐的，所以
+    # 只要没显式跳过，就一律用它覆盖 zip 自带的那份；下载失败再退回 zip 里的。
+    # 这样「每次重装都得手工换 geosite」的问题在源头消失。
+    if [[ "${XHY_SKIP_GEODATA:-0}" == "1" ]]; then
+        info "XHY_SKIP_GEODATA=1，保留 release 自带的 geodata"
+        for f in geoip.dat geosite.dat; do
+            [[ -s "$XRAY_ASSET/$f" ]] || warn "$XRAY_ASSET/$f 缺失（已按跳过处理），geoip:private 等规则将不生效"
+        done
+    elif (( $(disk_free_mb /) >= 60 )); then
+        local gf gsz
+        for gf in geoip.dat geosite.dat; do
+            info "更新 $gf（完整版）"
+            if fetch "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/$gf" \
+                "$XRAY_ASSET/$gf.new"; then
+                gsz="$(stat -c%s "$XRAY_ASSET/$gf.new" 2>/dev/null || echo 0)"
+                if (( gsz < 102400 )); then
+                    warn "$gf 下载内容异常（${gsz} bytes），保留现有文件"
+                    rm -f "$XRAY_ASSET/$gf.new"
+                else
+                    mv -f "$XRAY_ASSET/$gf.new" "$XRAY_ASSET/$gf"
+                    chmod 0644 "$XRAY_ASSET/$gf"
+                fi
+            else
+                rm -f "$XRAY_ASSET/$gf.new"
+                warn "$gf 下载失败，保留现有文件"
+            fi
+            [[ -s "$XRAY_ASSET/$gf" ]] || warn "$XRAY_ASSET/$gf 仍缺失，相关路由规则将不生效"
+        done
+    else
+        warn "磁盘余量 $(disk_free_mb /) MB < 60 MB，跳过 geodata 更新（保留现有文件）"
+    fi
 
     if [[ "v$got" != "$ver" ]]; then
         warn "版本校验: 请求 $ver，实际 v$got（预发布版或镜像差异时可能不同，请确认）"
@@ -1536,7 +1592,17 @@ core_status() {
     printf '二进制   : %s\n' "$XRAY_BIN"
     printf 'Geodata  : %s\n' "$XRAY_ASSET"
     [[ -s "$XRAY_ASSET/geoip.dat" ]] && printf '  geoip.dat   %s bytes\n' "$(stat -c%s "$XRAY_ASSET/geoip.dat" 2>/dev/null || echo '?')"
-    [[ -s "$XRAY_ASSET/geosite.dat" ]] && printf '  geosite.dat %s bytes\n' "$(stat -c%s "$XRAY_ASSET/geosite.dat" 2>/dev/null || echo '?')"
+    if [[ -s "$XRAY_ASSET/geosite.dat" ]]; then
+        local gssz
+        gssz="$(stat -c%s "$XRAY_ASSET/geosite.dat" 2>/dev/null || echo 0)"
+        printf '  geosite.dat %s bytes' "$gssz"
+        # 完整版（Loyalsoldier）11.4 MB 上下；低于 9 MB 基本就是 release zip 里
+        # 那份精简版，relay 的 --categories 会静默命中不到。
+        if [[ "$gssz" =~ ^[0-9]+$ ]] && (( gssz < 9000000 )); then
+            printf '  ⚠ 疑似精简版（缺分类，跑 xhy update geodata 换完整版）'
+        fi
+        printf '\n'
+    fi
     if [[ -x "$CF_BIN" ]]; then
         printf 'cloudflared: %s\n' "$("$CF_BIN" --version 2>&1 | head -1)"
     fi
@@ -4429,6 +4495,11 @@ rollback_config() {
 # ===================== lib/links.sh =====================
 # xray-hy / vless:// share-link generation (VLESS share-link standard).
 
+# 由 cmd_link 按 --qr / --png 设置；link_from_env 在链接下方追加二维码。
+LINK_QR="${LINK_QR:-0}"
+LINK_QR_OUT="${LINK_QR_OUT:-}"
+LINK_QR_MULTI="${LINK_QR_MULTI:-0}"
+
 _link_host() {
     local h="$1"
     if [[ "$h" == *:* && "$h" != \[* ]]; then printf '[%s]' "$h"; else printf '%s' "$h"; fi
@@ -4505,6 +4576,10 @@ link_from_env() {
     fi
     printf '\n  %s\n\n' "$uri"
     [[ -n "$uri6" ]] && printf '  IPv6 变体: %s\n\n' "$uri6"
+    if (( LINK_QR == 1 )); then
+        printf '\n'
+        link_qr "$envf" "$LINK_QR_OUT"
+    fi
     printf '  %s\n' "注意：完整链接等同于访问凭证，请勿公开分享。"
 }
 
@@ -4518,12 +4593,33 @@ link_all() {
     (( n > 0 )) || warn "暂无节点，先用 xhy add 添加一个。"
 }
 
+# 生成二维码：终端里直接给手机扫，或 --png 存成 0600 图片文件再传到手机。
+# 二维码内容就是完整的 vless:// / hysteria2:// 链接（含凭证），所以 PNG 必须 0600。
 link_qr() {
-    local envf="$1" uri
+    local envf="$1" out="${2:-}" uri t fname base
     ensure_optional qrencode
-    have_cmd qrencode || die "未安装 qrencode，无法生成二维码。"
+    have_cmd qrencode || die "未安装 qrencode，无法生成二维码（Alpine: apk add --no-cache -X <community-mirror> libqrencode-tools）"
     uri="$(link_uri "$envf")"
-    qrencode -t ANSIUTF8 "$uri"
+    if [[ -n "$out" ]]; then
+        fname="$out"
+        # 多节点 + --png：按 MODE_PORT 加后缀，避免互相覆盖。
+        if (( LINK_QR_MULTI == 1 )); then
+            base="${out%.png}"
+            [[ "$out" == *.png ]] || base="$out"
+            fname="${base}-${MODE:-node}_${PORT:-0}.png"
+        fi
+        qrencode -t PNG -o "$fname" "$uri" || { err "二维码生成失败: $fname"; return 1; }
+        chmod 600 "$fname"
+        ok "二维码已写入 $fname（0600，含凭证，勿公开）"
+        return 0
+    fi
+    # 控制台 / 英文模式用 ANSI：纯 ASCII 字节 + 颜色，不依赖 UTF-8 半块字形；
+    # 普通 UTF-8 终端用 ANSIUTF8：1 字符/模块，扫起来最清楚。
+    t="ANSIUTF8"
+    case "${TERM:-}" in linux|vt100|vt102|ansi|cons25|sun) t="ANSI" ;; esac
+    [[ "${XHY_LANG_EFFECTIVE:-zh}" == "en" ]] && t="ANSI"
+    printf '  二维码（手机 App 扫码导入）：\n'
+    qrencode -t "$t" "$uri"
 }
 
 # ===================== lib/export.sh =====================
@@ -5459,7 +5555,8 @@ preflight_check() {
 # 两种角色（同一台机器只扮其一）：
 #   land  : 落地/接收端（例：硅谷）。开一个 vless/tcp 入站，仅放行入口机公网 IP，
 #           出站走默认 freedom（直连落地机本地出口）。
-#   entry : 入口/转发端（例：东京）。把 geosite(AI/美区) + 可选 geoip:us 的流量，
+#   entry : 入口/转发端（例：东京）。把 geosite(AI/美区) + --domains 明文规则 +
+#           可选 geoip:us 的流量，
 #           经 vless 出站转发到落地机的中继端口；其余海外流量本地 freedom 直出。
 #
 # 配置管线（v1.9.4 重构，重要）：
@@ -5490,6 +5587,7 @@ RELAY_PROBE_TIMEOUT_DEFAULT="5s"
 # 全局状态（relay_env_save 之前由各子命令赋值；relay_env_load 从文件读回）
 RELAY_ROLE=""; RELAY_PORT=""; RELAY_ALLOW=""; RELAY_UUID=""
 RELAY_UPSTREAM=""; RELAY_CATEGORIES=""; RELAY_FW_CHAIN=""
+RELAY_DOMAINS=""
 RELAY_SECURITY=""; RELAY_SNI=""; RELAY_PIN=""
 RELAY_CERT=""; RELAY_KEY=""; RELAY_GEOIP_US=""; RELAY_TAG=""
 RELAY_FALLBACK=""; RELAY_TFO=""
@@ -5497,6 +5595,7 @@ RELAY_FALLBACK=""; RELAY_TFO=""
 relay_reset_vars() {
     RELAY_ROLE=""; RELAY_PORT=""; RELAY_ALLOW=""; RELAY_UUID=""
     RELAY_UPSTREAM=""; RELAY_CATEGORIES=""; RELAY_FW_CHAIN=""
+    RELAY_DOMAINS=""
     RELAY_SECURITY=""; RELAY_SNI=""; RELAY_PIN=""
     RELAY_CERT=""; RELAY_KEY=""; RELAY_GEOIP_US=""; RELAY_TAG=""
     RELAY_FALLBACK=""; RELAY_TFO=""
@@ -5532,7 +5631,8 @@ Usage: xhy relay <command> [options]
   entry    Forward AI/US traffic to the landing host.
            xhy relay entry --to <land-ip>:<port> [--uuid UUID]
                           [--categories a,b,c|ai|media|none] [--no-geoip-us]
-                          [--tls] [--sni NAME] [--pin HEX] [--tag TAG]
+                          [--domains site.com,domain:x.com,full:y.com,regexp:^z\.]
+                          [--no-domains] [--tag TAG]
                           [--no-fallback] [--no-tfo]
   reapply  Re-inject after the config was rebuilt / restored from a snapshot.
   status   Show this host's role, port, upstream and live checks.
@@ -5540,6 +5640,10 @@ Usage: xhy relay <command> [options]
   export   Print the command to run on the peer host (and a vless:// link).
   del      Remove this host's relay config, firewall rule and fragment.
 
+Domains: --domains takes plaintext rules for sites no geosite category covers
+         (trimmed geosite.dat builds are missing many, e.g. character.ai / suno.com).
+         Bare name = domain: (any subdomain). Also accepts domain:/full:/keyword:/
+         regexp:/geosite: prefixes. Kept in relay.env; --no-domains clears it.
 Defaults: port 14430, categories openai,anthropic,google,tiktok,netflix, tag us-relay,
           geoip:us OFF -- only geosite rules are forwarded by default. Use
           --geoip-us on to restore the old "all US IPs through the relay" behavior;
@@ -5563,7 +5667,8 @@ EOF
   entry    把 AI / 美区流量转发到落地机。
            xhy relay entry --to <落地机IP>:<端口> [--uuid UUID]
                           [--categories a,b,c|ai|media|none] [--no-geoip-us]
-                          [--tls] [--sni NAME] [--pin HEX] [--tag TAG]
+                          [--domains 站点.com,domain:x.com,full:y.com,regexp:^z\.]
+                          [--no-domains] [--tag TAG]
                           [--no-fallback] [--no-tfo]
   reapply  配置被重建 / 从快照还原后重新注入（改造后一般用不到了，留作兜底）
   status   看本机角色、端口、上游与实时检查
@@ -5571,6 +5676,9 @@ EOF
   export   打印对端要执行的那条命令（以及 vless:// 链接）
   del      移除本机 relay 配置、防火墙规则、入站片段
 
+域名规则：--domains 收明文规则，专治 geosite 里没分类的站（精简版 geosite.dat 缺
+      一大堆，比如 character.ai / suno.com）。裸域名 = domain:（含子域），也认
+      domain:/full:/keyword:/regexp:/geosite: 前缀。存进 relay.env，--no-domains 清空。
 默认值：端口 14430、分类 openai,anthropic,google,tiktok,netflix、出站标签 us-relay、
       geoip:us 默认 off（只按 geosite 分类转发，不再把美国 CDN IP 全量绕中继）；
       要恢复旧行为必须显式 --geoip-us on，--no-geoip-us 保留为等价别名。
@@ -5595,6 +5703,7 @@ relay_env_save() {
         [[ -n "$RELAY_UUID" ]]       && printf 'RELAY_UUID=%s\n' "$RELAY_UUID"
         [[ -n "$RELAY_UPSTREAM" ]]   && printf 'RELAY_UPSTREAM=%s\n' "$RELAY_UPSTREAM"
         [[ -n "$RELAY_CATEGORIES" ]] && printf 'RELAY_CATEGORIES=%s\n' "$RELAY_CATEGORIES"
+        [[ -n "$RELAY_DOMAINS" ]]    && printf 'RELAY_DOMAINS=%s\n' "$RELAY_DOMAINS"
         [[ -n "$RELAY_FW_CHAIN" ]]   && printf 'RELAY_FW_CHAIN=%s\n' "$RELAY_FW_CHAIN"
         [[ -n "$RELAY_SECURITY" ]]   && printf 'RELAY_SECURITY=%s\n' "$RELAY_SECURITY"
         [[ -n "$RELAY_SNI" ]]        && printf 'RELAY_SNI=%s\n' "$RELAY_SNI"
@@ -5670,6 +5779,62 @@ relay_norm_categories() {
         [[ "$seen" == *" $c "* ]] && continue
         seen+="$c "
         out+="${out:+,}$c"
+    done
+    printf '%s' "$out"
+}
+
+# 明文域名规则（v1.12.0）。geosite 是别人维护的清单，总有站点没进分类——尤其
+# 精简版 geosite.dat（部分镜像只带 category-ai-!cn 的子集，连 category-ai-!cn
+# 这个名字本身都不在）。这类站只能靠明文规则兜：--domains 允许
+#   bare.com                  → domain:bare.com（裸域名 = 含子域，最常用）
+#   domain:x.com / full:x.com / keyword:xx / regexp:^a\.b$ / geosite:tag
+# 全部拼进同一条 domain 数组，命中即转发，顺序无影响。
+relay_norm_domains() {
+    local in="${1:-}" d kind val out="" seen=$'\n'
+    [[ -n "$in" ]] || { printf ''; return 0; }
+    # 带空格就没法「逗号分隔」了（下面 for 会按空白再切一次），直接拒掉更明确
+    case "$in" in
+        *[[:space:]]*)
+            relay_say err "域名规则不能含空格：$in" "domain rules must not contain spaces: $in"
+            return 1 ;;
+    esac
+    for d in ${in//,/ }; do
+        [[ -n "$d" ]] || continue
+        case "$d" in
+            domain:*|full:*|keyword:*|regexp:*|geosite:*) ;;
+            *) d="domain:$d" ;;
+        esac
+        kind="${d%%:*}"; val="${d#*:}"
+        if [[ -z "$val" ]]; then
+            relay_say err "域名规则缺少值：$d" "domain rule has no value: $d"
+            return 1
+        fi
+        if [[ "$kind" == "regexp" ]]; then
+            # 正则要允许 ^ $ . * + ? ( ) | { } [ ] \ - /，所以不能用白名单。
+            # 只挡真正会破坏 JSON / 分词的三类：引号、空白、逗号。
+            case "$val" in
+                *\"*|*\'*|*[[:space:]]*|*,*)
+                    relay_say err "正则域名含非法字符（引号/空白/逗号）：$d" \
+                                 "regexp rule contains quote, space or comma: $d"
+                    return 1 ;;
+            esac
+            # xray 的 regexp: 走 Go 正则，只做基本可读性约束：必须能看出非空
+            if [[ ${#val} -gt 200 ]]; then
+                relay_say err "正则太长（>200 字符）：$d" "regexp rule too long (>200): $d"
+                return 1
+            fi
+        else
+            # domain/full/keyword/geosite：字母数字点横线星号，够用且写不坏 JSON
+            case "$val" in
+                *[!A-Za-z0-9._*-]*)
+                    relay_say err "域名字符非法：$d（只允许字母数字 . _ - *）" \
+                                 "illegal chars in domain rule: $d (letters, digits, . _ - * only)"
+                    return 1 ;;
+            esac
+        fi
+        [[ "$seen" == *$'\n'"$d"$'\n'* ]] && continue
+        seen+="$d"$'\n'
+        out+="${out:+,}$d"
     done
     printf '%s' "$out"
 }
@@ -5811,6 +5976,13 @@ relay_routing_rules_json() {
     for c in ${RELAY_CATEGORIES//,/ }; do
         [[ -n "$c" ]] || continue
         doms+="${sep}\"geosite:${c}\""; sep=","
+    done
+    # v1.12.0：明文域名规则与 geosite 分类同处一条 domain 数组，谁命中都转发。
+    # 这样 geosite.dat 缺哪个分类都不影响这些站，换机器重建也不会失效。
+    for c in ${RELAY_DOMAINS//,/ }; do
+        [[ -n "$c" ]] || continue
+        # regexp 里可能有 \（如 regexp:^a\.b$），写进 JSON 前必须转义成 \\
+        doms+="${sep}\"${c//\\/\\\\}\""; sep=","
     done
     if [[ -n "$doms" ]]; then
         out="{\"type\":\"field\",\"domain\":[${doms}],\"${key}\":\"${tgt}\"}"
@@ -6111,12 +6283,14 @@ relay_entry_hint() {
 }
 
 relay_entry() {
-    local upstream="" uuid="" categories="" geoip="off" tls=0 sni="" pin="" tag="" fb="" tfo=""
+    local upstream="" uuid="" categories="" domains="" domains_set=0 geoip="off" tls=0 sni="" pin="" tag="" fb="" tfo=""
     while (( $# > 0 )); do
         case "$1" in
             --to)         (( $# >= 2 )) || die "--to 缺少参数"; upstream="$2"; shift 2 ;;
             --uuid)       (( $# >= 2 )) || die "--uuid 缺少参数"; uuid="$2"; shift 2 ;;
             --categories) (( $# >= 2 )) || die "--categories 缺少参数"; categories="$2"; shift 2 ;;
+            --domains)    (( $# >= 2 )) || die "--domains 缺少参数"; domains="$2"; domains_set=1; shift 2 ;;
+            --no-domains) domains=""; domains_set=1; shift ;;
             --geoip-us)   (( $# >= 2 )) || die "--geoip-us 缺少参数"; geoip="$2"; shift 2 ;;
             --no-geoip-us) geoip="off"; shift ;;
             --tls)        tls=1; shift ;;
@@ -6143,6 +6317,11 @@ relay_entry() {
     [[ -n "$uuid" ]] || uuid="$(uuid_gen)"
     [[ "$uuid" =~ ^[A-Za-z0-9-]+$ ]] || die "UUID 不合法: $uuid"
     categories="$(relay_norm_categories "${categories:-$RELAY_DEFAULT_CATEGORIES}")" || return 1
+    # 域名规则先校验再动手：非法字符要在快照/写配置之前就退出去
+    local dom_norm=""
+    if (( domains_set )) && [[ -n "$domains" && "$domains" != "none" ]]; then
+        dom_norm="$(relay_norm_domains "$domains")" || return 1
+    fi
     [[ "$geoip" == "on" || "$geoip" == "off" ]] || die "--geoip-us 只接受 on / off"
     [[ -n "$tag" ]] && { relay_valid_host "$tag" || die "--tag 不合法: $tag"; }
     [[ -z "$fb" || "$fb" == "on" || "$fb" == "off" ]] || die "--fallback 只接受 on / off"
@@ -6150,7 +6329,11 @@ relay_entry() {
     # 同机原本是 land → 摘掉入站片段与防火墙规则（角色互斥）
     relay_env_load >/dev/null 2>&1 || true
     local prev_role="${RELAY_ROLE:-}" prev_port="${RELAY_PORT:-}" prev_allow="${RELAY_ALLOW:-}"
+    local prev_domains="${RELAY_DOMAINS:-}"
     relay_reset_vars
+    # 没传 --domains 时沿用 relay.env 里的旧值（它只是一层补丁，不该被顺手清掉）；
+    # 要清空得显式 --no-domains。
+    if (( domains_set )); then RELAY_DOMAINS="$dom_norm"; else RELAY_DOMAINS="$prev_domains"; fi
     if [[ "$prev_role" == "land" ]]; then
         relay_remove_fragments
         [[ -n "$prev_port" ]] && relay_fw_del "$prev_port" "$prev_allow" ""
@@ -6179,8 +6362,8 @@ relay_entry() {
 
     relay_say ok "中继出站已就绪：流量 → ${RELAY_UPSTREAM}" \
                 "relay outbound ready: traffic -> ${RELAY_UPSTREAM}"
-    relay_say info "分类=${categories:-无}  geoip:us=${geoip}  标签=$(relay_out_tag)" \
-                  "categories=${categories:-none}  geoip:us=${geoip}  tag=$(relay_out_tag)"
+    relay_say info "分类=${categories:-无}  域名规则=${RELAY_DOMAINS:-无}  geoip:us=${geoip}  标签=$(relay_out_tag)" \
+                  "categories=${categories:-none}  domains=${RELAY_DOMAINS:-none}  geoip:us=${geoip}  tag=$(relay_out_tag)"
     if relay_fallback_on; then
         relay_say info "失联回落已开：balancer $(relay_lb_tag) → direct（探活 ${RELAY_PROBE_INTERVAL:-$RELAY_PROBE_INTERVAL_DEFAULT}）" \
                       "fallback on: balancer $(relay_lb_tag) -> direct (probe ${RELAY_PROBE_INTERVAL:-$RELAY_PROBE_INTERVAL_DEFAULT})"
@@ -6273,7 +6456,7 @@ relay_status() {
     if [[ "$brief" == "1" ]]; then
         case "$RELAY_ROLE" in
             land)  printf 'relay     : land :%s ← %s\n' "$RELAY_PORT" "$RELAY_ALLOW" ;;
-            entry) printf 'relay     : entry → %s（%s）\n' "$RELAY_UPSTREAM" "${RELAY_CATEGORIES:-无分类}" ;;
+            entry) printf 'relay     : entry → %s（%s%s）\n' "$RELAY_UPSTREAM" "${RELAY_CATEGORIES:-无分类}" "${RELAY_DOMAINS:+ +$(printf '%s' "$RELAY_DOMAINS" | tr ',' '\n' | wc -l)域}" ;;
         esac
         return 0
     fi
@@ -6297,6 +6480,7 @@ relay_status() {
             printf '  上游   : %s\n' "$RELAY_UPSTREAM"
             printf '  传输   : none（明文 vless）\n' 
             printf '  分类   : %s\n' "${RELAY_CATEGORIES:-（无分类）}"
+            printf '  域名   : %s\n' "${RELAY_DOMAINS:-（无）}"
             printf '  geoip  : %s\n' "${RELAY_GEOIP_US:-off}"
             printf '  标签   : %s\n' "$(relay_out_tag)"
             if relay_fallback_on; then
@@ -6561,7 +6745,7 @@ cmd_lang() {
         printf '当前语言 : %s（state: %s）\n' "$XHY_LANG_EFFECTIVE" "$(state_get XHY_LANG auto)"
         printf '  xhy lang en    强制英文（纯 ASCII；云 VNC 控制台中文是小方块时用）\n'
         printf '  xhy lang zh    强制中文\n'
-        printf '  xhy lang auto  按终端 / locale 自动判定（默认）\n'
+        printf '  xhy lang auto  自动判定（默认；VNC 控制台英文 / SSH 中文）\n'
         printf '  单次强制：XHY_LANG=en xhy  或  XHY_ASCII=1 xhy\n'
         return 0
     fi
@@ -6588,7 +6772,10 @@ Usage: xhy <command> [options]
     add <mode> [--port N] [opts]  Add a node
     edit [mode] [port]            Edit a node; no args = pick by number
     list                          List nodes
-    link [--all|--uri|--qr]       Export vless:// links
+    link [--all|--uri] [--qr] [--png FILE]  Export vless:// links; --qr prints a
+                                            scannable QR for phone apps; --png
+                                            writes a 0600 QR PNG (keeps secrets)
+    link <mode> [port] [--qr] [--png FILE]  Same, for one node
     del [mode] [port]             Delete node; no args = pick by number
     menu                          Interactive menu
 
@@ -6664,9 +6851,11 @@ Usage: xhy <command> [options]
     XHY_LANG=en xhy <command>   Force English for one run; XHY_ASCII=1 is the same
     XHY_LANG=zh xhy <command>   Force Chinese for one run
     English mode guarantees printable ASCII; Chinese mode is byte-for-byte
-    unchanged. auto checks LANG/TERM/charmap: C locale, non-UTF-8 and
-    linux/vt100 style consoles switch to English; ordinary UTF-8 SSH
-    terminals stay Chinese.
+    unchanged. auto checks LANG/TERM/charmap/tty: C locale, non-UTF-8 and
+    console ttys (/dev/tty1..6, /dev/ttyS0) switch to English; ordinary
+    UTF-8 SSH sessions (/dev/pts/N) stay Chinese. Use auto, NOT 'lang en',
+    for a VNC-only English setting -- 'en' is persisted globally and also
+    turns SSH output English.
 
   Version & update
     core [status|channel pinned|channel latest|channel vX.Y.Z|update [--force]]
@@ -6719,7 +6908,10 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
     add <mode> [--port N] [选项] 添加节点
     edit [mode] [port]          编辑已有节点；省略参数时列出编号选择（回车=不改）
     list                        列出所有节点
-    link [--all|--uri|--qr]     导出 vless:// 链接
+    link [--all|--uri] [--qr] [--png FILE] 导出 vless:// 链接；--qr 打印可扫二维码
+                                           （手机 App 直接导入）；--png 存成 0600
+                                           二维码图片（含凭证，勿公开）
+    link <mode> [port] [--qr] [--png FILE]  单个节点同上
     del [mode] [port]           删除节点；省略参数时列出编号选择
     menu                        交互式菜单
 
@@ -6787,8 +6979,9 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
     XHY_LANG=en xhy <命令>      单次强制英文；XHY_ASCII=1 同义
     XHY_LANG=zh xhy <命令>      单次强制中文
     英文模式下所有输出保证是可打印 ASCII；中文模式下输出逐字节不变。
-    auto 会按 LANG/TERM/charmap 判定：C locale、非 UTF-8、linux/vt100 之类
-    控制台终端自动切英文，普通 UTF-8 SSH 终端保持中文。
+    auto 会按 LANG/TERM/charmap/tty 判定：C locale、非 UTF-8、控制台 tty
+    （/dev/tty1..6、/dev/ttyS0）自动切英文，普通 UTF-8 SSH（/dev/pts/N）保持中文。
+    VNC 只想英文请用 auto，别用 lang en —— en 会全局持久化，把 SSH 也变英文。
 
   版本与更新
     core [status|channel pinned|channel latest|channel vX.Y.Z|update [--force]]
@@ -7110,22 +7303,41 @@ cmd_config_menu() {
 }
 
 cmd_link() {
-    local what="${1:---all}" f
-    case "$what" in
-        --uri)
-            for f in "$XHY_NODES"/*.env; do
-                [[ -f "$f" ]] || continue
-                link_uri "$f"
-            done
-            return 0 ;;
-        --all|"") link_all; return ;;
-        --qr)
-            local n=0; for f in "$XHY_NODES"/*.env; do [[ -f "$f" ]] || continue; link_qr "$f"; n=1; done
-            (( n == 1 )) || warn "暂无节点"; return ;;
-    esac
-    # link <mode> <port>
-    f="$(node_file "$what" "${2:-}")"
-    [[ -f "$f" ]] || die "节点不存在: ${what}_${2:-}"
+    local qr=0 png="" want="" f a n=0 cnt=0
+    local -a pos=()
+    while (($#)); do
+        a="$1"
+        case "$a" in
+            --qr)     qr=1; shift ;;
+            --png)    png="${2:?--png 需要文件路径}"; qr=1; shift 2 ;;
+            --uri)    want="--uri"; shift ;;
+            --all)    want="--all"; shift ;;
+            --*)      die "未知参数: $a" ;;
+            *)        pos+=("$a"); shift ;;
+        esac
+    done
+    LINK_QR="$qr"; LINK_QR_OUT="$png"; LINK_QR_MULTI=0
+    # --uri 只出链接文本，给脚本 / 剪贴板用，不掺二维码。
+    if [[ "$want" == "--uri" ]]; then
+        for f in "$XHY_NODES"/*.env; do
+            [[ -f "$f" ]] || continue
+            link_uri "$f"; n=1
+        done
+        (( n == 1 )) || warn "暂无节点，先用 xhy add 添加一个。"
+        return 0
+    fi
+    if (( ${#pos[@]} == 0 )); then
+        # 全节点；--png 时多节点各写一份带 MODE_PORT 后缀的 PNG。
+        for f in "$XHY_NODES"/*.env; do [[ -f "$f" ]] && cnt=$((cnt + 1)); done
+        (( cnt > 1 )) && [[ -n "$png" ]] && LINK_QR_MULTI=1
+        link_all
+        return 0
+    fi
+    # link <mode> [port] [--qr] [--png FILE]（标志可放任意位置）
+    local mode="${pos[0]}" port=""
+    (( ${#pos[@]} > 1 )) && port="${pos[1]}"
+    f="$(node_file "$mode" "$port")"
+    [[ -f "$f" ]] || die "节点不存在: ${mode}_${port}"
     link_from_env "$f"
 }
 
@@ -7229,56 +7441,6 @@ EOF
             0) return 0 ;;
         esac
     done
-}
-
-cmd_link() {
-    local what="${1:---all}" f
-    case "$what" in
-        --uri)
-            for f in "$XHY_NODES"/*.env; do
-                [[ -f "$f" ]] || continue
-                link_uri "$f"
-            done
-            return 0 ;;
-        --all|"") link_all; return ;;
-        --qr)
-            local n=0; for f in "$XHY_NODES"/*.env; do [[ -f "$f" ]] || continue; link_qr "$f"; n=1; done
-            (( n == 1 )) || warn "暂无节点"; return ;;
-    esac
-    # link <mode> <port>
-    f="$(node_file "$what" "${2:-}")"
-    [[ -f "$f" ]] || die "节点不存在: ${what}_${2:-}"
-    link_from_env "$f"
-}
-
-cmd_uninstall() {
-    need_root
-    warn "这将停止 Xray / cloudflared 服务并移除 xray-hy 的开机项与防火墙链。"
-    confirm "确定卸载？" "n" || { info "已取消"; return 0; }
-    svc_stop "$SVC_CF"; svc_stop "$SVC_XRAY"
-    svc_disable "$SVC_CF"; svc_disable "$SVC_XRAY"
-    remove_cf_service 2>/dev/null || true
-    firewall_off
-    rm -f /etc/systemd/system/xray-hy.service /etc/systemd/system/xray-hy-firewall.service \
-          /etc/init.d/xray-hy /etc/init.d/xray-hy-firewall \
-          /usr/local/lib/xray-hy/tunnel-run /usr/local/bin/xhy \
-          "$XHY_SELF" /etc/sysctl.d/90-xray-hy.conf /etc/modules-load.d/xray-hy.conf
-    # 扫描器是下载来的独立工具，不在 git 工作树里，卸载时单独清。
-    rm -rf "$XHY_TOOLS_DIR"
-    # 仓库内运行时 XHY_APP_DIR 就是工作树：只删入口，不碰 conf/ 和目录本身。
-    if [[ "${XHY_DEV:-0}" != "1" ]]; then
-        rm -rf "$XHY_APP_DIR/conf"
-        rmdir "$XHY_APP_DIR" 2>/dev/null || true
-    fi
-    [[ "$XHY_INIT" == "systemd" ]] && systemctl daemon-reload
-    if confirm "同时删除 Xray 二进制与所有节点配置/凭证？" "n"; then
-        rm -f "$XRAY_BIN" "$CF_BIN"
-        rm -rf "$XRAY_ASSET" "$XHY_ETC"
-        ok "配置与凭证已删除"
-    else
-        ok "已保留 $XHY_ETC（内含节点凭证，权限 0600/0700）"
-    fi
-    ok "卸载完成"
 }
 
 main() {

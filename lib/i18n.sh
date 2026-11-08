@@ -19,6 +19,7 @@
 # 不带 declare：本文件是在 load_libs() 函数内被 source 的，显式 declare 会创建
 # 局部变量，函数返回后数组就丢了（同一个坑 scanner.sh 的 XHY_TFO_CACHE 踩过）。
 XHY_T_ZH=(
+    "  xhy lang auto  自动判定（默认；VNC 控制台英文 / SSH 中文）"
     "菜单 1 / 2 的地域名单也可选择「只要 TFO」：逐站实测，不支持的不兜底；"
     "该选择会保存，之后新建节点继续沿用。大网站不等于支持 TFO，以实测为准。"
     "地域名单里没有通过校验且支持被动 TFO 的站点。"
@@ -135,6 +136,7 @@ XHY_T_ZH=(
 )
 
 XHY_T_EN=(
+    "  xhy lang auto  detect (default; VNC console: en / SSH: zh)"
     "Region menus 1 / 2 can also require TFO: probe each site and never fall back to one without it;"
     "The choice is saved for future nodes. Big-name sites do not necessarily support TFO; live probing decides."
     "No candidate in the region list both passed validation and supports passive TFO."
@@ -345,6 +347,13 @@ xhy_lang_init() {
             # 控制台，输出中文给日志和管道读完全没问题，不该切成英文。
             # 中文 locale 明确出现时尊重用户（他自己配了字形）。
             case "${TERM:-}" in linux|vt100|vt102|ansi|cons25|sun) console=1 ;; esac
+            # tty 设备名比 TERM 更可靠：getty 起在 /dev/tty1..6 或 /dev/ttyS0，
+            # SSH 一定是 /dev/pts/N。VNC 里 TERM 被改成 xterm 也照样判成控制台。
+            # 「xhy lang en 存进 state.env」是全局的，会连 SSH 一起变英文；
+            # 现在用 auto + 这层判定即可「VNC 英文 / SSH 中文」两者兼得。
+            case "$(tty 2>/dev/null || true)" in
+                /dev/tty[0-9]*|/dev/ttyS*|/dev/ttyAMA*|/dev/hvc*) console=1 ;;
+            esac
             if (( no_utf8 == 1 )); then
                 # 脚本输出是 UTF-8、终端却不是：中文只会更乱，直接英文。
                 XHY_LANG_EFFECTIVE="en"

@@ -83,6 +83,12 @@ chk "TERM=dumb 不是控制台，保持中文" 'state_del XHY_LANG; ( XHY_LANG=a
 chk "空 LANG（Alpine 默认）保持中文" 'state_del XHY_LANG; ( XHY_LANG=auto LANG= LC_ALL= LC_CTYPE= TERM=xterm-256color xhy_lang_init; [[ "$XHY_LANG_EFFECTIVE" == zh ]] )'
 chk "空 LANG + 控制台 TERM -> en"   'state_del XHY_LANG; ( XHY_LANG=auto LANG= LC_ALL= LC_CTYPE= TERM=linux xhy_lang_init; [[ "$XHY_LANG_EFFECTIVE" == en ]] )'
 
+echo "=== tty 设备判定（VNC 英文 / SSH 中文）==="
+chk "VNC /dev/tty1 -> en"        'state_del XHY_LANG; ( tty() { echo /dev/tty1; }; XHY_LANG=auto LANG= LC_ALL= LC_CTYPE= TERM=xterm-256color xhy_lang_init; [[ "$XHY_LANG_EFFECTIVE" == en ]] )'
+chk "串口 /dev/ttyS0 -> en"      'state_del XHY_LANG; ( tty() { echo /dev/ttyS0; }; XHY_LANG=auto LANG= LC_ALL= LC_CTYPE= TERM=xterm-256color xhy_lang_init; [[ "$XHY_LANG_EFFECTIVE" == en ]] )'
+chk "SSH /dev/pts/0 -> zh"       'state_del XHY_LANG; ( tty() { echo /dev/pts/0; }; XHY_LANG=auto LANG= LC_ALL= LC_CTYPE= TERM=xterm-256color xhy_lang_init; [[ "$XHY_LANG_EFFECTIVE" == zh ]] )'
+chk "非交互 not a tty -> zh"      'state_del XHY_LANG; ( tty() { echo "not a tty"; return 1; }; XHY_LANG=auto LANG= LC_ALL= LC_CTYPE= TERM=xterm-256color xhy_lang_init; [[ "$XHY_LANG_EFFECTIVE" == zh ]] )'
+
 echo "=== 源码接线 ==="
 for spec in \
     "build.sh 把 i18n 拼进单文件|grep -q 'LIBS=(common i18n' build.sh" \
@@ -94,6 +100,8 @@ for spec in \
     "菜单与安装打 ASCII banner|grep -q 'xhy_lang_banner' entry/main.sh" \
     "有 xhy lang 命令|grep -q 'lang)       cmd_lang' entry/main.sh" \
     "prelude 支持 XHY_LANG|grep -q 'XHY_LANG' entry/prelude.sh" \
+    "prelude 用 tty 判控制台|grep -q '/dev/ttyS' entry/prelude.sh" \
+    "auto 帮助说明 VNC/SSH 分流|grep -q 'VNC 控制台英文 / SSH 中文' entry/main.sh" \
     "永远可读的 ASCII 提示在 banner 里|grep -q 'boxes on VNC' lib/i18n.sh" \
     "英文帮助单独成文|grep -q 'modular Xray deployment manager' entry/main.sh" \
     "POSIX 段不污染 version 输出|! grep -q '^    _xhy_say \"\[\*\] xray-hy' entry/prelude.sh" \

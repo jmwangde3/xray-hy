@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # xray-hy / vless:// share-link generation (VLESS share-link standard).
 
+# 由 cmd_link 按 --qr / --png 设置；link_from_env 在链接下方追加二维码。
+LINK_QR="${LINK_QR:-0}"
+LINK_QR_OUT="${LINK_QR_OUT:-}"
+LINK_QR_MULTI="${LINK_QR_MULTI:-0}"
+
 _link_host() {
     local h="$1"
     if [[ "$h" == *:* && "$h" != \[* ]]; then printf '[%s]' "$h"; else printf '%s' "$h"; fi
@@ -77,6 +82,10 @@ link_from_env() {
     fi
     printf '\n  %s\n\n' "$uri"
     [[ -n "$uri6" ]] && printf '  IPv6 变体: %s\n\n' "$uri6"
+    if (( LINK_QR == 1 )); then
+        printf '\n'
+        link_qr "$envf" "$LINK_QR_OUT"
+    fi
     printf '  %s\n' "注意：完整链接等同于访问凭证，请勿公开分享。"
 }
 
@@ -90,10 +99,31 @@ link_all() {
     (( n > 0 )) || warn "暂无节点，先用 xhy add 添加一个。"
 }
 
+# 生成二维码：终端里直接给手机扫，或 --png 存成 0600 图片文件再传到手机。
+# 二维码内容就是完整的 vless:// / hysteria2:// 链接（含凭证），所以 PNG 必须 0600。
 link_qr() {
-    local envf="$1" uri
+    local envf="$1" out="${2:-}" uri t fname base
     ensure_optional qrencode
-    have_cmd qrencode || die "未安装 qrencode，无法生成二维码。"
+    have_cmd qrencode || die "未安装 qrencode，无法生成二维码（Alpine: apk add --no-cache -X <community-mirror> libqrencode-tools）"
     uri="$(link_uri "$envf")"
-    qrencode -t ANSIUTF8 "$uri"
+    if [[ -n "$out" ]]; then
+        fname="$out"
+        # 多节点 + --png：按 MODE_PORT 加后缀，避免互相覆盖。
+        if (( LINK_QR_MULTI == 1 )); then
+            base="${out%.png}"
+            [[ "$out" == *.png ]] || base="$out"
+            fname="${base}-${MODE:-node}_${PORT:-0}.png"
+        fi
+        qrencode -t PNG -o "$fname" "$uri" || { err "二维码生成失败: $fname"; return 1; }
+        chmod 600 "$fname"
+        ok "二维码已写入 $fname（0600，含凭证，勿公开）"
+        return 0
+    fi
+    # 控制台 / 英文模式用 ANSI：纯 ASCII 字节 + 颜色，不依赖 UTF-8 半块字形；
+    # 普通 UTF-8 终端用 ANSIUTF8：1 字符/模块，扫起来最清楚。
+    t="ANSIUTF8"
+    case "${TERM:-}" in linux|vt100|vt102|ansi|cons25|sun) t="ANSI" ;; esac
+    [[ "${XHY_LANG_EFFECTIVE:-zh}" == "en" ]] && t="ANSI"
+    printf '  二维码（手机 App 扫码导入）：\n'
+    qrencode -t "$t" "$uri"
 }

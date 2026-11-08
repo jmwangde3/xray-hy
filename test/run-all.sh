@@ -19,7 +19,7 @@ echo ""
 echo "=== ./build.sh --check ==="
 if ./build.sh --check; then :; else total_fail=$((total_fail + 1)); fi
 
-for t in test/render-test.sh test/hy2-test.sh test/export-test.sh test/lifecycle-test.sh test/target-test.sh test/scanner-test.sh test/sockopt-test.sh test/bbr-test.sh test/tfo-test.sh test/shortlist-test.sh test/i18n-test.sh test/bootstrap-test.sh test/edit-test.sh test/disk-test.sh test/relay-test.sh; do
+for t in test/render-test.sh test/hy2-test.sh test/export-test.sh test/link-test.sh test/lifecycle-test.sh test/target-test.sh test/scanner-test.sh test/sockopt-test.sh test/bbr-test.sh test/tfo-test.sh test/shortlist-test.sh test/i18n-test.sh test/bootstrap-test.sh test/edit-test.sh test/disk-test.sh test/relay-test.sh; do
     echo ""
     echo "########## $t ##########"
     if bash "$t"; then :; else total_fail=$((total_fail + 1)); fi

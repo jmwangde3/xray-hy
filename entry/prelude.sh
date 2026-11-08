@@ -35,10 +35,19 @@ case "${XHY_LANG:-}" in
     zh|ZH|cn|CN|chinese)       _XHY_POSIX_LANG=zh ;;
     *)
         _xhy_lc="${LC_ALL:-${LC_CTYPE:-${LANG:-}}}"
+        # 空 locale ≠ 非 UTF-8：Alpine 出厂没有 LANG，普通 ssh 照样显示中文，
+        # 早期把空值当 C locale 会让 ssh 会话一律变英文（与 lib/i18n.sh 同源）。
         case "$_xhy_lc" in
-            zh*|ZH*) ;;
-            C|POSIX|c|posix|"") _XHY_POSIX_LANG=en ;;
+            zh*|ZH*) _XHY_POSIX_LANG=zh ;;
+            C|POSIX|c|posix) _XHY_POSIX_LANG=en ;;
+            "") : ;;
             *) case "${TERM:-}" in linux|vt100|vt102|ansi|cons25|sun) _XHY_POSIX_LANG=en ;; esac ;;
+        esac
+        # tty 设备名比 TERM 可靠：VNC/串口 getty 是 /dev/tty1..6、/dev/ttyS0，
+        # SSH 是 /dev/pts/N。VNC 控制台没有中文字形，这里切英文。
+        _xhy_tty="$(tty 2>/dev/null || true)"
+        case "$_xhy_tty" in
+            /dev/tty[0-9]*|/dev/ttyS*|/dev/ttyAMA*|/dev/hvc*) _XHY_POSIX_LANG=en ;;
         esac
         _cm="$(locale charmap 2>/dev/null || true)"
         case "$_cm" in
@@ -135,7 +144,7 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.11.4"
+XHY_VERSION="1.12.0"
 XHY_BUILD="__XHY_BUILD__"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
