@@ -2,6 +2,11 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.12.2 — 2026-11-08
+
+- fix(docs): 纠正 geosite 说明 —— 实测官方 release 自带版与 Loyalsoldier 版**标签集几乎一致**（1564 vs 1562 个 tag，openai/category-ai-!cn 两边都有），7.5 MB vs 11.4 MB 的差全在 category-ads-all（905 vs 199451 条）。统一来源的真实收益是「同机两份 geo 不再打架」+ 广告表 220 倍，不是补分类
+- fix(core): xhy status 的体积提示改为「release 自带版（category-ads-all 仅 905 条）」，不再暗示缺分类
+
 ## v1.12.1 — 2026-11-08
 
 - feat(relay): --categories 放开 ! 字符 —— v2fly / Loyalsoldier 的 AI 分类真名就叫 category-ai-!cn（218 条域名，含 perplexity / x.ai / cursor / elevenlabs / huggingface / poe / midjourney），此前字符集把它挡在门外，只能用 --domains 一条条补；--domains 的 geosite: 前缀同样放开
@@ -9,11 +14,11 @@
 
 ## v1.12.0 — 2026-11-08
 
-- feat(relay): 新增 --domains 明文域名规则 —— geosite 分类覆盖不到的站（精简版 geosite.dat 缺 character.ai / replicate.com / suno.com 等，连 category-ai-!cn 名字都没有）现在可以直接写 domain/full/keyword/regexp/geosite 规则，与 geosite 分类同处一条 domain 数组；relay.env 持久化 RELAY_DOMAINS，不传 --domains 时沿用旧值，--no-domains 清空
+- feat(relay): 新增 --domains 明文域名规则 —— geosite 分类覆盖不到的站（实测 character.ai / replicate.com / suno.com / runwayml.com / luma.ai / ideogram.ai / stability.ai 这些 AI 站**不在任何 AI 分类里**，只出现在 geolocation-!cn / gfw 里）现在可以直接写 domain/full/keyword/regexp/geosite 规则，与 geosite 分类同处一条 domain 数组；relay.env 持久化 RELAY_DOMAINS，不传 --domains 时沿用旧值，--no-domains 清空
 - fix(relay): regexp 规则里的反斜杠在写进 JSON 前转义为 \\，否则 regexp:^a\.b$ 会产出非法 JSON 让 xray 起不来
 - test(relay): 115 -> 131 项，新增裸域名补前缀 / 前缀原样保留 / 与 geosite 合并同规则 / 沿用旧值 / --no-domains 清空 / 引号与空格与空值被拒
-- feat(core): xray 安装 / 升级后**一律**用 Loyalsoldier 完整版覆盖 release zip 自带的 geosite.dat（zip 里那份只有 7.5 MB，缺 `category-ai-!cn` 等一大批分类，relay 的 `--categories` 会静默命中不到、域名直接走本地出口）。磁盘余量 <60 MB 或 `XHY_SKIP_GEODATA=1` 时跳过，失败只告警不中断
-- feat(core): `xhy status` 对 <9 MB 的 geosite.dat 直接标「⚠ 疑似精简版」，装完不用猜
+- feat(core): 统一 geodata 来源 —— xray 安装 / 升级后**一律**用 Loyalsoldier 版覆盖 release zip 自带的那份。实测两份**标签集几乎相同**（官方 1564 个 tag / Loyalsoldier 1562 个，`openai`、`category-ai-!cn` 等两边都有），7.5 MB vs 11.4 MB 的差几乎全在 `category-ads-all`（905 vs 199451 条）。统一的理由：`update geodata` 本就用 Loyalsoldier 而 install 用 zip 自带的，同机两份 geo 会对不上；且 19.9 万条广告表让 `geosite:category-ads-all → block` 真正有效。磁盘余量 <60 MB 或 `XHY_SKIP_GEODATA=1` 时跳过
+- feat(core): `xhy status` 对 <9 MB 的 geosite.dat 标注「release 自带版（category-ads-all 仅 905 条）」，不再需要人工比对体积
 
 ## v1.11.5 — 2026-11-08
 

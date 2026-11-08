@@ -136,11 +136,14 @@ xray_install() {
         mv -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f"
     done
 
-    # v1.12.0：官方 release zip 自带的 geosite.dat 是**精简版**（7.5 MB，缺
-    # category-ai-!cn 等一大批分类），装了它 relay 的 --categories 会静默命中
-    # 不到、域名直接走本地出口。Loyalsoldier 的完整版 11.4 MB 才是齐的，所以
-    # 只要没显式跳过，就一律用它覆盖 zip 自带的那份；下载失败再退回 zip 里的。
-    # 这样「每次重装都得手工换 geosite」的问题在源头消失。
+    # v1.12.0：统一 geodata 来源。**注意两份的标签集几乎一样**（实测官方 zip
+    # 自带 1564 个 tag、Loyalsoldier 1562 个，openai / anthropic / category-ai-!cn
+    # 等分类两边都有），体积差 4 MB 几乎全部来自 category-ads-all：
+    # 官方 905 条 vs Loyalsoldier 199451 条。之所以仍然统一到 Loyalsoldier：
+    #   ① `xhy update geodata` 本来就用它，而 install 用 zip 自带的，
+    #      同一台机器上跑不同命令会得到两份不同的 geo，排障时对不上；
+    #   ② 那 19.9 万条广告表让 `geosite:category-ads-all -> block` 真正有效。
+    # 磁盘余量 <60 MB 或 XHY_SKIP_GEODATA=1 时跳过，失败只告警不中断。
     if [[ "${XHY_SKIP_GEODATA:-0}" == "1" ]]; then
         info "XHY_SKIP_GEODATA=1，保留 release 自带的 geodata"
         for f in geoip.dat geosite.dat; do
@@ -232,10 +235,10 @@ core_status() {
         local gssz
         gssz="$(stat -c%s "$XRAY_ASSET/geosite.dat" 2>/dev/null || echo 0)"
         printf '  geosite.dat %s bytes' "$gssz"
-        # 完整版（Loyalsoldier）11.4 MB 上下；低于 9 MB 基本就是 release zip 里
-        # 那份精简版，relay 的 --categories 会静默命中不到。
+        # 低于 9 MB = release zip 自带的那份。分类标签和 Loyalsoldier 版一样，
+        # 差别只在 category-ads-all 的条数（905 vs 199451），所以只是提示。
         if [[ "$gssz" =~ ^[0-9]+$ ]] && (( gssz < 9000000 )); then
-            printf '  ⚠ 疑似精简版（缺分类，跑 xhy update geodata 换完整版）'
+            printf '  ← release 自带版（category-ads-all 仅 905 条，xhy update geodata 可换 19.9 万条版）'
         fi
         printf '\n'
     fi
