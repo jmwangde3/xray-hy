@@ -2,6 +2,12 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.11.4 — 2026-11-08
+
+- fix(relay): RELAY_GEOIP_US 默认从 on 改为 off —— 此前 relay entry 不带 --no-geoip-us 就把 Cloudflare/AWS/GitHub 等美国 CDN IP 全量绕东京→硅谷一圈（55ms→162ms 且跨 region 双倍计费）；现只按 geosite 分类转发，要恢复旧行为必须显式 --geoip-us on
+- fix(relay): relay entry 默认 geoip=off 并写进 relay.env；status/brief 显示与 usage 默认值同步；--no-geoip-us 保留为 --geoip-us off 的兼容别名
+- test(relay): 109 → 115 项，新增「默认不含 geoip:us」「relay.env 默认 off」「--geoip-us on 显式恢复」「非法值被拒」
+
 ## v1.11.3 — 2026-11-08
 
 - fix(relay): sockopt 必须嵌在 streamSettings 内。v1.11.0 出站 / v1.11.2 入站都把 sockopt 写在 inbound/outbound 顶层，Xray 当 unknown field 静默忽略，run -test 仍报 Configuration OK 但 setsockopt 一次都不调 —— 这两版的 TFO/keepalive/BBR 全部零效果。tcpdump 对照坐实：顶层写法 SYN 无 option 34、两端 TFO 计数全 0；同一抓包里把 sockopt 放进 streamSettings 的临时实例 SYN 带 tfo cookiereq、硅谷 TCPFastOpenCookieReqd 0->6

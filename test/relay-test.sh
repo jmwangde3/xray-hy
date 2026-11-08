@@ -7,7 +7,7 @@
 # 覆盖点（对应 v1.9.4 的改动）：
 #   * entry 注入的 outbound / 路由规则形状正确，且**基础 rebuild 不再覆盖它**
 #   * 基础规则仍在、顺序是「relay 前置、基础在后」
-#   * --no-geoip-us / --categories 预设 / 非法分类被拒 / IPv6 上游解析
+#   * geoip:us 默认 off / --geoip-us on 显式开 / --no-geoip-us 别名 / --categories 预设 / 非法分类被拒 / IPv6 上游解析
 #   * land 入站片段、防火墙注释规则、重复执行幂等、--tls 走证书文件
 #   * 同机换角色（land↔entry）互清、del 后配置干净且仍是合法 JSON
 set -u
@@ -107,7 +107,8 @@ chk "entry 写入 relay.env"            '[ -f "$XHY_NODES/relay.env" ]'
 chk "relay.env 角色=entry"            'grep -q "^RELAY_ROLE=entry$" "$XHY_NODES/relay.env"'
 chk "config 是合法 JSON"              'json_ok "$XHY_ETC/config.json"'
 chk "config 含 us-relay 出站"         'grep -q "\"tag\":\"us-relay\"" "$XHY_ETC/config.json"'
-chk "config 含 geoip:us 路由"         'grep -q "geoip:us" "$XHY_ETC/config.json"'
+chk "默认不含 geoip:us 路由"       '! grep -q "geoip:us" "$XHY_ETC/config.json"'
+chk "relay.env 默认记 geoip=off"      'grep -q "^RELAY_GEOIP_US=off$" "$XHY_NODES/relay.env"'
 chk "config 含 geosite:openai"        'grep -q "geosite:openai" "$XHY_ETC/config.json"'
 chk "未指定的分类不出现"              '! grep -q "geosite:tiktok" "$XHY_ETC/config.json"'
 chk "基础 block 规则仍在"             'grep -q "geoip:private" "$XHY_ETC/config.json"'
@@ -179,6 +180,14 @@ chk "关掉 geoip:us 后不再出现"        '! grep -q "geoip:us" "$XHY_ETC/con
 chk "域名分类仍在"                    'grep -q "geosite:openai" "$XHY_ETC/config.json"'
 chk "出站仍在"                        'grep -q "us-relay" "$XHY_ETC/config.json"'
 chk "仍是合法 JSON"                   'json_ok "$XHY_ETC/config.json"'
+
+echo "===== --geoip-us on（显式恢复旧行为） ====="
+relay_entry --to 203.0.113.10:14430 --uuid test-uuid-0000 --categories ai --geoip-us on >/dev/null
+chk "显式 on 出现 geoip:us 规则"      'grep -q "geoip:us" "$XHY_ETC/config.json"'
+chk "relay.env 记 geoip=on"           'grep -q "^RELAY_GEOIP_US=on$" "$XHY_NODES/relay.env"'
+chk "geoip 规则仍在基础规则之前"      'rules_order_ok'
+chk "显式 on 仍是合法 JSON"           'json_ok "$XHY_ETC/config.json"'
+chk "非法 --geoip-us 值被拒"          '! ( relay_entry --to 203.0.113.10:14430 --uuid u --geoip-us maybe ) >/dev/null 2>&1'
 
 echo "===== 参数校验 ====="
 chk "非法端口被拒"                    '! ( relay_entry --to 203.0.113.10:99999 --uuid u ) >/dev/null 2>&1'

@@ -87,7 +87,10 @@ Usage: xhy relay <command> [options]
   export   Print the command to run on the peer host (and a vless:// link).
   del      Remove this host's relay config, firewall rule and fragment.
 
-Defaults: port 14430, categories openai,anthropic,google,tiktok,netflix, tag us-relay.
+Defaults: port 14430, categories openai,anthropic,google,tiktok,netflix, tag us-relay,
+          geoip:us OFF -- only geosite rules are forwarded by default. Use
+          --geoip-us on to restore the old "all US IPs through the relay" behavior;
+          --no-geoip-us remains as a compatibility alias for --geoip-us off.
 Transport: security=none, always. Both ends are yours and this hop runs on the cloud
            backbone; client-to-site TLS is already end-to-end, so a second TLS layer
            only costs a handshake per connection and one AES pass per byte on the land.
@@ -115,7 +118,9 @@ EOF
   export   打印对端要执行的那条命令（以及 vless:// 链接）
   del      移除本机 relay 配置、防火墙规则、入站片段
 
-默认值：端口 14430、分类 openai,anthropic,google,tiktok,netflix、出站标签 us-relay。
+默认值：端口 14430、分类 openai,anthropic,google,tiktok,netflix、出站标签 us-relay、
+      geoip:us 默认 off（只按 geosite 分类转发，不再把美国 CDN IP 全量绕中继）；
+      要恢复旧行为必须显式 --geoip-us on，--no-geoip-us 保留为等价别名。
 传输：security=none，恒明文。两端自有、走云内网，客户端到目标站的 TLS 已端到端，
       再套一层只多一次握手 + 落地机每字节一遍 AES，还多四个故障面。
       --tls / --sni / --pin 已停用，只保留参数位以免老脚本报错。
@@ -357,7 +362,10 @@ relay_routing_rules_json() {
     if [[ -n "$doms" ]]; then
         out="{\"type\":\"field\",\"domain\":[${doms}],\"${key}\":\"${tgt}\"}"
     fi
-    if [[ "${RELAY_GEOIP_US:-on}" != "off" ]]; then
+    # v1.11.4 起默认 off：geoip:us 会把 Cloudflare / AWS / GitHub 等美国 CDN IP
+    # 全量绕东京→硅谷一圈（55ms → 162ms 且跨 region 双倍计费）。只按 geosite
+    # 分类转发；要恢复旧行为必须显式 --geoip-us on。
+    if [[ "${RELAY_GEOIP_US:-off}" == "on" ]]; then
         [[ -n "$out" ]] && out+=","
         out+="{\"type\":\"field\",\"ip\":[\"geoip:us\"],\"${key}\":\"${tgt}\"}"
     fi
@@ -650,7 +658,7 @@ relay_entry_hint() {
 }
 
 relay_entry() {
-    local upstream="" uuid="" categories="" geoip="on" tls=0 sni="" pin="" tag="" fb="" tfo=""
+    local upstream="" uuid="" categories="" geoip="off" tls=0 sni="" pin="" tag="" fb="" tfo=""
     while (( $# > 0 )); do
         case "$1" in
             --to)         (( $# >= 2 )) || die "--to 缺少参数"; upstream="$2"; shift 2 ;;
@@ -812,7 +820,7 @@ relay_status() {
     if [[ "$brief" == "1" ]]; then
         case "$RELAY_ROLE" in
             land)  printf 'relay     : land :%s ← %s\n' "$RELAY_PORT" "$RELAY_ALLOW" ;;
-            entry) printf 'relay     : entry → %s（%s）\n' "$RELAY_UPSTREAM" "${RELAY_CATEGORIES:-仅 geoip:us}" ;;
+            entry) printf 'relay     : entry → %s（%s）\n' "$RELAY_UPSTREAM" "${RELAY_CATEGORIES:-无分类}" ;;
         esac
         return 0
     fi
@@ -835,8 +843,8 @@ relay_status() {
             relay_say info "角色: 入口端（转发）" "role: entry (forwarder)"
             printf '  上游   : %s\n' "$RELAY_UPSTREAM"
             printf '  传输   : none（明文 vless）\n' 
-            printf '  分类   : %s\n' "${RELAY_CATEGORIES:-（无，仅 geoip:us）}"
-            printf '  geoip  : %s\n' "${RELAY_GEOIP_US:-on}"
+            printf '  分类   : %s\n' "${RELAY_CATEGORIES:-（无分类）}"
+            printf '  geoip  : %s\n' "${RELAY_GEOIP_US:-off}"
             printf '  标签   : %s\n' "$(relay_out_tag)"
             if relay_fallback_on; then
                 fbs="on（$(relay_lb_tag) → direct，探活 $(relay_out_tag)）"
