@@ -135,8 +135,8 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.11.2"
-XHY_BUILD="2a8b0b5d7620"
+XHY_VERSION="1.11.3"
+XHY_BUILD="17587a6b99e4"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -154,7 +154,7 @@ fi
 # ===================== lib/common.sh =====================
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.11.2}"
+XHY_VERSION="${XHY_VERSION:-1.11.3}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -5730,13 +5730,15 @@ relay_fragment() {
     local port="$1" uuid="$2" stream so
     stream="$(relay_stream_server_json)"
     so="$(relay_sockopt_json)"
+    # 同 relay_outbound_json：sockopt 必须是 streamSettings 的成员。顶层写法
+    # 会被 Xray 静默忽略，listener 上不会调用 setsockopt(TCP_FASTOPEN)。
+    stream="${stream%\}},\"sockopt\":${so}}"
     cat <<EOF
 {
   "listen": "$(listen_addr)", "port": ${port}, "protocol": "vless",
   "tag": "in-relay-${port}",
   "settings": { "clients": [ { "id": "${uuid}" } ], "decryption": "none" },
-  "streamSettings": ${stream},
-  "sockopt":${so}
+  "streamSettings":${stream}
 }
 EOF
 }
@@ -5761,8 +5763,13 @@ relay_outbound_json() {
     # 流传输片段单独取，失败就别产出半截 JSON（坏 JSON 会让 xray 起不来）
     ss="$(relay_stream_client_json "$host")" || { relay_say err "中继出站片段生成失败" "failed to build relay outbound stream"; return 1; }
     so="$(relay_sockopt_json)"
-    printf '{"protocol":"vless","tag":"%s","settings":{"vnext":[{"address":"%s","port":%s,"users":[{"id":"%s","encryption":"none"}]}]},"streamSettings":%s,"sockopt":%s}' \
-        "$(relay_out_tag)" "$host" "$port" "$RELAY_UUID" "$ss" "$so"
+    # Xray 只读 streamSettings.sockopt；顶层 "sockopt" 是 unknown field，JSON
+    # 解析静默忽略、run -test 仍报 Configuration OK，但 setsockopt 一次都不会调
+    # （v1.11.3 抓包坐实：顶层写法 SYN 无 option 34 / TFO 计数全 0）。把对象
+    # 结尾的 } 换成 ,"sockopt":{...}}，让 sockopt 成为 streamSettings 的成员。
+    ss="${ss%\}},\"sockopt\":${so}}"
+    printf '{"protocol":"vless","tag":"%s","settings":{"vnext":[{"address":"%s","port":%s,"users":[{"id":"%s","encryption":"none"}]}]},"streamSettings":%s}' \
+        "$(relay_out_tag)" "$host" "$port" "$RELAY_UUID" "$ss"
 }
 
 # ---------------------------------------------------------------------------
@@ -6313,12 +6320,16 @@ relay_test() {
             || relay_say warn "防火墙规则缺失" "firewall rule missing"
         relay_config_has "in-relay-${RELAY_PORT}" && relay_say ok "config 含 in-relay-${RELAY_PORT}" "config has in-relay-${RELAY_PORT}" \
             || relay_say warn "config 未含入站片段" "inbound fragment missing from config"
-        if grep -q '"sockopt":{"tcpFastOpen":true' "$XHY_CONFDIR/relay_in_${RELAY_PORT}.json" 2>/dev/null; then
-            relay_say ok "入站 TFO 已开（listen socket 启用 TCP_FASTOPEN）" \
-                        "inbound TFO enabled (TCP_FASTOPEN on listen socket)"
+        # 必须嵌在 streamSettings 内且顶层不得再有 sockopt：顶层是 unknown field，
+        # Xray 静默忽略，run -test 照样 Configuration OK（v1.11.3 抓包坐实）。
+        local rlf="$XHY_CONFDIR/relay_in_${RELAY_PORT}.json"
+        if grep -q '"streamSettings":{[^}]*"sockopt":{"tcpFastOpen":true' "$rlf" 2>/dev/null \
+           && [ "$(grep -o '"sockopt"' "$rlf" 2>/dev/null | wc -l | tr -d ' ')" = "1" ]; then
+            relay_say ok "入站 TFO 已开（streamSettings.sockopt，listen socket 启用 TCP_FASTOPEN）" \
+                        "inbound TFO enabled (streamSettings.sockopt; TCP_FASTOPEN on listen socket)"
         else
-            relay_say warn "入站缺 TFO sockopt（这一跳省不到握手 RTT，重跑 xhy relay land）" \
-                          "inbound lacks TFO sockopt (no handshake RTT saved; rerun xhy relay land)"
+            relay_say warn "入站 sockopt 缺失或位置不对（顶层会被 Xray 忽略，重跑 xhy relay land）" \
+                          "inbound sockopt missing or misplaced (top-level is ignored; rerun xhy relay land)"
         fi
         printf '%s\n' "  云安全组: 入方向 TCP ${RELAY_PORT} 源 ${RELAY_ALLOW}/32"
         return 0

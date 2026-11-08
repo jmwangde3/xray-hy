@@ -2,6 +2,11 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.11.3 — 2026-11-08
+
+- fix(relay): sockopt 必须嵌在 streamSettings 内。v1.11.0 出站 / v1.11.2 入站都把 sockopt 写在 inbound/outbound 顶层，Xray 当 unknown field 静默忽略，run -test 仍报 Configuration OK 但 setsockopt 一次都不调 —— 这两版的 TFO/keepalive/BBR 全部零效果。tcpdump 对照坐实：顶层写法 SYN 无 option 34、两端 TFO 计数全 0；同一抓包里把 sockopt 放进 streamSettings 的临时实例 SYN 带 tfo cookiereq、硅谷 TCPFastOpenCookieReqd 0->6
+- test(relay): 96 -> 109 项，新增 sockopt 层级 JSON 断言（必须在 streamSettings 内且顶层不得出现）；relay test 落地端自检改为校验嵌套位置与顶层无重复
+
 ## v1.11.2 — 2026-11-08
 
 - fix(relay): land 入站补 sockopt（tcpFastOpen=true / tcpNoDelay / tcpKeepAliveIdle / tcpUserTimeout / tcpMptcp:false / BBR 跟随系统）。内核 net.ipv4.tcp_fastopen=3 只是允许位，服务端真开关是 listen socket 的 setsockopt(TCP_FASTOPEN)；此前只有 entry 出站开 TFO，实测两端 TcpExtTCPFastOpenPassive=0 / TCPFastOpenActive=0，这一跳省不到那个 107ms 握手 RTT

@@ -63,6 +63,30 @@ cat >"$XHY_CONFDIR/reality_443.json" <<'EOF'
 EOF
 
 json_ok() { "$PY" -c "import json,sys;json.load(open(sys.argv[1]))" "$1" >/dev/null 2>&1; }
+# v1.11.3：sockopt 必须嵌在 streamSettings 内。顶层 "sockopt" 是 unknown field，
+# Xray 静默忽略、run -test 仍报 Configuration OK，但 setsockopt 一次都不调。
+sockopt_nested() {
+    "$PY" - "$1" <<'PY' >/dev/null 2>&1
+import json,sys
+o=json.load(open(sys.argv[1]))
+ss=o.get("streamSettings",{})
+assert isinstance(ss,dict) and "sockopt" in ss, "sockopt must be inside streamSettings"
+assert "sockopt" not in o, "top-level sockopt is silently ignored by Xray"
+assert ss["sockopt"].get("tcpFastOpen") is True, "TFO must be on"
+PY
+}
+relay_outbound_sockopt_nested() {
+    "$PY" - "$XHY_ETC/config.json" <<'PY' >/dev/null 2>&1
+import json,sys
+cfg=json.load(open(sys.argv[1]))
+o=[x for x in cfg["outbounds"] if x.get("tag")=="us-relay"]
+assert o, "no us-relay outbound"
+ss=o[0].get("streamSettings",{})
+assert "sockopt" in ss, "sockopt must be inside streamSettings"
+assert "sockopt" not in o[0], "top-level sockopt is silently ignored"
+assert ss["sockopt"].get("tcpFastOpen") is True
+PY
+}
 # 断言 config 里 relay 规则排在基础 block 规则之前（前置优先级）
 rules_order_ok() {
     "$PY" - "$XHY_ETC/config.json" <<'PY' >/dev/null 2>&1
@@ -114,6 +138,7 @@ chk "出站带 sockopt"                  'grep -q "\"sockopt\":{\"tcpFastOpen\":
 chk "sockopt 含 tcpNoDelay"           'grep -q "\"tcpNoDelay\":true" "$XHY_ETC/config.json"'
 chk "sockopt 含 tcpUserTimeout"       'grep -q "\"tcpUserTimeout\":10000" "$XHY_ETC/config.json"'
 chk "sockopt 带 BBR"                  'grep -q "\"tcpcongestion\":\"bbr\"" "$XHY_ETC/config.json"'
+chk "出站 sockopt 嵌在 streamSettings" 'relay_outbound_sockopt_nested'
 
 echo "===== v1.11.0：失联回落（balancer + burstObservatory） ====="
 chk "config 含 balancers"             'grep -q "\"balancers\"" "$XHY_ETC/config.json"'
@@ -182,6 +207,7 @@ chk "入站 TFO 默认开"                'grep -q "\"sockopt\":{\"tcpFastOpen\"
 chk "入站 sockopt 含 tcpNoDelay"     'grep -q "\"tcpNoDelay\":true" "$XHY_CONFDIR/relay_in_14430.json"'
 chk "入站 sockopt 含 tcpMptcp:false" 'grep -q "\"tcpMptcp\":false" "$XHY_CONFDIR/relay_in_14430.json"'
 chk "入站 sockopt 带 BBR"            'grep -q "\"tcpcongestion\":\"bbr\"" "$XHY_CONFDIR/relay_in_14430.json"'
+chk "入站 sockopt 嵌在 streamSettings" 'sockopt_nested "$XHY_CONFDIR/relay_in_14430.json"'
 chk "config 含 in-relay-14430"        'grep -q "in-relay-14430" "$XHY_ETC/config.json"'
 chk "config 仍是合法 JSON"            'json_ok "$XHY_ETC/config.json"'
 chk "relay.env 角色=land"             'grep -q "^RELAY_ROLE=land$" "$XHY_NODES/relay.env"'
@@ -207,11 +233,12 @@ chk "relay.env 记 none"             'grep -q "^RELAY_SECURITY=none$" "$XHY_NODE
 chk "relay.env 不记 sni"            '! grep -q "^RELAY_SNI=" "$XHY_NODES/relay.env"'
 chk "片段仍是合法 JSON"             'json_ok "$XHY_CONFDIR/relay_in_14430.json"'
 
-echo "===== v1.11.2：入站 TFO 与出站共用同一开关 ====="
+echo "===== v1.11.3：sockopt 位置 + 入站 TFO 与出站共用同一开关 ====="
 chk "TFO=off 时入站为 false"         'RELAY_TFO=off relay_sockopt_json | grep -q "\"tcpFastOpen\":false"'
 chk "TFO=on 时入站为 true"           'RELAY_TFO=on relay_sockopt_json | grep -q "\"tcpFastOpen\":true"'
 chk "RELAY_TFO 未设置时默认开"       'relay_sockopt_json | grep -q "\"tcpFastOpen\":true"'
 chk "land 重跑后入站仍带 TFO"        'grep -q "\"tcpFastOpen\":true" "$XHY_CONFDIR/relay_in_14430.json"'
+chk "land 重跑后 sockopt 仍嵌套"     'sockopt_nested "$XHY_CONFDIR/relay_in_14430.json"'
 chk "relay_test 报入站 TFO"          'relay_test 2>/dev/null | grep -q "入站 TFO 已开"'
 
 echo "===== 证书 pin 归一（函数保留，供将来跨公网复用） ====="
