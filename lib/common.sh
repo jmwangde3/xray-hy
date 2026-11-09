@@ -189,38 +189,37 @@ config_transaction() {
 _config_transaction() (
     need_root
     init_dirs || return 1
-    local tx f rc
-    local -a files=(confs nodes certs state.env config.json tunnel.token target.env scan-cache.tsv)
-    tx="$(mktemp -d "$XHY_ETC/.transaction.XXXXXX")" || return 1
-    trap 'rm -rf "$tx"' EXIT
-    for f in "${files[@]}"; do
-        [[ -e "$XHY_ETC/$f" ]] || continue
-        cp -a "$XHY_ETC/$f" "$tx/" || return 1
+    _xhy_tx_files=(confs nodes certs state.env config.json tunnel.token target.env scan-cache.tsv)
+    _xhy_tx_dir="$(mktemp -d "$XHY_ETC/.transaction.XXXXXX")" || return 1
+    trap 'rm -rf "$_xhy_tx_dir"' EXIT
+    for _xhy_tx_file in "${_xhy_tx_files[@]}"; do
+        [[ -e "$XHY_ETC/$_xhy_tx_file" ]] || continue
+        cp -a "$XHY_ETC/$_xhy_tx_file" "$_xhy_tx_dir/" || return 1
     done
-    local XHY_TX_ACTIVE=1 XHY_TX_RESTARTED=0
+    XHY_TX_ACTIVE=1 XHY_TX_RESTARTED=0
     trap '
-        rc=$?
-        if (( rc != 0 )); then
-            failed=0
-            for f in "${files[@]}"; do
+        _xhy_tx_rc=$?
+        if (( _xhy_tx_rc != 0 )); then
+            _xhy_tx_failed=0
+            for _xhy_tx_file in "${_xhy_tx_files[@]}"; do
                 # Leave an unchanged config file in place, including its inode.
-                if [[ "$f" == config.json && -f "$tx/$f" ]] &&
-                    cmp -s "$tx/$f" "$XHY_ETC/$f"; then continue; fi
-                rm -rf "$XHY_ETC/$f" || { failed=1; continue; }
-                if [[ -e "$tx/$f" ]]; then
-                    mv -f "$tx/$f" "$XHY_ETC/" || failed=1
+                if [[ "$_xhy_tx_file" == config.json && -f "$_xhy_tx_dir/$_xhy_tx_file" ]] &&
+                    cmp -s "$_xhy_tx_dir/$_xhy_tx_file" "$XHY_ETC/$_xhy_tx_file"; then continue; fi
+                rm -rf "$XHY_ETC/$_xhy_tx_file" || { _xhy_tx_failed=1; continue; }
+                if [[ -e "$_xhy_tx_dir/$_xhy_tx_file" ]]; then
+                    mv -f "$_xhy_tx_dir/$_xhy_tx_file" "$XHY_ETC/" || _xhy_tx_failed=1
                 fi
             done
-            if (( ! failed && XHY_TX_RESTARTED )) && [[ -s "$XHY_ETC/config.json" ]]; then
+            if (( ! _xhy_tx_failed && XHY_TX_RESTARTED )) && [[ -s "$XHY_ETC/config.json" ]]; then
                 svc_restart "$SVC_XRAY" || warn "原配置已恢复，但 Xray 重启失败"
             fi
-            if (( failed )); then
-                err "自动回滚未完成，备份保留在 $tx"
-                exit "$rc"
+            if (( _xhy_tx_failed )); then
+                err "自动回滚未完成，备份保留在 $_xhy_tx_dir"
+                exit "$_xhy_tx_rc"
             fi
         fi
-        rm -rf "$tx"
-        exit "$rc"
+        rm -rf "$_xhy_tx_dir"
+        exit "$_xhy_tx_rc"
     ' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM

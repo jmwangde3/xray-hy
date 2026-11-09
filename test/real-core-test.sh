@@ -24,15 +24,22 @@ else
     export XHY_ARCH=64
     xray_install "${XHY_TEST_CORE_VERSION:-$XHY_PINNED_VERSION}"
 fi
+smoke() {
+    if ! "$@" >"$TEST_TMP/core-case.log" 2>&1; then
+        printf 'Real Xray case failed: %s\n' "$1" >&2
+        cat "$TEST_TMP/core-case.log" >&2
+        return 1
+    fi
+}
 "$XRAY_BIN" version
-node_add direct 18080 --host 192.0.2.1 >/dev/null
-node_add reality 18443 --host 192.0.2.1 --target www.microsoft.com:443 --sni www.microsoft.com >/dev/null
-node_add hy2 18444 --host 192.0.2.1 >/dev/null
-relay_entry --to 192.0.2.2:14430 --categories openai --domains 'regexp:^(.+\.)?example\.com$' >/dev/null
+smoke node_add direct 18080 --host 192.0.2.1
+smoke node_add reality 18443 --host 192.0.2.1 --target www.microsoft.com:443 --sni www.microsoft.com
+smoke node_add hy2 18444 --host 192.0.2.1
+smoke relay_entry --to 192.0.2.2:14430 --categories openai --domains 'regexp:^(.+\.)?example\.com$'
 xray_config_test
-relay_land --allow 192.0.2.2 --port 14430 --ip 192.0.2.1 >/dev/null
-backup_create --out "$TEST_TMP/smoke.tgz" >/dev/null
-backup_restore "$TEST_TMP/smoke.tgz" >/dev/null
+smoke relay_land --allow 192.0.2.2 --port 14430 --ip 192.0.2.1
+smoke backup_create --out "$TEST_TMP/smoke.tgz"
+smoke backup_restore "$TEST_TMP/smoke.tgz"
 [[ "$(node_count)" == 3 ]]
 [[ "$(stat -c %a "$XHY_CONFDIR")" == 700 ]]
 [[ "$(stat -c %a "$XHY_CONFDIR/reality_18443.json")" == 600 ]]

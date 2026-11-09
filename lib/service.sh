@@ -283,7 +283,7 @@ remove_cf_service() {
 xray_config_test() {
     local cfg="${1:-$XHY_ETC/config.json}"
     [[ -s "$cfg" ]] || { err "配置文件为空或不存在: $cfg"; return 1; }
-    XRAY_LOCATION_ASSET="$XRAY_ASSET" "$XRAY_BIN" run -test -c "$cfg" 2>&1
+    XRAY_LOCATION_ASSET="$XRAY_ASSET" "$XRAY_BIN" run -test -format json -c "$cfg" 2>&1
 }
 
 config_reload() {
