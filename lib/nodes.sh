@@ -193,6 +193,9 @@ rebuild_config() {
     if [[ -n "$rh_extra" ]]; then rh_extra="${rh_extra},"; fi
     top_extra="$(extra_top_json)"
     cfg="$(mktemp "$XHY_ETC/.config.XXXXXX")" || return 1
+    # Newer Xray checks the file extension even with -format json.
+    mv -f "$cfg" "$cfg.json" || { rm -f "$cfg"; return 1; }
+    cfg+=".json"
     if ! {
         printf '{\n  "log": %s,\n' "$(log_json)"
         printf '  "inbounds": [%s],\n' "$joined"

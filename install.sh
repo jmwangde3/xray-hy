@@ -145,7 +145,7 @@ fi
 set -Eeuo pipefail
 
 XHY_VERSION="1.14.6"
-XHY_BUILD="a2739763e65a"
+XHY_BUILD="e7e75106e179"
 
 # relay 渲染契约版本。改了 lib/relay.sh / nodes.sh 的 config 生成逻辑、
 # 或新增「函数体没变但 config.json 必须重建」的字段时，手工 +1。
@@ -3867,6 +3867,9 @@ rebuild_config() {
     if [[ -n "$rh_extra" ]]; then rh_extra="${rh_extra},"; fi
     top_extra="$(extra_top_json)"
     cfg="$(mktemp "$XHY_ETC/.config.XXXXXX")" || return 1
+    # Newer Xray checks the file extension even with -format json.
+    mv -f "$cfg" "$cfg.json" || { rm -f "$cfg"; return 1; }
+    cfg+=".json"
     if ! {
         printf '{\n  "log": %s,\n' "$(log_json)"
         printf '  "inbounds": [%s],\n' "$joined"
