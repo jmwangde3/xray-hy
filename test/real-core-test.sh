@@ -35,8 +35,22 @@ smoke() {
 smoke node_add direct 18080 --host 192.0.2.1
 smoke node_add reality 18443 --host 192.0.2.1 --target www.microsoft.com:443 --sni www.microsoft.com
 smoke node_add hy2 18444 --host 192.0.2.1
-smoke relay_entry --to 192.0.2.2:14430 --categories openai --domains 'regexp:^(.+\.)?example\.com$'
+smoke relay_entry --to 10.0.0.2:14430 --categories openai --domains 'regexp:^(.+\.)?example\.com$'
 xray_config_test
+# A newer core rejects plaintext VLESS to a public IP. Verify that rejection
+# rolls back the route and never substitutes the default outbound.
+if [[ "${XHY_TEST_CORE_VERSION:-}" == v26.10.31 ]]; then
+    cp "$XHY_ETC/config.json" "$TEST_TMP/valid-config.json"
+    cp "$XHY_NODES/relay.env" "$TEST_TMP/valid-relay.env"
+    if relay_entry --to 192.0.2.2:14430 --categories openai >"$TEST_TMP/rejected.log" 2>&1; then
+        printf 'Unexpected acceptance of public plaintext relay\n' >&2
+        exit 1
+    fi
+    grep -Fq 'vless without TLS or other encryption is prohibited' "$TEST_TMP/rejected.log"
+    cmp "$TEST_TMP/valid-config.json" "$XHY_ETC/config.json"
+    cmp "$TEST_TMP/valid-relay.env" "$XHY_NODES/relay.env"
+fi
+
 smoke relay_land --allow 192.0.2.2 --port 14430 --ip 192.0.2.1
 smoke backup_create --out "$TEST_TMP/smoke.tgz"
 smoke backup_restore "$TEST_TMP/smoke.tgz"

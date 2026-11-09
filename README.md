@@ -395,6 +395,8 @@ bash test/run-all.sh     # 19 个测试文件、846 项断言（含 build.sh --c
 
 MIT，见 [LICENSE](LICENSE)。
 
+明文 VLESS 中继应使用私网地址或核心认可的私有域名。较新的 Xray 会拒绝未加密的公网目标；若校验失败，xhy 保留原 relay 状态和配置。
+
 ### Linux 集成验证
 
 GitHub Actions 在 Alpine 与 Debian 容器运行离线回归，并使用真实 Xray 验证节点、relay 和备份恢复生成的配置。可在 Linux 本地运行 `bash test/real-core-test.sh`；也可提供 `XRAY_TEST_BIN` 和 `XRAY_TEST_ASSET`，复用现有核心和 geodata。
