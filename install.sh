@@ -145,7 +145,7 @@ fi
 set -Eeuo pipefail
 
 XHY_VERSION="1.14.6"
-XHY_BUILD="e4f51b646f65"
+XHY_BUILD="52515a92db51"
 
 # relay 渲染契约版本。改了 lib/relay.sh / nodes.sh 的 config 生成逻辑、
 # 或新增「函数体没变但 config.json 必须重建」的字段时，手工 +1。
@@ -351,8 +351,16 @@ atomic_write() {
 # 11-07 事故当晚手工装的清理钩子。路径做成变量，测试才能指到临时目录。
 # Preserve only managed configuration, excluding locks and historical backups.
 # The subshell exit trap also handles die/exit in a callback.
-config_transaction() (
-    if [[ "${XHY_TX_ACTIVE:-0}" == 1 ]]; then "$@"; return $?; fi
+config_transaction() {
+    if [[ "${XHY_TX_ACTIVE:-0}" == 1 ]]; then
+        # Nested mutations share the outer transaction's restart flag.
+        "$@"
+    else
+        _config_transaction "$@"
+    fi
+}
+
+_config_transaction() (
     need_root
     init_dirs || return 1
     local tx f rc
