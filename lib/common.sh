@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.14.6}"
+XHY_VERSION="${XHY_VERSION:-1.14.7}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -189,6 +189,17 @@ config_transaction() {
 _config_transaction() (
     need_root
     init_dirs || return 1
+    # 离线测试加速（双闸门：只有测试夹具 + 本机 MSYS/CYGWIN 才生效）。
+    # 每次事务都要 mktemp -d + cp -a 8 项 + 两轮 rm -rf，在 Windows 文件系统
+    # 上是秒级；relay-test 里几十次调用会把全套回归从秒级拖到 5 分钟以上。
+    # 生产与 Linux CI 永不走这条分支；reliability-test.sh 显式关掉它以保留
+    # 真实回滚覆盖。跳过快照时也不做回滚 trap —— 没有快照就没有可恢复的东西，
+    # 强行执行恢复分支反而会删掉现存配置。
+    if [[ "${XHY_TEST_MODE:-0}" == 1 && "${XHY_TX_SKIP_SNAPSHOT:-0}" == 1 ]]; then
+        XHY_TX_ACTIVE=1 XHY_TX_RESTARTED=0
+        "$@"
+        return $?
+    fi
     _xhy_tx_files=(confs nodes certs state.env config.json tunnel.token target.env scan-cache.tsv)
     _xhy_tx_dir="$(mktemp -d "$XHY_ETC/.transaction.XXXXXX")" || return 1
     trap 'rm -rf "$_xhy_tx_dir"' EXIT

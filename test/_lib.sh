@@ -29,6 +29,23 @@ export XHY_ETC="$TEST_TMP/etc" XHY_LOGDIR="$TEST_TMP/log"
 export XRAY_BIN="$TEST_TMP/bin/xray" XRAY_ASSET="$TEST_TMP/asset"
 export CF_BIN="$TEST_TMP/bin/cloudflared"
 
+# Offline tests must never wait on an interactive prompt. Production ask() uses
+# `read -r -t 60`; when a runner keeps stdin open but supplies no input, that
+# burns a full minute per call (node_pick / target selection). Redirect once so
+# reads return EOF immediately. Interactive behaviour stays unchanged in prod.
+exec </dev/null
+
+# Only the offline fixture sets XHY_TEST_MODE. Together with the platform check
+# it lets config_transaction skip its mktemp -d + cp -a + rm -rf snapshot on
+# Git-for-Windows, where those operations are seconds each (the other local
+# slowdown). Linux CI keeps the full snapshot; reliability-test.sh opts back in
+# explicitly because it asserts real rollback.
+export XHY_TEST_MODE=1
+case "$(uname -s 2>/dev/null || printf '')" in
+    MINGW*|MSYS*|CYGWIN*) export XHY_TX_SKIP_SNAPSHOT=1 ;;
+    *)                    export XHY_TX_SKIP_SNAPSHOT=0 ;;
+esac
+
 # openssl -subj "/CN=..." is rewritten into a drive path by MSYS on Windows.
 export MSYS2_ARG_CONV_EXCL='/CN;DNS'
 

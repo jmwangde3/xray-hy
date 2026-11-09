@@ -192,8 +192,11 @@ xray_install() (
     unpack="$tmp/unpack"
     trap '[[ -z "$geo" ]] || rm -rf "$geo"; rm -rf "$tmp"' EXIT
 
-    # ① 写前闸门：36 MB 二进制 + geo 数据 + 余量。不足就中止，原文件未动。
-    disk_need 90 "安装 Xray $ver" || die "已中止安装：原二进制未改动"
+    # ① 写前闸门：36 MB zip + 36 MB 解压后的二进制 + 官方 dat 4 MB +
+    # Loyalsoldier dat 约 30 MB + 余量。不足就中止，原文件未动。
+    # v1.14.6 起 xray_install 会额外下一份 Loyalsoldier 完整版，峰值比旧版
+    # 多约 30 MB；90 MB 的旧闸门对 427 MB 根分区不再够用。
+    disk_need 120 "安装 Xray $ver" || die "已中止安装：原二进制未改动"
     install -d -m 0700 "$XHY_BACKUP"
 
     info "下载 Xray $ver ($asset)"
@@ -211,6 +214,9 @@ xray_install() (
     fi
     [[ -f "$unpack/xray" ]] || die "压缩包中缺少 xray 二进制"
     chmod 0755 "$unpack/xray" || return 1
+    # 解压产物已齐，压缩包与 .dgst 立刻丢弃：36 MB 的 zip 若留到后面
+    # 下载 Loyalsoldier dat 时，正是根分区最容易撑满的时刻。
+    rm -f "$tmp/$asset" "$tmp/$asset.dgst" || true
 
     # ② 先在临时目录验证，通过后才碰目标文件
     got="$(XRAY_LOCATION_ASSET="$XRAY_ASSET" "$unpack/xray" version 2>/dev/null \
@@ -231,6 +237,9 @@ xray_install() (
             mv "$unpack/geoip.dat" "$unpack/geosite.dat" "$geo/" || return 1
             candidate="$geo"
         elif geodata_stage_loyalsoldier "$geo"; then
+            # 压缩包自带的是官方子集 dat，Loyalsoldier 完整版铺好后即无用；
+            # 留着会与 $geo 里的两份叠加，多占约 4 MB 峰值。
+            rm -f "$unpack/geoip.dat" "$unpack/geosite.dat" || true
             candidate="$geo"
         elif [[ -s "$XRAY_ASSET/geoip.dat" && -s "$XRAY_ASSET/geosite.dat" ]]; then
             warn "Loyalsoldier 下载失败，保留原 geodata 和源标记"

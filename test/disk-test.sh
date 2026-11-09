@@ -61,7 +61,9 @@ chk "snapshots 清到 5 个"     '[[ $(ls -1 "$XHY_SNAPSHOTS"/state.*.tar.gz 2>/
 chk "backups 不受影响"        '[[ $(ls -1 "$XHY_BACKUP"/xray-* 2>/dev/null | wc -l | tr -d " ") -eq 0 ]]'
 
 echo "=== 源码接线 ==="
-chk "xray_install 有写前闸门"      'grep -q "disk_need 90" lib/core.sh'
+chk "xray_install 有写前闸门"      'grep -q "disk_need 120" lib/core.sh'
+chk "解压后丢弃 zip 与 dgst"      'grep -q "rm -f .*asset.dgst.*|| true" lib/core.sh'
+chk "Loyalsoldier 成功后删官方 dat" 'grep -q "rm -f .*unpack/geosite.dat.*|| true" lib/core.sh'
 chk "旧二进制默认不再归档"          'grep -q "XHY_BACKUP_CORE:-0" lib/core.sh'
 chk "update_core 有回滚副本闸门"    'grep -q "不足 100 MB，无法建立回滚副本" lib/update.sh'
 chk "self_check 有磁盘余量行"      'grep -q "磁盘余量 : " lib/update.sh'
@@ -191,7 +193,7 @@ out="$(
 rc=$?
 chk "余量 0 时安装失败"        '[[ $rc -ne 0 ]]'
 chk "原二进制逐字节未变"       '[[ "$(sha256sum "$TEST_TMP/bin/xray" | awk "{print \$1}")" == "$old_sum" ]]'
-chk "报错点名磁盘余量不足"     'grep -q "至少需要 90 MB" <<<"$out"'
+chk "报错点名磁盘余量不足"     'grep -q "至少需要 120 MB" <<<"$out"'
 chk "没有下载就被拦下"         '! grep -q "下载 Xray" <<<"$out"'
 
 echo "=== 遗留定时钩子：自动摘掉并留档 ==="

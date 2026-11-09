@@ -2,6 +2,15 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.14.7 — 2026-11-09
+
+- fix(cli): `xhy update`（不带子命令）不再直接崩 —— v1.14.6 把 `all)` 改成 `shift; update_all "$@"`，但 `main()` 开头已消费掉 `update`，`case "${1:-all}"` 命中默认 `all` 时 `$#=0`，这个 `shift` 在 `set -Eeuo pipefail` 下返回 1 直接终止脚本（实测 rc=1、无任何输出，默认全量更新入口整个没了）。改为 `if (( $# )); then shift; fi; update_all "$@"`。`xhy update all --yes` / `update script --yes` / `update _continue 1` 不受影响 —— 正好是 CI 与三台实机升级走的路径，所以没撞出来。新增 `test/cli-test.sh` 15 项断言覆盖 11 种参数形态 + `--version` / `--help` + 源码接线
+- fix(test): 离线回归不再白等 60 秒 —— 测试夹具 `test/_lib.sh` 统一 `exec </dev/null`、`run-all.sh` 用 `</dev/null` 起各测试，避免 `node_pick` → `ask()`（`read -r -t 60`）在 stdin 保持打开却无输入时每次耗满超时（`update-relay-test.sh` 1m12s → 11s）。另给 `config_transaction` 加**双闸门快路径**（`XHY_TEST_MODE=1` 且本机 MSYS/CYGWIN），跳过 `mktemp -d` + `cp -a` 8 项 + 两轮 `rm -rf`；生产与 Linux CI 走原路径，`reliability-test.sh` 显式关闭以保留真实回滚覆盖。跳过快照时也不挂回滚 trap —— 没有快照却执行恢复分支反而会删掉现存配置
+- fix(core): 写前闸门与峰值同步 —— `xray_install` 的 Loyalsoldier 分支会额外下一份约 30 MB 完整版 dat，旧 `disk_need 90` 对 427 MB 根分区不再够用 → 提到 **120**；解压产物齐备后立刻删掉 36 MB 的 zip 与 `.dgst`，Loyalsoldier 铺好后再删掉 `$unpack` 里无用的官方子集 dat，峰值净降约 40 MB。`disk-test.sh` 两条硬编码接线断言同步 90→120，并补 2 条「丢弃 zip / 删官方 dat」回归
+- fix(backup): 旧格式备份不再被拒 —— `backup_archive_safe` 白名单补 `.lock.d/*` / `snapshots/*` / `backups/*` / `scan/*` / `.transaction.*/*` 等 v1.14.5 及更早 `cp -a "$XHY_ETC/."` 会带入的内部状态条目；它们仍逐项过清单校验（SHA-256 + size + 未列文件检查），但 `_backup_restore_apply` 只恢复固定 7 项，不会写回 `$XHY_ETC`。`restore` 检测到旧格式时给一条 warn。`reliability-test.sh` 补 2 条旧归档回归（接受 + 残留不落盘）
+- docs: README 测试章节 19 文件 846 项 → **21 文件 848 项**；把孤立的「Linux 集成验证」段移进 §8，补 `test/real-core-test.sh` 与 CI 双镜像（Debian 12 / Alpine 3.23，真实 Xray 26.10.31 校验 `xray run -test` 与 geodata 配对）说明
+- test: `bash test/run-all.sh` **21 个文件、848 项断言全绿**；`./build.sh --check` 产物一致（install.sh build `486050aee074`）
+
 ## v1.14.6 — 2026-11-09
 
 - Validate candidate configs, recover state on failure, and repair backup restore.

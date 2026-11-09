@@ -370,12 +370,18 @@ tools/bump-version.sh major --note "破坏性变更"   # 1.3.1 -> 2.0.0
 已在真实 VPS（Alpine 3.23 / OpenRC）上完成端到端部署：`install` 七步全过、REALITY 节点实测可连、`xhy scan` 实机扫出并应用了同机房伪装站；三台机跑 `xhy relay` 中继链路（东京 entry → 硅谷 land）并验收分流。下面的离线测试仍保留，任何机器上都能复跑（不需要 root、不需要网络、不需要真实 Xray）：
 
 ```sh
-bash test/run-all.sh     # 19 个测试文件、846 项断言（含 build.sh --check）
+bash test/run-all.sh     # 21 个测试文件、848 项断言（含 build.sh --check）
 ```
 
-覆盖：全部脚本语法与单文件产物一致性；五种节点模式的 inbound 片段与合并 `config.json` 合法性；`hy2` 自签证书与 `pinSHA256` 链接；`link --qr/--png`；`i18n` 按 tty 分中英；`add → snapshot → del → rollback` 状态恢复；跨模式端口冲突；伪装站扫描 / 打分 / 缓存；**`hardening` 的 iptables 规则行序**（`--rcheck` 在 `--set` 前、relay 放行在 `RETURN` 前）；**`relay` 的恒明文 / balancer / `burstObservatory` / `fallbackTag` / `streamSettings.sockopt` 层级 / config 与 relay.env 一致性**；**`geodata` 的默认源 / `--source` 切换 / 源标记 / 失败不写标记**；`core` 下载与 `.dgst` 校验；磁盘闸门与 `clean` 行为；`bootstrap` 单文件直装与软链自愈；**`update-relay`** 的 `node_env_files` 过滤（relay.env 不再被当节点）与 relay 指纹 / 自动 reapply 三分支判定。
+覆盖：全部脚本语法与单文件产物一致性；五种节点模式的 inbound 片段与合并 `config.json` 合法性；`hy2` 自签证书与 `pinSHA256` 链接；`link --qr/--png`；`i18n` 按 tty 分中英；`add → snapshot → del → rollback` 状态恢复；跨模式端口冲突；伪装站扫描 / 打分 / 缓存；**`hardening` 的 iptables 规则行序**（`--rcheck` 在 `--set` 前、relay 放行在 `RETURN` 前）；**`relay` 的恒明文 / balancer / `burstObservatory` / `fallbackTag` / `streamSettings.sockopt` 层级 / config 与 relay.env 一致性**；**`geodata` 的默认源 / `--source` 切换 / 源标记 / 失败不写标记**；`core` 下载与 `.dgst` 校验；磁盘闸门与 `clean` 行为；`bootstrap` 单文件直装与软链自愈；**`update-relay`** 的 `node_env_files` 过滤（relay.env 不再被当节点）与 relay 指纹 / 自动 reapply 三分支判定；**`reliability`** 的事务回滚 / 旧格式备份恢复；**`cli`** 的 `xhy update` 无参数分发；**`disk`** 的 120 MB 写前闸门与峰值清理。
 
 此外 `hy2` 的配置字段在真实 Xray **26.10.31** 上用 `xray run -test` 验证通过（`protocol: hysteria` / `version: 2` / `alpn: ["h3"]` / `masquerade` / `finalmask.quicParams`），`hysteria2://` 链接格式经人工核对。
+
+### Linux 集成验证
+
+离线回归之外，`.github/workflows/linux.yml` 在 **Debian 12** 与 **Alpine 3.23** 两个容器里跑同一套 `run-all.sh`，再执行 `test/real-core-test.sh`：用**真实 Xray**（默认固定版，另跑一遍 `v26.10.31`）以 `xray run -test` 校验 `node_add` / `relay_entry` / 备份恢复生成的 `config.json`，并验证临时配置的 `-format json` 与 geodata 配对。本地 Linux 可直接 `bash test/real-core-test.sh`；已有核心与 geodata 时用 `XRAY_TEST_BIN` / `XRAY_TEST_ASSET` 复用，省去下载。**本地跑完 `run-all.sh` 不等于过了集成验证**，后者需要真实二进制与网络。
+
+明文 VLESS 中继应使用私网地址或核心认可的私有域名。较新的 Xray 会拒绝未加密的公网目标；若校验失败，xhy 保留原 relay 状态和配置。
 
 不同发行版、内核、容器环境差异较大，请务必：
 
@@ -394,9 +400,3 @@ bash test/run-all.sh     # 19 个测试文件、846 项断言（含 build.sh --c
 ## 9. License
 
 MIT，见 [LICENSE](LICENSE)。
-
-明文 VLESS 中继应使用私网地址或核心认可的私有域名。较新的 Xray 会拒绝未加密的公网目标；若校验失败，xhy 保留原 relay 状态和配置。
-
-### Linux 集成验证
-
-GitHub Actions 在 Alpine 与 Debian 容器运行离线回归，并使用真实 Xray 验证节点、relay 和备份恢复生成的配置。可在 Linux 本地运行 `bash test/real-core-test.sh`；也可提供 `XRAY_TEST_BIN` 和 `XRAY_TEST_ASSET`，复用现有核心和 geodata。

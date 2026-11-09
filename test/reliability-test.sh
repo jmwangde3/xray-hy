@@ -3,6 +3,9 @@
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 source test/_lib.sh
+# This file asserts real rollback, so keep the full transaction snapshot even
+# on MSYS where the rest of the suite skips it for speed.
+export XHY_TX_SKIP_SNAPSHOT=0
 load_libs
 stub_system
 make_stub_xray
@@ -112,4 +115,27 @@ update_core() { printf old >"$XHY_ETC/old-process"; }
 rc=$?
 chk 'full upgrade delegates only to the new process with lock FD closed' \
     '[[ "$rc" == 0 && "$(cat "$XHY_ETC/new-process")" == "update _continue 1" && ! -e "$XHY_ETC/old-process" ]]'
+
+# v1.14.5 and earlier packed `cp -a "$XHY_ETC/."`, so archives also carry
+# internal-state entries (.lock / .lock.d/ / snapshots/). The v1.14.6
+# whitelist must still accept and ignore them instead of refusing the restore.
+mkdir -p "$TEST_TMP/legacy"
+tar -xzf "$TEST_TMP/valid.tgz" -C "$TEST_TMP/legacy" || exit 1
+mkdir -p "$TEST_TMP/legacy/payload/.lock.d" "$TEST_TMP/legacy/payload/snapshots"
+printf 'stale\n' >"$TEST_TMP/legacy/payload/.lock"
+printf 'old\n' >"$TEST_TMP/legacy/payload/snapshots/old.json"
+{
+    printf '# xray-hy backup manifest v1\n'
+    ( cd "$TEST_TMP/legacy/payload" && find . -type f | sed 's|^\./||' | LC_ALL=C sort ) |
+        while IFS= read -r f; do
+            printf '%s\t%s\t%s\n' \
+                "$(sha256sum "$TEST_TMP/legacy/payload/$f" | awk '{print $1}')" \
+                "$(wc -c <"$TEST_TMP/legacy/payload/$f" | tr -d '[:space:]')" "$f"
+        done
+} >"$TEST_TMP/legacy/manifest.tsv"
+tar -czf "$TEST_TMP/legacy.tgz" -C "$TEST_TMP/legacy" payload manifest.tsv || exit 1
+chk 'legacy backup with internal-state entries is accepted' \
+    'backup_restore "$TEST_TMP/legacy.tgz" && [[ $(node_count) == 1 ]]'
+chk 'legacy internal-state entries are not restored into etc' \
+    '[[ ! -e "$XHY_ETC/.lock" && ! -e "$XHY_SNAPSHOTS/old.json" ]]'
 summary

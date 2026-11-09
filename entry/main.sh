@@ -895,7 +895,10 @@ main() {
                         *) die "用法: xhy core [status|channel <值>|update [--force]]" ;;
                     esac ;;
         update)     case "${1:-all}" in
-                        all) shift; update_all "$@" ;;
+                        # `xhy update`（不带子命令）命中默认的 all 时 $# 已经是 0，
+                        # 无条件 shift 会在 set -Eeuo pipefail 下返回 1 直接终止脚本。
+                        # 只有确实存在子命令参数时才消费它。
+                        all) if (( $# )); then shift; fi; update_all "$@" ;;
                         _continue) update_continue "${2:-}" ;;
                         script) shift; update_script "$@" ;;
                         core) shift; update_core "$@" ;;

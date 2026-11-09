@@ -144,8 +144,8 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.14.6"
-XHY_BUILD="e7e75106e179"
+XHY_VERSION="1.14.7"
+XHY_BUILD="486050aee074"
 
 # relay 渲染契约版本。改了 lib/relay.sh / nodes.sh 的 config 生成逻辑、
 # 或新增「函数体没变但 config.json 必须重建」的字段时，手工 +1。
@@ -175,7 +175,7 @@ fi
 # ===================== lib/common.sh =====================
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.14.6}"
+XHY_VERSION="${XHY_VERSION:-1.14.7}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -363,6 +363,17 @@ config_transaction() {
 _config_transaction() (
     need_root
     init_dirs || return 1
+    # 离线测试加速（双闸门：只有测试夹具 + 本机 MSYS/CYGWIN 才生效）。
+    # 每次事务都要 mktemp -d + cp -a 8 项 + 两轮 rm -rf，在 Windows 文件系统
+    # 上是秒级；relay-test 里几十次调用会把全套回归从秒级拖到 5 分钟以上。
+    # 生产与 Linux CI 永不走这条分支；reliability-test.sh 显式关掉它以保留
+    # 真实回滚覆盖。跳过快照时也不做回滚 trap —— 没有快照就没有可恢复的东西，
+    # 强行执行恢复分支反而会删掉现存配置。
+    if [[ "${XHY_TEST_MODE:-0}" == 1 && "${XHY_TX_SKIP_SNAPSHOT:-0}" == 1 ]]; then
+        XHY_TX_ACTIVE=1 XHY_TX_RESTARTED=0
+        "$@"
+        return $?
+    fi
     _xhy_tx_files=(confs nodes certs state.env config.json tunnel.token target.env scan-cache.tsv)
     _xhy_tx_dir="$(mktemp -d "$XHY_ETC/.transaction.XXXXXX")" || return 1
     trap 'rm -rf "$_xhy_tx_dir"' EXIT
@@ -1613,8 +1624,11 @@ xray_install() (
     unpack="$tmp/unpack"
     trap '[[ -z "$geo" ]] || rm -rf "$geo"; rm -rf "$tmp"' EXIT
 
-    # ① 写前闸门：36 MB 二进制 + geo 数据 + 余量。不足就中止，原文件未动。
-    disk_need 90 "安装 Xray $ver" || die "已中止安装：原二进制未改动"
+    # ① 写前闸门：36 MB zip + 36 MB 解压后的二进制 + 官方 dat 4 MB +
+    # Loyalsoldier dat 约 30 MB + 余量。不足就中止，原文件未动。
+    # v1.14.6 起 xray_install 会额外下一份 Loyalsoldier 完整版，峰值比旧版
+    # 多约 30 MB；90 MB 的旧闸门对 427 MB 根分区不再够用。
+    disk_need 120 "安装 Xray $ver" || die "已中止安装：原二进制未改动"
     install -d -m 0700 "$XHY_BACKUP"
 
     info "下载 Xray $ver ($asset)"
@@ -1632,6 +1646,9 @@ xray_install() (
     fi
     [[ -f "$unpack/xray" ]] || die "压缩包中缺少 xray 二进制"
     chmod 0755 "$unpack/xray" || return 1
+    # 解压产物已齐，压缩包与 .dgst 立刻丢弃：36 MB 的 zip 若留到后面
+    # 下载 Loyalsoldier dat 时，正是根分区最容易撑满的时刻。
+    rm -f "$tmp/$asset" "$tmp/$asset.dgst" || true
 
     # ② 先在临时目录验证，通过后才碰目标文件
     got="$(XRAY_LOCATION_ASSET="$XRAY_ASSET" "$unpack/xray" version 2>/dev/null \
@@ -1652,6 +1669,9 @@ xray_install() (
             mv "$unpack/geoip.dat" "$unpack/geosite.dat" "$geo/" || return 1
             candidate="$geo"
         elif geodata_stage_loyalsoldier "$geo"; then
+            # 压缩包自带的是官方子集 dat，Loyalsoldier 完整版铺好后即无用；
+            # 留着会与 $geo 里的两份叠加，多占约 4 MB 峰值。
+            rm -f "$unpack/geoip.dat" "$unpack/geosite.dat" || true
             candidate="$geo"
         elif [[ -s "$XRAY_ASSET/geoip.dat" && -s "$XRAY_ASSET/geosite.dat" ]]; then
             warn "Loyalsoldier 下载失败，保留原 geodata 和源标记"
@@ -5077,8 +5097,13 @@ backup_archive_safe() {
     if grep -qvE '^[-d]' "$stage/types"; then return 1; fi
     while IFS= read -r member; do
         [[ "$member" =~ ^[A-Za-z0-9_./+-]+$ && "/$member/" != */../* && "/$member/" != */./* ]] || return 1
+        # 前半段是 v1.14.6 起 backup_create 的新格式白名单。后半段兼容
+        # v1.14.5 及更早的旧格式：那时是 `cp -a "$XHY_ETC/."`，只排
+        # snapshots/ 与 backups/，归档里还会带 .lock / .lock.d/ / scan/ 等
+        # 内部状态条目。它们会被清单校验、但 _backup_restore_apply 只恢复
+        # 固定 7 项，不会写回 $XHY_ETC。
         case "$member" in
-            manifest.tsv|payload/|payload/confs/|payload/nodes/|payload/certs/|payload/confs/*|payload/nodes/*|payload/certs/*|payload/config.json|payload/state.env|payload/tunnel.token|payload/target.env|payload/scan-cache.tsv|payload/.lock|payload/.lock.d/) ;;
+            manifest.tsv|payload/|payload/confs/|payload/nodes/|payload/certs/|payload/confs/*|payload/nodes/*|payload/certs/*|payload/config.json|payload/state.env|payload/tunnel.token|payload/target.env|payload/scan-cache.tsv|payload/.lock|payload/.lock.d/|payload/.lock.d/*|payload/scan/|payload/scan/*|payload/snapshots/|payload/snapshots/*|payload/backups/|payload/backups/*|payload/.transaction.*/|payload/.transaction.*/*) ;;
             *) return 1 ;;
         esac
     done <"$stage/members"
@@ -5092,6 +5117,9 @@ backup_restore() (
     stage="$(mktemp -d "${TMPDIR:-/tmp}/xhy-rst.XXXXXX")" || return 1
     trap 'rm -rf "$stage"' EXIT
     backup_archive_safe "$arc" "$stage" || die "备份含有不支持或不安全的条目"
+    if grep -qE '^payload/(\.lock|\.lock\.d/|snapshots/|backups/|scan/|\.transaction\.)' "$stage/members"; then
+        warn "检测到旧格式备份条目（内部状态 / 历史目录）：会被校验但不会恢复到 $XHY_ETC"
+    fi
     tar -xzf "$arc" -C "$stage" || die "解包失败"
     [[ -d "$stage/payload" && -f "$stage/manifest.tsv" ]] || die "缺少备份清单或 payload"
     local -A seen=()
@@ -8019,7 +8047,10 @@ main() {
                         *) die "用法: xhy core [status|channel <值>|update [--force]]" ;;
                     esac ;;
         update)     case "${1:-all}" in
-                        all) shift; update_all "$@" ;;
+                        # `xhy update`（不带子命令）命中默认的 all 时 $# 已经是 0，
+                        # 无条件 shift 会在 set -Eeuo pipefail 下返回 1 直接终止脚本。
+                        # 只有确实存在子命令参数时才消费它。
+                        all) if (( $# )); then shift; fi; update_all "$@" ;;
                         _continue) update_continue "${2:-}" ;;
                         script) shift; update_script "$@" ;;
                         core) shift; update_core "$@" ;;

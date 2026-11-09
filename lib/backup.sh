@@ -75,8 +75,13 @@ backup_archive_safe() {
     if grep -qvE '^[-d]' "$stage/types"; then return 1; fi
     while IFS= read -r member; do
         [[ "$member" =~ ^[A-Za-z0-9_./+-]+$ && "/$member/" != */../* && "/$member/" != */./* ]] || return 1
+        # 前半段是 v1.14.6 起 backup_create 的新格式白名单。后半段兼容
+        # v1.14.5 及更早的旧格式：那时是 `cp -a "$XHY_ETC/."`，只排
+        # snapshots/ 与 backups/，归档里还会带 .lock / .lock.d/ / scan/ 等
+        # 内部状态条目。它们会被清单校验、但 _backup_restore_apply 只恢复
+        # 固定 7 项，不会写回 $XHY_ETC。
         case "$member" in
-            manifest.tsv|payload/|payload/confs/|payload/nodes/|payload/certs/|payload/confs/*|payload/nodes/*|payload/certs/*|payload/config.json|payload/state.env|payload/tunnel.token|payload/target.env|payload/scan-cache.tsv|payload/.lock|payload/.lock.d/) ;;
+            manifest.tsv|payload/|payload/confs/|payload/nodes/|payload/certs/|payload/confs/*|payload/nodes/*|payload/certs/*|payload/config.json|payload/state.env|payload/tunnel.token|payload/target.env|payload/scan-cache.tsv|payload/.lock|payload/.lock.d/|payload/.lock.d/*|payload/scan/|payload/scan/*|payload/snapshots/|payload/snapshots/*|payload/backups/|payload/backups/*|payload/.transaction.*/|payload/.transaction.*/*) ;;
             *) return 1 ;;
         esac
     done <"$stage/members"
@@ -90,6 +95,9 @@ backup_restore() (
     stage="$(mktemp -d "${TMPDIR:-/tmp}/xhy-rst.XXXXXX")" || return 1
     trap 'rm -rf "$stage"' EXIT
     backup_archive_safe "$arc" "$stage" || die "备份含有不支持或不安全的条目"
+    if grep -qE '^payload/(\.lock|\.lock\.d/|snapshots/|backups/|scan/|\.transaction\.)' "$stage/members"; then
+        warn "检测到旧格式备份条目（内部状态 / 历史目录）：会被校验但不会恢复到 $XHY_ETC"
+    fi
     tar -xzf "$arc" -C "$stage" || die "解包失败"
     [[ -d "$stage/payload" && -f "$stage/manifest.tsv" ]] || die "缺少备份清单或 payload"
     local -A seen=()
