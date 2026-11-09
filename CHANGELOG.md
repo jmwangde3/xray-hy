@@ -2,6 +2,10 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.14.5 — 2026-11-09
+
+- release: XHY_RELAY_SCHEMA 3→4，自举链收尾。v1.14.4 修好了自动 reapply 的配置锁冲突（release_lock + exec 9>&-），但升级动作由旧脚本执行：v1.14.3→v1.14.4 时跑的是 v1.14.3 的 update_script，里面还没有修锁代码，所以仍失败（硅谷实机复现）。实机 flock 实验确认 exec 9>&- 确实能释放锁（父持锁不关 → child_BUSY；关 fd → child_got）。本版只 bump schema，让 v1.14.4 的 update_script 真正被执行一次：v1.14.4→v1.14.5 时自动 relay reapply 应成功。说明：任何改 update_script 自身的修复都要下一次升级才生效，这是单文件自更新的固有性质
+
 ## v1.14.4 — 2026-11-09
 
 - fix(update): 自动 relay reapply 不再被配置锁自己挡住 —— main() 从 acquire_lock 起全程持有 flock fd 9（或 .lock.d），update_script 起的新脚本子进程会继承 fd 9 / 看到目录还在，于是自己 acquire_lock 等 15 秒后 die（v1.14.3 硅谷实机：日志出现「自动重建 config.json…」随后「另一个 xhy 实例正在修改配置」+ warn）。现在起子进程前先 release_lock + exec 9>&- 释放父进程锁，子进程自己拿锁；父进程之后只剩打印与 return，不改配置。XHY_RELAY_SCHEMA 2→3 强制触发一次以端到端验证
