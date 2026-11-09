@@ -18,14 +18,14 @@
 |---|---|
 | 供应链 | **单文件发布**：`install.sh` 由 `build.sh` 从 `lib/` 拼接生成，带构建号（commit + 源码哈希）。安装时先落盘再执行、自更新先过 `bash -n` 并比对构建号才整文件替换，**不会**把下载内容直接管道进 shell。仓库内开发仍走 git 工作树，`xhy update script` 拉新构建后先比对再替换。 |
 | 下载校验 | Xray 发布包的 `.dgst` SHA-256 **强制校验**，拿不到摘要直接中止（多数一键脚本在这里会警告后继续）。cloudflared 官方 raw 二进制无校验和，做 ELF + `--version` 自检并明确提示。 |
-| 配置安全 | 每次变更先在临时文件渲染、用 `xray run -test -c` 整体校验，**失败自动回滚该节点**，不影响已有节点。 |
+| 配置安全 | 每次变更先渲染候选配置，用 `xray run -test -c` 校验后再替换；失败恢复原有节点、证书与配置。 |
 | SSH | **从不修改 `sshd_config`**，只读取当前端口用于防火墙放行，避免远程锁死自己。 |
 | 防火墙 | 只维护自己的 iptables 链，不 flush `INPUT`、不覆盖用户已有规则；开机时幂等重建而非 `iptables-restore` 全量覆盖。 |
 | 凭证 | 节点 `.env` 权限 0600，目录 0700，Tunnel Token 单独 0600；分享链接输出时提示等同凭证。 |
 | REALITY | 上游官方警告：认证失败的流量会被转发到 target，CDN 后面的站点会让服务器变成开放转发器。因此内置 TLS 1.3 / H2 / 无跳转 / 非 CDN 校验，并默认加上 `limitFallback*` 限速。 |
 | 并发与磁盘 | 全局 `flock` 串行化所有配置变更，且服务命令显式关闭锁 fd（防 OpenRC 守护进程继承导致死锁）；**快照是整套状态 tar**（config + confs + nodes + state），回滚不会出现配置与节点注册表不一致；自动生成 logrotate 策略（weekly / 保留 4 份 / 32M 触发） |
 | 内存 | 依据物理内存与 cgroup `memory.max` 给 Xray 设 `GOMEMLIMIT`（取 1/4，下限 32MiB），128–256MB 小鸡不易被 OOM Kill |
-| 自更新 | `xhy update script` 下载新构建 → `bash -n` 语法检查 → 比对构建号 → 确认后原子替换；任一步失败本地脚本保持原样，旧版本自动备份在 `/etc/xray-hy/backups/`。脚本本体直装 `/usr/local/bin/xhy`（普通文件、非软链），git 工作树只用于开发 |
+| 自更新 | `xhy update script` 下载新构建 → `bash -n` 语法检查 → 比对构建号 → 确认后原子替换；旧版本自动备份。若本次涉及 relay，使用新版重建，失败返回非零。脚本本体直装 `/usr/local/bin/xhy`（普通文件、非软链），git 工作树只用于开发 |
 
 ---
 
@@ -124,6 +124,7 @@ xhy check                                 # 全量环境自检
 | 导出链接 | `xhy link --all` / `--uri` / `--qr` / `--png FILE`（终端二维码 65×33 列，PNG 0600；服务器是 IPv4 字面量且开了双栈时自动附 **IPv6 变体链接**） |
 | 导出客户端配置 | `xhy export clash|singbox [--out FILE]` —— 生成 mihomo/Clash.Meta 的 `proxies` YAML 或 sing-box 的 outbounds JSON；xHTTP 两边都暂不支持，自动跳过并提示 |
 | 备份 / 还原 | `xhy backup [--out FILE]` —— 打包 `/etc/xray-hy`（排除 snapshots/backups），**内含逐文件 SHA256 清单**；`xhy restore <文件>` 先全量校验、现状自动留底、从 nodes 重建配置并过 `xray -test`，失败整体回滚 |
+| 全量更新 | `xhy update all --yes` 更新脚本后由新版进程接管；从 v1.14.5 及更早版本首次升级，请先单独运行 `xhy update script --yes`。 |
 | 非交互更新 | `xhy update script --yes`（同一主版本序列自动确认；跨主版本再加 `--allow-major`） |
 | 额外补充 | 多节点并存与独立增删、**端口跨模式全局唯一检查**、**`DUAL_STACK=on` 双栈监听**、**`xhy preflight` 安装前只读预检**（内核修复线 / 端口 / 磁盘 / 内存 / MPTCP / GitHub 可达 / 依赖）、**Hysteria2 的 UDP 双栈放行与自签证书 pin**、节点注册表、**`flock` 并发锁（服务命令关闭锁 fd）**、配置变更原子校验+回滚、**最近 5 份整套状态快照 + `xhy rollback`**、更新 Xray 时二进制自动回滚、更新脚本后全量 `bash -n`、按内存/cgroup 设 `GOMEMLIMIT`、日志自动轮转、系统级关闭 MPTCP（钉死旧版的关键缓解）、私网/回国 IP/广告域名阻断开关、DoH 选择、日志级别与关闭、geodata 更新（Loyalsoldier 默认 + SHA-256 校验 + `.geodata-source` 源标记）、**relay 中继（entry → land，恒明文 `security=none`，失联 `fallbackTag=block` 断联绝不直出）**、REALITY fallback 限速、系统自检报告、CLI 与菜单双入口、卸载可选保留配置 |
 
@@ -393,3 +394,7 @@ bash test/run-all.sh     # 19 个测试文件、846 项断言（含 build.sh --c
 ## 9. License
 
 MIT，见 [LICENSE](LICENSE)。
+
+### Linux 集成验证
+
+GitHub Actions 在 Alpine 与 Debian 容器运行离线回归，并使用真实 Xray 验证节点、relay 和备份恢复生成的配置。可在 Linux 本地运行 `bash test/real-core-test.sh`；也可提供 `XRAY_TEST_BIN` 和 `XRAY_TEST_ASSET`，复用现有核心和 geodata。

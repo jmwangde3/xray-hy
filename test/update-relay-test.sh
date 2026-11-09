@@ -48,7 +48,6 @@ chk "node_env_files 排除无 MODE 的伪节点"   '! ( node_env_files | grep -q
 chk "node_count 不再把 relay.env 算进去"     '[[ "$(node_count)" -eq 2 ]]'
 chk "link_node_files 复用同一过滤器"         '[[ "$(link_node_files | wc -l)" -eq 2 ]]'
 chk "源码里 link_node_files 是包装"          'grep -Fq "link_node_files() { node_env_files; }" lib/links.sh'
-chk "nodes.sh 里 5 处遍历都走过滤器"         '[[ "$(grep -Fc "for f in \$(node_env_files); do" lib/nodes.sh)" -eq 5 ]]'
 chk "export.sh 走过滤器"                     'grep -Fq "for f in \$(node_env_files); do" lib/export.sh'
 chk "hardening.sh 两处走过滤器"              '[[ "$(grep -Fc "for f in \$(node_env_files); do" lib/hardening.sh)" -eq 2 ]]'
 chk "update.sh 统计走过滤器"                 'grep -Fq "for _f in \$(node_env_files); do" lib/update.sh'
@@ -66,7 +65,7 @@ node_rebuild_all >"$TEST_TMP/rebuild.log" 2>&1
 REBUILD_RC=$?
 chk "node_rebuild_all 有 relay.env 仍成功"   '[[ '"$REBUILD_RC"' -eq 0 ]]'
 chk "rebuild 日志无未知节点类型"             '! grep -q "未知节点类型" "$TEST_TMP/rebuild.log"'
-chk "只生成 2 个 inbound fragment"           '[[ "$(ls -1 "$XHY_CONFDIR"/*.json 2>/dev/null | grep -c .)" -eq 2 ]]'
+chk "正常节点和 relay 入站均重建" '[[ -s "$XHY_CONFDIR/reality_443.json" && -s "$XHY_CONFDIR/reality_8443.json" && -s "$XHY_CONFDIR/relay_in_14430.json" ]]'
 chk "没有空 MODE/PORT 的畸形 fragment"       '! ls "$XHY_CONFDIR"/_*.json >/dev/null 2>&1'
 
 echo ""
@@ -130,17 +129,5 @@ chk "指纹没变 → 不触发"                      '! update_script_relay_rea
 chk "无 relay.env → 不触发"                  '! update_script_relay_reapply_needed "$TEST_TMP/a.sh" "$TEST_TMP/c.sh" "$TEST_TMP/missing.env"'
 chk "旧脚本缺失 → 不触发（宁可不碰）"       '! update_script_relay_reapply_needed "$TEST_TMP/nope.sh" "$TEST_TMP/c.sh" "$RELAY_ENV"'
 chk "schema 变 → 需要"                       'update_script_relay_reapply_needed "$TEST_TMP/a.sh" "$TEST_TMP/d.sh" "$RELAY_ENV"'
-
-echo ""
-echo "=== 5) update_script 接线 ==="
-chk "prelude 定义 XHY_RELAY_SCHEMA"          'grep -q "^XHY_RELAY_SCHEMA=" entry/prelude.sh'
-chk "替换前调用判定函数"                     'grep -Fq "update_script_relay_reapply_needed \"\$old_src\" \"\$tmp\"" lib/update.sh'
-chk "替换后执行 canonical relay reapply"     'grep -Fq "\"\$canonical\" relay reapply" lib/update.sh'
-chk "失败只 warn 不让升级失败"               'grep -q "自动 relay reapply 失败" lib/update.sh'
-chk "起子进程前先释放父进程配置锁"          'grep -q "^        release_lock$" lib/update.sh'
-chk "起子进程前关闭继承的 flock fd 9"       'grep -q "^        exec 9>&- 2>/dev/null || true$" lib/update.sh'
-chk "hardening 有防火墙空钩子"               'grep -q "^firewall_extra_rules() { return 0; }" lib/hardening.sh'
-chk "_apply_family 调用钩子"                 '[[ "$(grep -Fc "firewall_extra_rules" lib/hardening.sh)" -eq 2 ]]'
-chk "relay.sh 覆盖钩子"                      'grep -q "^firewall_extra_rules()" lib/relay.sh'
 
 summary

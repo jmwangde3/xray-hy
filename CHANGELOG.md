@@ -2,6 +2,11 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.14.6 — 2026-11-09
+
+- Validate candidate configs, recover state on failure, and repair backup restore.
+- Preserve relay rules and geodata across upgrades; add Linux integration tests.
+
 ## v1.14.5 — 2026-11-09
 
 - release: XHY_RELAY_SCHEMA 3→4，自举链收尾。v1.14.4 修好了自动 reapply 的配置锁冲突（release_lock + exec 9>&-），但升级动作由旧脚本执行：v1.14.3→v1.14.4 时跑的是 v1.14.3 的 update_script，里面还没有修锁代码，所以仍失败（硅谷实机复现）。实机 flock 实验确认 exec 9>&- 确实能释放锁（父持锁不关 → child_BUSY；关 fd → child_got）。本版只 bump schema，让 v1.14.4 的 update_script 真正被执行一次：v1.14.4→v1.14.5 时自动 relay reapply 应成功。说明：任何改 update_script 自身的修复都要下一次升级才生效，这是单文件自更新的固有性质

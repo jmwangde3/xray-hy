@@ -40,6 +40,15 @@ chk "一键脚本会装脚本本体" 'grep -qx self "$LOG"'
 chk "一键脚本会建 xhy 入口" 'grep -qx link "$LOG"'
 chk "置 XHY_BOOTSTRAPPED=1" '[[ "$XHY_BOOTSTRAPPED" == 1 ]]'
 
+# MSYS may implement ln -s by copying the file when symlink privileges
+# are unavailable. Linux must exercise the real symlink path.
+if [[ "$(uname -s)" == MINGW* || "$(uname -s)" == MSYS* ]]; then
+    MSYS=winsymlinks:nativestrict ln -s "$LOG" "$TEST_TMP/link-probe" 2>/dev/null || true
+    if [[ -L "$TEST_TMP/link-probe" ]]; then
+        export MSYS=winsymlinks:nativestrict
+    fi
+fi
+if [[ "$(uname -s)" != MINGW* && "$(uname -s)" != MSYS* || -L "$TEST_TMP/link-probe" ]]; then
 echo "=== reconcile_bin 自愈旧软链（统一路径后必须能修好指错入口） ==="
 mkdir -p "$TEST_TMP/old"
 : >"$TEST_TMP/old/xhy"
@@ -77,6 +86,10 @@ install_self >/dev/null 2>&1
 chk "入口变成普通文件（非软链）" '[[ -f "$XHY_BINDIR/xhy" && ! -L "$XHY_BINDIR/xhy" ]]'
 chk "内容来自旧本体（复制成功，未下载）" 'grep -q "xray-hy legacy" "$XHY_BINDIR/xhy"'
 chk "旧孤儿本体被清掉" '[[ ! -e "$XHY_APP_DIR/xhy" ]]'
+
+else
+    printf '  SKIP  native symlinks unavailable on this Windows host\n'
+fi
 
 echo "=== xhy_is_installed ==="
 init_dirs

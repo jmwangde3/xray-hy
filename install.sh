@@ -144,8 +144,8 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.14.5"
-XHY_BUILD="d955ec799386"
+XHY_VERSION="1.14.6"
+XHY_BUILD="e4f51b646f65"
 
 # relay 渲染契约版本。改了 lib/relay.sh / nodes.sh 的 config 生成逻辑、
 # 或新增「函数体没变但 config.json 必须重建」的字段时，手工 +1。
@@ -156,7 +156,8 @@ XHY_BUILD="d955ec799386"
 # update script 会把它连同 relay_* / extra_* 函数体的指纹一起比对，
 # 变了且本机配了 relay 就自动 `relay reapply`，不用人记升级步骤。
 # 纯改文案 / 注释 / 其它模块不要动它（会让每次升级都无谓重载 Xray）。
-XHY_RELAY_SCHEMA="4"
+XHY_RELAY_SCHEMA="5"
+XHY_UPDATE_CHAIN="1"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -174,7 +175,7 @@ fi
 # ===================== lib/common.sh =====================
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.14.5}"
+XHY_VERSION="${XHY_VERSION:-1.14.6}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -291,10 +292,10 @@ confirm() {
 }
 
 init_dirs() {
-    mkdir -p "$XHY_ETC" "$XHY_CONFDIR" "$XHY_LOGDIR" "$XHY_BACKUP" "$XHY_NODES" "$XHY_SNAPSHOTS" "$XHY_CERTS"
-    chmod 0755 "$XHY_ETC" "$XHY_CONFDIR" "$XHY_LOGDIR" "$XHY_BACKUP" 2>/dev/null || true
-    chmod 0700 "$XHY_NODES" "$XHY_SNAPSHOTS" "$XHY_CERTS" 2>/dev/null || true
-    [[ -f "$XHY_STATE" ]] || : >"$XHY_STATE"
+    mkdir -p "$XHY_ETC" "$XHY_CONFDIR" "$XHY_LOGDIR" "$XHY_BACKUP" "$XHY_NODES" "$XHY_SNAPSHOTS" "$XHY_CERTS" || return 1
+    chmod 0755 "$XHY_ETC" "$XHY_LOGDIR" 2>/dev/null || true
+    chmod 0700 "$XHY_NODES" "$XHY_SNAPSHOTS" "$XHY_CERTS" "$XHY_CONFDIR" "$XHY_BACKUP" 2>/dev/null || true
+    [[ -f "$XHY_STATE" ]] || : >"$XHY_STATE" || return 1
     chmod 0600 "$XHY_STATE" 2>/dev/null || true
 }
 
@@ -338,16 +339,60 @@ atomic_write() {
     local dest="$1" mode="${2:-0644}" tmp
     tmp="$(mktemp "${dest}.tmp.XXXXXX")" || return 1
     if ! cat >"$tmp"; then rm -f "$tmp" || true; return 1; fi
-    if ! install -m "$mode" "$tmp" "$dest"; then rm -f "$tmp" || true; return 1; fi
-    # The write already succeeded; a failing cleanup must not be reported as a
-    # failed write (that produced misleading "配置生成失败" aborts).
-    rm -f "$tmp" || true
+    if ! chmod "$mode" "$tmp" || ! mv -f "$tmp" "$dest"; then
+        rm -f "$tmp" || true
+        return 1
+    fi
     return 0
 }
 
 # 根分区剩余 MB。df -Pm 是 POSIX 格式，BusyBox 也支持；-m 直接给 MB，
 # 免得自己拿 1K 块换算。取不到时返回 0（调用方按"没空间"处理更安全）。
 # 11-07 事故当晚手工装的清理钩子。路径做成变量，测试才能指到临时目录。
+# Preserve only managed configuration, excluding locks and historical backups.
+# The subshell exit trap also handles die/exit in a callback.
+config_transaction() (
+    if [[ "${XHY_TX_ACTIVE:-0}" == 1 ]]; then "$@"; return $?; fi
+    need_root
+    init_dirs || return 1
+    local tx f rc
+    local -a files=(confs nodes certs state.env config.json tunnel.token target.env scan-cache.tsv)
+    tx="$(mktemp -d "$XHY_ETC/.transaction.XXXXXX")" || return 1
+    trap 'rm -rf "$tx"' EXIT
+    for f in "${files[@]}"; do
+        [[ -e "$XHY_ETC/$f" ]] || continue
+        cp -a "$XHY_ETC/$f" "$tx/" || return 1
+    done
+    local XHY_TX_ACTIVE=1 XHY_TX_RESTARTED=0
+    trap '
+        rc=$?
+        if (( rc != 0 )); then
+            failed=0
+            for f in "${files[@]}"; do
+                # Leave an unchanged config file in place, including its inode.
+                if [[ "$f" == config.json && -f "$tx/$f" ]] &&
+                    cmp -s "$tx/$f" "$XHY_ETC/$f"; then continue; fi
+                rm -rf "$XHY_ETC/$f" || { failed=1; continue; }
+                if [[ -e "$tx/$f" ]]; then
+                    mv -f "$tx/$f" "$XHY_ETC/" || failed=1
+                fi
+            done
+            if (( ! failed && XHY_TX_RESTARTED )) && [[ -s "$XHY_ETC/config.json" ]]; then
+                svc_restart "$SVC_XRAY" || warn "原配置已恢复，但 Xray 重启失败"
+            fi
+            if (( failed )); then
+                err "自动回滚未完成，备份保留在 $tx"
+                exit "$rc"
+            fi
+        fi
+        rm -rf "$tx"
+        exit "$rc"
+    ' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    "$@"
+)
+
 legacy_prune_hook() {
     printf '%s/xhy-backup-prune' "${XHY_PERIODIC_DIR:-/etc/periodic/daily}"
 }
@@ -415,7 +460,7 @@ backup_file() {
     fi
     mkdir -p "$XHY_BACKUP"
     base="$(basename "$f")"
-    cp -a "$f" "$XHY_BACKUP/$base.$(date +%Y%m%d%H%M%S).bak"
+    cp -a "$f" "$XHY_BACKUP/$base.$(date +%Y%m%d%H%M%S).bak" || return 1
     # 写完就裁：同名只留最新 N 份。备份该在写入时收敛，而不是等 xhy clean 收拾。
     while IFS= read -r old; do
         n=$(( n + 1 ))
@@ -433,26 +478,19 @@ state_get() {
 }
 
 state_set() {
-    local key="$1" value="$2" tmp
-    init_dirs
-    tmp="$(mktemp)"
-    if [[ -f "$XHY_STATE" ]]; then
-        grep -v "^${key}=" "$XHY_STATE" >"$tmp" || true
-    fi
-    printf '%s=%s\n' "$key" "$value" >>"$tmp"
-    install -m 0600 "$tmp" "$XHY_STATE"
-    rm -f "$tmp" || true
-    return 0
+    local key="$1" value="$2"
+    init_dirs || return 1
+    {
+        grep -v "^${key}=" "$XHY_STATE" || [[ $? == 1 ]] || return 1
+        printf '%s=%s\n' "$key" "$value"
+    } | atomic_write "$XHY_STATE" 0600
 }
 
 state_del() {
-    local key="$1" tmp
+    local key="$1"
     [[ -f "$XHY_STATE" ]] || return 0
-    tmp="$(mktemp)"
-    grep -v "^${key}=" "$XHY_STATE" >"$tmp" || true
-    install -m 0600 "$tmp" "$XHY_STATE"
-    rm -f "$tmp" || true
-    return 0
+    { grep -v "^${key}=" "$XHY_STATE" || [[ $? == 1 ]]; } |
+        atomic_write "$XHY_STATE" 0600
 }
 
 rand_hex() {
@@ -1455,91 +1493,91 @@ geodata_source() {
     printf '%s' "$v"
 }
 
-# Loyalsoldier 直接单独发两个 dat（并附 .sha256sum），不需要下 16.7 MB 整包。
-# 两个 dat 都过 SHA-256 才落盘、全部成功才返回 0 —— 调用方据此写 .geodata-source。
-geodata_install_loyalsoldier() {
-    local f sz sum expected actual failed=0 base
+# Stage both assets, then validate the active config against that pair.
+# Keep rollback copies via hard links on the same filesystem to save disk.
+geodata_publish() (
+    local dir="$1" src="$2" f old
+    for f in geoip.dat geosite.dat; do
+        [[ -s "$dir/$f" ]] || { err "缺少 $f，保留原 geodata"; return 1; }
+        chmod 0644 "$dir/$f" || return 1
+    done
+    if [[ -s "$XHY_ETC/config.json" && -x "$XRAY_BIN" ]]; then
+        XRAY_ASSET="$dir" xray_config_test || { err "现有配置无法使用候选 geodata"; return 1; }
+    fi
+    printf '%s\n' "$src" >"$dir/.geodata-source" || return 1
+    old="$dir/previous"
+    mkdir -m 0700 "$old" || return 1
+    for f in geoip.dat geosite.dat .geodata-source; do
+        [[ -e "$XRAY_ASSET/$f" ]] || continue
+        ln "$XRAY_ASSET/$f" "$old/$f" || return 1
+    done
+    # A forced interruption can never leave a stale marker claiming the new pair.
+    rm -f "$XRAY_ASSET/.geodata-source" || return 1
+    if mv -f "$dir/geoip.dat" "$XRAY_ASSET/geoip.dat" &&
+       mv -f "$dir/geosite.dat" "$XRAY_ASSET/geosite.dat" &&
+       mv -f "$dir/.geodata-source" "$XRAY_ASSET/.geodata-source"; then return 0; fi
+    local failed=0
+    for f in geoip.dat geosite.dat; do
+        if [[ -e "$old/$f" ]]; then
+            mv -f "$old/$f" "$XRAY_ASSET/$f" || failed=1
+        else
+            rm -f "$XRAY_ASSET/$f" || failed=1
+        fi
+    done
+    if (( ! failed )) && [[ -e "$old/.geodata-source" ]]; then
+        mv -f "$old/.geodata-source" "$XRAY_ASSET/.geodata-source" || failed=1
+    fi
+    if (( failed )); then
+        # Move the recovery copies outside the caller's cleanup directory.
+        local recover="$XRAY_ASSET/.geodata-recovery.${BASHPID}"
+        if mv "$old" "$recover"; then err "geodata 回滚未完成，备份在 $recover"; fi
+    fi
+    return 1
+)
+
+geodata_stage_loyalsoldier() {
+    local dir="$1" base f sz expected actual
     base="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download"
     for f in geoip.dat geosite.dat; do
-        info "更新 $f（Loyalsoldier 完整版）"
-        if fetch "$base/$f" "$XRAY_ASSET/$f.new" \
-            && fetch "$base/$f.sha256sum" "$XRAY_ASSET/$f.sum"; then
-            sz="$(stat -c%s "$XRAY_ASSET/$f.new" 2>/dev/null || echo 0)"
-            expected="$(awk 'NR==1 {print $1}' "$XRAY_ASSET/$f.sum" 2>/dev/null | tr 'A-F' 'a-f' || true)"
-            actual="$(sha256_file "$XRAY_ASSET/$f.new" 2>/dev/null | tr 'A-F' 'a-f' || true)"
-            if (( sz < 102400 )); then
-                warn "$f 下载内容异常（${sz} bytes），保留现有文件"; failed=1
-            elif [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]]; then
-                warn "$f 摘要格式异常，拒绝安装未校验内容"; failed=1
-            elif [[ "$expected" != "$actual" ]]; then
-                warn "$f SHA-256 校验失败（期望 ${expected:0:16}… / 实际 ${actual:0:16}…），保留现有文件"; failed=1
-            else
-                mv -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f"
-                chmod 0644 "$XRAY_ASSET/$f"
-                ok "$f 已更新（$(( sz / 1024 )) KB，Loyalsoldier 版，SHA-256 通过）"
-            fi
-        else
-            warn "$f 下载失败，保留现有文件"; failed=1
+        info "下载 $f（Loyalsoldier 完整版）"
+        fetch "$base/$f" "$dir/$f" &&
+            fetch "$base/$f.sha256sum" "$dir/$f.sum" || return 1
+        sz="$(wc -c <"$dir/$f")" || return 1
+        expected="$(awk 'NR==1 {print $1}' "$dir/$f.sum" | tr 'A-F' 'a-f')" || return 1
+        actual="$(sha256_file "$dir/$f")" || return 1
+        if (( sz < 102400 )) || [[ ! "$expected" =~ ^[0-9a-f]{64}$ || "$expected" != "$actual" ]]; then
+            err "$f 的大小或 SHA-256 校验失败"
+            return 1
         fi
-        rm -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f.sum"
-        [[ -s "$XRAY_ASSET/$f" ]] || {
-            warn "$XRAY_ASSET/$f 仍缺失，geoip:private 等规则将不生效"; failed=1; }
     done
-    # 两个 dat 必须都成功：调用方据此决定是否写 .geodata-source 标记。
-    return "$failed"
 }
 
-geodata_install_official() {
-    local ver asset url tmp unpack f sz failed=0
-    ver="${1:-}"
-    [[ -n "$ver" && "$ver" != "未安装" && "$ver" != "latest" ]] || ver="latest"
+geodata_install_loyalsoldier() (
+    local dir
+    dir="$(mktemp -d "$XRAY_ASSET/.geodata.XXXXXX")" || return 1
+    trap 'rm -rf "$dir"' EXIT
+    geodata_stage_loyalsoldier "$dir" && geodata_publish "$dir" loyalsoldier
+)
+
+geodata_install_official() (
+    local ver="${1:-}" asset url dir
     asset="Xray-linux-${XHY_ARCH}.zip"
-    # release tag 带 v 前缀（v26.10.31），而 `xray version` 输出不带（26.10.31）。
-    # latest 走 releases/latest/download/<asset>，不带 tag 段。
-    if [[ "$ver" == "latest" ]]; then
-        url="${XHY_RELEASE_DL%/download}/latest/download/$asset"
-    elif [[ "$ver" == v* ]]; then
-        url="${XHY_RELEASE_DL}/$ver/$asset"
-    else
-        url="${XHY_RELEASE_DL}/v$ver/$asset"
-    fi
-    tmp="$(mktemp -d)" || die "无法创建临时目录"
-    # shellcheck disable=SC2064
-    trap "rm -rf '$tmp'" RETURN
-
-    info "下载官方 geodata（取自 Xray $ver 的 $asset）"
-    fetch "$url" "$tmp/$asset" \
-        || die "geodata 下载失败（Xray $ver 的 $asset 是否存在？）"
-    fetch "$url.dgst" "$tmp/$asset.dgst" \
-        || die "摘要文件下载失败，拒绝安装未校验的 geodata"
-    verify_release_digest "$tmp/$asset.dgst" "$tmp/$asset" || die "geodata 校验失败，已中止"
-
-    mkdir -p "$tmp/unpack"
+    case "$ver" in
+        ''|latest|未安装) url="${XHY_RELEASE_DL%/download}/latest/download/$asset" ;;
+        v*) url="${XHY_RELEASE_DL}/$ver/$asset" ;;
+        *) url="${XHY_RELEASE_DL}/v$ver/$asset" ;;
+    esac
+    dir="$(mktemp -d "$XRAY_ASSET/.geodata.XXXXXX")" || return 1
+    trap 'rm -rf "$dir"' EXIT
+    fetch "$url" "$dir/$asset" && fetch "$url.dgst" "$dir/$asset.dgst" || return 1
+    verify_release_digest "$dir/$asset.dgst" "$dir/$asset" || return 1
     if have_cmd unzip; then
-        unzip -o -q "$tmp/$asset" -d "$tmp/unpack" geosite.dat geoip.dat || die "解压 geodata 失败"
+        unzip -o -q "$dir/$asset" -d "$dir" geosite.dat geoip.dat || return 1
     else
-        busybox unzip -o -q "$tmp/$asset" -d "$tmp/unpack" geosite.dat geoip.dat || die "解压 geodata 失败"
+        busybox unzip -o -q "$dir/$asset" -d "$dir" geosite.dat geoip.dat || return 1
     fi
-
-    install -d -m 0755 "$XRAY_ASSET"
-    for f in geoip.dat geosite.dat; do
-        if [[ ! -s "$tmp/unpack/$f" ]]; then
-            warn "$asset 里没有 $f，保留现有文件"; failed=1; continue
-        fi
-        sz="$(stat -c%s "$tmp/unpack/$f" 2>/dev/null || echo 0)"
-        if (( sz < 102400 )); then
-            warn "$f 大小异常（${sz} bytes），保留现有文件"; failed=1; continue
-        fi
-        install -m 0644 "$tmp/unpack/$f" "$XRAY_ASSET/$f.new" 2>/dev/null \
-            || { rm -f "$XRAY_ASSET/$f.new"; warn "$f 写入失败（磁盘满？），保留旧文件"; failed=1; continue; }
-        mv -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f" || { warn "$f 替换失败"; failed=1; continue; }
-        ok "$f 已更新（$(( sz / 1024 )) KB，官方版）"
-    done
-    rm -rf "$tmp"
-    trap - RETURN
-    # 与 Loyalsoldier 分支一致：两个 dat 全成功才写 .geodata-source 标记。
-    return "$failed"
-}
+    geodata_publish "$dir" official
+)
 
 # Download a pinned-or-latest Xray release. The .dgst checksum is MANDATORY:
 # unlike most one-key scripts, a missing digest aborts instead of continuing.
@@ -1551,8 +1589,8 @@ geodata_install_official() {
 # 反过来做（先 install 再 version）就是 47.88.102.45 那次事故：0 MB 余量下
 # install 先把目标 truncate 掉再写到一半，留下 11 MB 的半截文件，而 version
 # 失败被误报成「架构或依赖不匹配」。
-xray_install() {
-    local ver="$1" asset tmp unpack f oldver got
+xray_install() (
+    local ver="$1" asset tmp="" unpack oldver got geo="" src="" candidate
     # 旧二进制不再归档：36 MB 一份，切几次 channel 就是几百 MB，而它能按版本号
     # 重新下载。要留一份保险就显式 XHY_BACKUP_CORE=1（只留最新 1 份）。
     if [[ -x "$XRAY_BIN" && "${XHY_BACKUP_CORE:-0}" == "1" ]]; then
@@ -1566,8 +1604,7 @@ xray_install() {
     asset="Xray-linux-${XHY_ARCH}.zip"
     tmp="$(mktemp -d)" || die "无法创建临时目录"
     unpack="$tmp/unpack"
-    # shellcheck disable=SC2064
-    trap "rm -rf '$tmp'" RETURN
+    trap '[[ -z "$geo" ]] || rm -rf "$geo"; rm -rf "$tmp"' EXIT
 
     # ① 写前闸门：36 MB 二进制 + geo 数据 + 余量。不足就中止，原文件未动。
     disk_need 90 "安装 Xray $ver" || die "已中止安装：原二进制未改动"
@@ -1580,14 +1617,14 @@ xray_install() {
         || die "SHA-256 摘要文件下载失败。出于安全考虑拒绝安装未校验的二进制。"
     verify_release_digest "$tmp/$asset.dgst" "$tmp/$asset" || die "校验失败，已中止。"
 
-    mkdir -p "$unpack"
+    mkdir -p "$unpack" || return 1
     if have_cmd unzip; then
         unzip -o -q "$tmp/$asset" -d "$unpack" || die "解压失败"
     else
         busybox unzip -o -q "$tmp/$asset" -d "$unpack" || die "解压失败"
     fi
     [[ -f "$unpack/xray" ]] || die "压缩包中缺少 xray 二进制"
-    chmod 0755 "$unpack/xray"
+    chmod 0755 "$unpack/xray" || return 1
 
     # ② 先在临时目录验证，通过后才碰目标文件
     got="$(XRAY_LOCATION_ASSET="$XRAY_ASSET" "$unpack/xray" version 2>/dev/null \
@@ -1599,7 +1636,29 @@ xray_install() {
     fi
 
     # ③ 原子替换：同一文件系统用 rename（零拷贝、瞬间），跨盘才退化成 .new + mv
-    install -d -m 0755 "$(dirname "$XRAY_BIN")" "$XRAY_ASSET"
+    install -d -m 0755 "$(dirname "$XRAY_BIN")" "$XRAY_ASSET" || return 1
+    candidate="$XRAY_ASSET"
+    if [[ "${XHY_SKIP_GEODATA:-0}" != 1 ]]; then
+        src="$(geodata_source)"
+        geo="$(mktemp -d "$XRAY_ASSET/.geodata.XXXXXX")" || return 1
+        if [[ "$src" == official ]]; then
+            mv "$unpack/geoip.dat" "$unpack/geosite.dat" "$geo/" || return 1
+            candidate="$geo"
+        elif geodata_stage_loyalsoldier "$geo"; then
+            candidate="$geo"
+        elif [[ -s "$XRAY_ASSET/geoip.dat" && -s "$XRAY_ASSET/geosite.dat" ]]; then
+            warn "Loyalsoldier 下载失败，保留原 geodata 和源标记"
+        else
+            err "Loyalsoldier 下载失败，重试或显式选择官方源"
+            return 1
+        fi
+    fi
+    if [[ -s "$XHY_ETC/config.json" ]]; then
+        XRAY_BIN="$unpack/xray" XRAY_ASSET="$candidate" xray_config_test || return 1
+    fi
+    if [[ "$candidate" == "$geo" ]]; then
+        XRAY_BIN="$unpack/xray" geodata_publish "$geo" "$src" || return 1
+    fi
     if [[ "$(df -P "$unpack" 2>/dev/null | awk 'NR==2 {print $1}')" \
         == "$(df -P "$(dirname "$XRAY_BIN")" 2>/dev/null | awk 'NR==2 {print $1}')" ]]; then
         mv -f "$unpack/xray" "$XRAY_BIN" || die "替换 $XRAY_BIN 失败（磁盘满？）；原文件未动"
@@ -1610,47 +1669,11 @@ xray_install() {
                  die "原二进制未改动"; }
         mv -f "$XRAY_BIN.new" "$XRAY_BIN" || die "替换 $XRAY_BIN 失败；原文件未动"
     fi
-    sync
-    # v1.14.0：zip 自带的官方 dat 先铺好保底，然后按 geodata_source 决定要不要
-    # 覆盖成 Loyalsoldier 完整版（默认）。官方版是它的真子集，缺 gfw 全系、
-    # google 114 条、geolocation-!cn 3819 条、category-ai-!cn 2 条等 ——
-    # 不是「差一张用不到的广告表」，是 AI / Google 覆盖真的少了。
-    if [[ "${XHY_SKIP_GEODATA:-0}" == "1" ]]; then
-        info "XHY_SKIP_GEODATA=1，保留现有 geodata 不覆盖"
-    else
-        for f in geoip.dat geosite.dat; do
-            [[ -s "$unpack/$f" ]] || continue
-            install -m 0644 "$unpack/$f" "$XRAY_ASSET/$f.new" 2>/dev/null \
-                || { rm -f "$XRAY_ASSET/$f.new"; warn "$f 写入失败（磁盘满？），保留旧文件"; continue; }
-            mv -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f"
-        done
-        local src; src="$(geodata_source)"
-        if [[ "$src" == "loyalsoldier" ]]; then
-            # 覆盖失败不致命：zip 自带的官方 dat 已就位，xray 仍能起来。
-            # 成功才写源标记，避免 update all 里 update_geodata 误判「刚更新过」。
-            if (( $(disk_free_mb /) >= 45 )); then
-                if geodata_install_loyalsoldier; then
-                    printf '%s\n' "$src" > "$XRAY_ASSET/.geodata-source"
-                else
-                    warn "Loyalsoldier 覆盖未完成，源标记未写入（下次 update geodata 会重试）"
-                fi
-            else
-                warn "磁盘余量 $(disk_free_mb /) MB < 45 MB，跳过 Loyalsoldier 覆盖（保留官方版保底）"
-            fi
-        else
-            info "XHY_GEODATA_SOURCE=official，保留 release 自带的官方版"
-            printf '%s\n' "$src" > "$XRAY_ASSET/.geodata-source"
-        fi
-        for f in geoip.dat geosite.dat; do
-            [[ -s "$XRAY_ASSET/$f" ]] || warn "$XRAY_ASSET/$f 缺失，geoip:private 等规则将不生效"
-        done
-    fi
-
     if [[ "v$got" != "$ver" ]]; then
         warn "版本校验: 请求 $ver，实际 v$got（预发布版或镜像差异时可能不同，请确认）"
     fi
     ok "Xray v$got 安装完成，SHA-256 校验通过"
-}
+)
 
 x25519_keypair() {
     local out priv pub
@@ -2047,10 +2070,11 @@ xray_config_test() {
 }
 
 config_reload() {
-    if ! xray_config_test; then
+    if [[ "${1:-}" != --validated ]] && ! xray_config_test; then
         err "配置校验失败，保持原有运行配置不变。"
         return 1
     fi
+    if [[ "${XHY_TX_ACTIVE:-0}" == 1 ]]; then XHY_TX_RESTARTED=1; fi
     svc_restart "$SVC_XRAY" || { err "Xray 重启失败，查看 $XHY_LOGDIR/xray.err"; return 1; }
     ok "配置已重载"
 }
@@ -3797,8 +3821,11 @@ snapshot_state() {
 }
 
 rebuild_config() {
-    local joined="" sep="" f
-    init_dirs
+    local joined="" sep="" f cfg
+    init_dirs || return 1
+    if [[ -e "$XHY_NODES/relay.env" ]]; then
+        relay_env_load || { err "relay 状态无效，保留原配置"; return 1; }
+    fi
     [[ "${XHY_SKIP_SNAPSHOT:-0}" == "1" ]] || snapshot_state
     for f in "$XHY_CONFDIR"/*.json; do
         [[ -s "$f" ]] || continue
@@ -3830,7 +3857,8 @@ rebuild_config() {
     rh_extra="$(extra_routing_head_json)"
     if [[ -n "$rh_extra" ]]; then rh_extra="${rh_extra},"; fi
     top_extra="$(extra_top_json)"
-    {
+    cfg="$(mktemp "$XHY_ETC/.config.XXXXXX")" || return 1
+    if ! {
         printf '{\n  "log": %s,\n' "$(log_json)"
         printf '  "inbounds": [%s],\n' "$joined"
         printf '  "dns": %s,\n' "$(dns_json)"
@@ -3841,7 +3869,10 @@ rebuild_config() {
         else
             printf '  "policy": %s\n}\n' "$(policy_json)"
         fi
-    } | atomic_write "$XHY_ETC/config.json" 0600
+    } >"$cfg" || ! xray_config_test "$cfg" || ! mv -f "$cfg" "$XHY_ETC/config.json"; then
+        rm -f "$cfg"
+        return 1
+    fi
     ok "配置已重建: $XHY_ETC/config.json ($(node_count) 个节点)"
 }
 
@@ -4030,7 +4061,7 @@ write_fragment() {
     m="$MODE"; p="$PORT"
     frag="$(node_frag "$m" "$p")"
     content="$(render_inbound "$env")" || return 1
-    printf '%s\n' "$content" | atomic_write "$frag" 0644
+    printf '%s\n' "$content" | atomic_write "$frag" 0600
 }
 
 # ---------------------------------------------------------------------------
@@ -4041,7 +4072,9 @@ write_fragment() {
 #                    [--token TOKEN] [--domain D] [--reality] [--uuid U]
 #                    [--scan] [--scan-cidr CIDR] [--scan-refresh]
 #                    [--masq-proxy] [--tfo auto|on|off]
-node_add() {
+node_add() { config_transaction _node_add "$@"; }
+
+_node_add() {
     local mode="$1" port="$2"; shift 2
     local host="" path="" sni="" target="" token="" domain="" uuid="" with_reality="0"
     local masq="" up="" down=""
@@ -4116,6 +4149,7 @@ node_add() {
     local pairs=() picked="" kp=""
     if [[ -n "$target" && "$target" != *:* ]]; then target="${target}:443"; fi
 
+    snapshot_state
     case "$mode" in
         reality)
             if [[ -n "$target" ]]; then
@@ -4184,12 +4218,10 @@ node_add() {
             [[ -n "$domain" ]] || die "tunnel 模式需要 --domain <CF 公开主机名>"
             token="${token:-}"
             if [[ -n "$token" ]]; then
-                printf '%s' "$token" | atomic_write "$XHY_ETC/tunnel.token" 0600
+                printf '%s' "$token" | atomic_write "$XHY_ETC/tunnel.token" 0600 || return 1
             fi
             [[ -s "$XHY_ETC/tunnel.token" ]] || die "tunnel 模式需要 --token <Cloudflare Tunnel Token>（也可预先写入 $XHY_ETC/tunnel.token）"
             [[ -x "$CF_BIN" ]] || cloudflared_install
-            install_cf_service
-            svc_restart "$SVC_CF" || warn "cloudflared 启动失败，请在 CF 控制台确认 Tunnel 配置"
             pairs=(
                 "MODE=tunnel" "PORT=$port" "PUBLIC=0" "UUID=$uuid" "NODE_PATH=$path"
                 "NODE_HOST=$domain" "CF_DOMAIN=$domain" "CF_TOKEN_SET=1"
@@ -4219,29 +4251,20 @@ node_add() {
 
     local envf
     envf="$(node_file "$mode" "$port")"
-    # Snapshot BEFORE the registry changes, so a snapshot always represents a
-    # state you can go back to (an "after add" snapshot would be useless).
-    snapshot_state
-    node_save "$envf" "${pairs[@]}"
-
-    # Roll back cleanly if the generated JSON is invalid.
-    if ! write_fragment "$envf"; then
-        rm -f "$envf" "$(node_frag "$mode" "$port")"
-        die "inbound 配置生成失败，已回滚"
-    fi
-    if ! XHY_SKIP_SNAPSHOT=1 rebuild_config || ! xray_config_test; then
-        rm -f "$envf" "$(node_frag "$mode" "$port")"
-        XHY_SKIP_SNAPSHOT=1 rebuild_config >/dev/null
-        err "配置校验失败，新节点已回滚，原有节点不受影响。"
-        return 1
-    fi
+    node_save "$envf" "${pairs[@]}" || return 1
+    write_fragment "$envf" || return 1
+    XHY_SKIP_SNAPSHOT=1 rebuild_config || return 1
 
     if [[ "$mode" == "tunnel" ]]; then
         info "Cloudflare 控制台请把 Public Hostname 的 Service 指向 http://127.0.0.1:${port}，路径与 WS path 一致: ${path}"
     fi
-    config_reload || { err "服务重启失败，节点配置已写入但未生效"; return 1; }
+    config_reload --validated || return 1
+    if [[ "$mode" == tunnel ]]; then
+        install_cf_service || return 1
+        svc_start "$SVC_CF" || return 1
+    fi
     if [[ "$(state_get FIREWALL_MODE off)" != "off" ]]; then
-        firewall_apply "$(state_get FIREWALL_MODE safe)" --quiet
+        firewall_apply "$(state_get FIREWALL_MODE safe)" --quiet || return 1
     fi
     ok "节点 ${mode}_${port} 已添加"
     link_from_env "$envf"
@@ -4278,7 +4301,9 @@ node_env_update() {
 # node_edit_apply MODE PORT KEY=VALUE...
 # 落盘 + 重建 + 校验 + 重启。改端口等于重命名注册表文件；hy2 改端口或 SNI
 # 必须重签证书（文件名带端口、SAN 带 SNI），否则客户端的 pinSHA256 会失配。
-node_edit_apply() {
+node_edit_apply() { config_transaction _node_edit_apply "$@"; }
+
+_node_edit_apply() {
     local mode="$1" port="$2"; shift 2
     local old_envf new_envf new_mode="$mode" new_port="$port"
     local o_sni="" o_cert="" o_key="" pair clash=""
@@ -4309,12 +4334,12 @@ node_edit_apply() {
 
     backup_file "$old_envf"
     snapshot_state
-    node_env_update "$old_envf" "$@"
+    node_env_update "$old_envf" "$@" || return 1
 
     if [[ "$new_port" != "$port" ]]; then
         new_envf="$(node_file "$new_mode" "$new_port")"
-        mv -f "$old_envf" "$new_envf"
-        rm -f "$(node_frag "$mode" "$port")"
+        mv -f "$old_envf" "$new_envf" || return 1
+        rm -f "$(node_frag "$mode" "$port")" || return 1
     else
         new_envf="$old_envf"
     fi
@@ -4325,7 +4350,7 @@ node_edit_apply() {
             local crt key pin64 pinhex
             read -r crt key pin64 pinhex <<<"$(hy2_gen_cert "$PORT" "$SNI")" || return 1
             node_env_update "$new_envf" "CERT_FILE=$crt" "KEY_FILE=$key" \
-                "PIN_B64=$pin64" "PIN_HEX=$pinhex"
+                "PIN_B64=$pin64" "PIN_HEX=$pinhex" || return 1
             if [[ -n "$o_cert" && "$o_cert" != "$crt" && -f "$o_cert" ]]; then
                 rm -f "$o_cert" "$o_key"
             fi
@@ -4333,17 +4358,11 @@ node_edit_apply() {
         fi
     fi
 
-    if ! write_fragment "$new_envf"; then
-        err "inbound 配置生成失败；节点参数已写入，可用 xhy snapshots + xhy rollback 回退"
-        return 1
-    fi
-    if ! XHY_SKIP_SNAPSHOT=1 rebuild_config || ! xray_config_test; then
-        err "配置校验失败；节点参数已写入但未生效，可用 xhy snapshots + xhy rollback 回退"
-        return 1
-    fi
-    config_reload || warn "配置已写入，但服务重启失败（可 xhy service restart 重试）"
+    write_fragment "$new_envf" || return 1
+    XHY_SKIP_SNAPSHOT=1 rebuild_config || return 1
+    config_reload --validated || return 1
     if [[ "$(state_get FIREWALL_MODE off)" != "off" ]]; then
-        firewall_apply "$(state_get FIREWALL_MODE safe)" --quiet
+        firewall_apply "$(state_get FIREWALL_MODE safe)" --quiet || return 1
     fi
     ok "节点 ${new_mode}_${new_port} 已更新"
     link_from_env "$new_envf" 2>/dev/null || true
@@ -4573,26 +4592,30 @@ node_pick() {
     ok "已选择节点 ${MODE}_${PORT}"
 }
 
-node_del() {
+node_del() { config_transaction _node_del "$@"; }
+
+_node_del() {
     local mode="$1" port="$2" envf
     envf="$(node_file "$mode" "$port")"
     [[ -f "$envf" ]] || die "节点不存在: ${mode}_${port}"
     need_root
     backup_file "$envf"
     snapshot_state          # before the registry changes: undoable delete
-    rm -f "$envf" "$(node_frag "$mode" "$port")"
+    rm -f "$envf" "$(node_frag "$mode" "$port")" || return 1
     if [[ "$mode" == "hy2" ]]; then
         rm -f "$XHY_CERTS/hy2_${port}.crt" "$XHY_CERTS/hy2_${port}.key"
         info "已清理该 Hysteria2 节点的自签证书"
+    fi
+    XHY_SKIP_SNAPSHOT=1 rebuild_config || return 1
+    config_reload --validated || return 1
+    if [[ "$(state_get FIREWALL_MODE off)" != "off" ]]; then
+        firewall_apply "$(state_get FIREWALL_MODE safe)" --quiet || return 1
     fi
     if [[ "$mode" == "tunnel" ]] && ! find "$XHY_NODES" -name 'tunnel_*.env' | grep -q .; then
         remove_cf_service
         rm -f "$XHY_ETC/tunnel.token"
         info "已无 tunnel 节点，cloudflared 服务与 token 已清理"
     fi
-    XHY_SKIP_SNAPSHOT=1 rebuild_config
-    xray_config_test && config_reload
-    [[ "$(state_get FIREWALL_MODE off)" != "off" ]] && firewall_apply "$(state_get FIREWALL_MODE safe)" --quiet
     ok "节点 ${mode}_${port} 已删除（凭据备份在 $XHY_BACKUP，可用 xhy snapshots 回滚整套状态）"
 }
 
@@ -4610,17 +4633,23 @@ node_list() {
     (( $(node_count) > 0 )) || printf '(暂无节点)\n'
 }
 
-node_rebuild_all() {
-    local f
+node_rebuild_all() { config_transaction _node_rebuild_all "$@"; }
+
+_node_rebuild_all() {
     need_root
-    init_dirs
-    for f in $(node_env_files); do
-        [[ -f "$f" ]] || continue
-        write_fragment "$f" || die "重建 ${f##*/} 失败"
-    done
-    rebuild_config
-    xray_config_test || { err "重建后的配置校验失败"; return 1; }
-    config_reload || warn "配置已写入，但服务未能重启（尚未 install 或服务未启用？）"
+    init_dirs || return 1
+    [[ "${XHY_SKIP_SNAPSHOT:-0}" == 1 ]] || snapshot_state
+    render_registered_fragments || return 1
+    XHY_SKIP_SNAPSHOT=1 rebuild_config || return 1
+    config_reload --validated
+}
+
+render_registered_fragments() {
+    local f
+    while IFS= read -r f; do
+        write_fragment "$f" || { err "重建 ${f##*/} 失败"; return 1; }
+    done < <(node_env_files)
+    relay_render_land
 }
 
 list_snapshots() {
@@ -4633,7 +4662,9 @@ list_snapshots() {
     done
 }
 
-rollback_config() {
+rollback_config() { config_transaction _rollback_config "$@"; }
+
+_rollback_config() {
     local target="${1:-}" pre
     need_root
     if [[ -z "$target" ]]; then
@@ -4646,7 +4677,7 @@ rollback_config() {
     chmod 600 "$pre" 2>/dev/null || true
     # Clear first: files that exist now but not in the snapshot must disappear,
     # otherwise the restore produces a union of two states.
-    rm -f "$XHY_NODES"/*.env "$XHY_CONFDIR"/*.json
+    rm -f "$XHY_NODES"/*.env "$XHY_CONFDIR"/*.json || return 1
     ( cd "$XHY_ETC" && tar xzf "$target" ) || die "快照解包失败，当前状态已另存为 $pre"
     chmod 700 "$XHY_NODES" "$XHY_CERTS" 2>/dev/null || true
     # Re-render every fragment from the restored registry, then validate and
@@ -4990,17 +5021,15 @@ backup_create() {
     # 备份只打包配置（config.json / nodes / confs / certs / state.env），
     # 二进制与 geoip/geosite 不入档 —— 它们能重新下载，且 65 MB 在小盘上是灾难。
     disk_need 15 "打包配置备份" || die "已中止：先腾出空间再备份"
-    local ts stage f cnt=0
+    local ts stage f archive_tmp cnt=0
     ts="$(date +%Y%m%d-%H%M%S)"
-    [[ -n "$out" ]] || out="$XHY_BACKUP/xhy-backup-$ts.tar.gz"
+    [[ -n "$out" ]] || out="$XHY_BACKUP/xhy-backup-$ts-${BASHPID}.tar.gz"
     stage="$(mktemp -d "${TMPDIR:-/tmp}/xhy-bak.XXXXXX")"
     mkdir -p "$stage/payload"
-    if [[ -d "$XHY_ETC" ]]; then
-        cp -a "$XHY_ETC/." "$stage/payload/"
-    else
-        die "$XHY_ETC 不存在：还没有可备份的数据（先 install）"
-    fi
-    rm -rf "$stage/payload/snapshots" "$stage/payload/backups"
+    for f in confs nodes certs config.json state.env tunnel.token target.env scan-cache.tsv; do
+        [[ -e "$XHY_ETC/$f" ]] || continue
+        cp -a "$XHY_ETC/$f" "$stage/payload/" || { rm -rf "$stage"; return 1; }
+    done
     {
         printf '# xray-hy backup manifest v1\n'
         _backup_meta "$ts"
@@ -5014,92 +5043,87 @@ backup_create() {
             done
     } >"$stage/manifest.tsv"
     cnt="$(grep -c $'^[0-9a-f]\{64\}\t' "$stage/manifest.tsv" || true)"
-    if ! tar -C "$stage" -czf "$out" payload manifest.tsv; then
+    archive_tmp="$(mktemp "$out.tmp.XXXXXX")" || { rm -rf "$stage"; return 1; }
+    if ! tar -C "$stage" -czf "$archive_tmp" payload manifest.tsv ||
+       ! chmod 0600 "$archive_tmp" || ! mv -f "$archive_tmp" "$out"; then
         rm -rf "$stage"
+        rm -f "$archive_tmp"
         die "打包失败: $out"
     fi
     rm -rf "$stage"
-    chmod 0600 "$out"
     ok "备份完成: $out"
     printf '  文件数: %s   大小: %s 字节\n' "$cnt" "$(wc -c <"$out")"
     printf '  %s\n' "提示：备份含全部节点凭证与证书私钥，请按敏感文件保管。"
 }
 
-backup_restore() {
-    local arc="${1:-}"
-    [[ -n "$arc" ]] || die "用法: xhy restore <备份文件.tar.gz>"
-    [[ -f "$arc" ]] || die "备份文件不存在: $arc"
+# Validate before extracting: only regular files and directories within the
+# backup layout, no symlinks/hardlinks, absolute paths or traversal.
+backup_archive_safe() {
+    local arc="$1" stage="$2" member
+    tar -tzf "$arc" >"$stage/members" &&
+        tar -tvzf "$arc" >"$stage/types" || return 1
+    if grep -qvE '^[-d]' "$stage/types"; then return 1; fi
+    while IFS= read -r member; do
+        [[ "$member" =~ ^[A-Za-z0-9_./+-]+$ && "/$member/" != */../* && "/$member/" != */./* ]] || return 1
+        case "$member" in
+            manifest.tsv|payload/|payload/confs/|payload/nodes/|payload/certs/|payload/confs/*|payload/nodes/*|payload/certs/*|payload/config.json|payload/state.env|payload/tunnel.token|payload/target.env|payload/scan-cache.tsv|payload/.lock|payload/.lock.d/) ;;
+            *) return 1 ;;
+        esac
+    done <"$stage/members"
+    [[ -z "$(LC_ALL=C sort "$stage/members" | uniq -d)" ]]
+}
+
+backup_restore() (
+    local arc="${1:-}" stage sum size f total=0
+    [[ -f "$arc" ]] || die "用法: xhy restore <备份文件.tar.gz>"
     need_root
-    init_dirs
-    local stage bad=0 total=0 sum size f
-    stage="$(mktemp -d "${TMPDIR:-/tmp}/xhy-rst.XXXXXX")"
-    if ! tar -xzf "$arc" -C "$stage"; then
-        rm -rf "$stage"
-        die "解包失败：文件损坏或不是 tar.gz"
-    fi
-    [[ -d "$stage/payload" && -f "$stage/manifest.tsv" ]] \
-        || { rm -rf "$stage"; die "不是 xray-hy 备份（缺 payload/manifest.tsv）"; }
-
-    # 1) 完整性校验 —— 任何一项不过就整体放弃，绝不部分还原。
+    stage="$(mktemp -d "${TMPDIR:-/tmp}/xhy-rst.XXXXXX")" || return 1
+    trap 'rm -rf "$stage"' EXIT
+    backup_archive_safe "$arc" "$stage" || die "备份含有不支持或不安全的条目"
+    tar -xzf "$arc" -C "$stage" || die "解包失败"
+    [[ -d "$stage/payload" && -f "$stage/manifest.tsv" ]] || die "缺少备份清单或 payload"
+    local -A seen=()
     while IFS=$'\t' read -r sum size f; do
-        [[ "$sum" == "meta" || "$f" == "relative-path" ]] && continue
-        case "$sum" in '#'*) continue ;; esac
-        total=$((total + 1))
-        if [[ ! -f "$stage/payload/$f" ]] \
-           || [[ "$(sha256sum "$stage/payload/$f" 2>/dev/null | awk '{print $1}')" != "$sum" ]]; then
-            warn "校验失败: $f"
-            bad=1
-        fi
+        case "$sum" in \#*|meta) continue ;; esac
+        [[ "$sum" =~ ^[0-9a-f]{64}$ && "$size" =~ ^[0-9]+$ && "$f" =~ ^[A-Za-z0-9_./+-]+$ &&
+           "$f" != /* && "/$f/" != */../* && "/$f/" != */./* ]] || die "备份清单格式错误"
+        [[ ! "${seen[$f]+yes}" && -f "$stage/payload/$f" ]] || die "备份清单缺失或重复: $f"
+        [[ "$(sha256_file "$stage/payload/$f")" == "$sum" &&
+           "$(wc -c <"$stage/payload/$f" | tr -d '[:space:]')" == "$size" ]] || die "备份校验失败: $f"
+        seen["$f"]=1
+        total=$(( total + 1 ))
     done <"$stage/manifest.tsv"
-    if (( bad )); then
-        rm -rf "$stage"
-        die "备份完整性校验未通过（$total 项中存在损坏），已放弃还原，目标机未做任何改动"
-    fi
+    (( total > 0 )) || die "备份清单为空"
+    while IFS= read -r f; do
+        [[ "${seen[$f]+yes}" ]] || die "备份有未列入清单的文件: $f"
+    done < <(cd "$stage/payload" && find . -type f | sed 's|^\./||')
     ok "清单校验通过: $total 个文件"
-    grep '^meta' "$stage/manifest.tsv" | sed 's/^meta\t/  /'
+    confirm "用这份备份覆盖 $XHY_ETC？" "n" || { info "已取消"; return 0; }
+    config_transaction _backup_restore_apply "$stage/payload"
+)
 
-    # 2) 确认 + 现状留底
-    local pre="$XHY_BACKUP/pre-restore-$(date +%Y%m%d-%H%M%S)"
-    if [[ -d "$XHY_ETC" ]] && [[ -n "$(ls -A "$XHY_ETC" 2>/dev/null || true)" ]]; then
-        mkdir -p "$pre"
-        cp -a "$XHY_ETC/." "$pre/"
-        info "还原前现状已留底: $pre"
-    fi
-    if ! confirm "用这份备份覆盖 $XHY_ETC？（备份里没有的 nodes/confs 条目会被删除，保持与备份一致）" "n"; then
-        rm -rf "$stage"
-        info "已取消"
-        return 0
-    fi
-
-    # 3) 清掉会与备份产生歧义的内容，再整体拷入。
-    rm -rf "$XHY_ETC/confs" "$XHY_ETC/nodes" "$XHY_ETC/certs"
-    rm -f "$XHY_ETC/state.env" "$XHY_ETC/config.json"
-    cp -a "$stage/payload/." "$XHY_ETC/"
-    rm -rf "$stage"                                         # 配置一律从 nodes 重建：
-    rm -rf "$XHY_ETC/confs" "$XHY_ETC/config.json"          # confs/ 与 config.json 不沿用备份
-    chmod 0700 "$XHY_ETC/nodes" "$XHY_ETC/certs" 2>/dev/null || true
-    chmod 0600 "$XHY_ETC/state.env" 2>/dev/null || true
-
-    # 4) 新机器没有 Xray：数据已还原，指引装核心后再起服务。
+_backup_restore_apply() {
+    local payload="$1" f
+    # Retain an independent copy for manual recovery after a successful restore.
+    backup_create || return 1
+    for f in confs nodes certs state.env tunnel.token target.env scan-cache.tsv; do
+        rm -rf "$XHY_ETC/$f" || return 1
+        [[ -e "$payload/$f" ]] || continue
+        # Generated fragments are rebuilt from the registry, including relay.
+        [[ "$f" == confs ]] && continue
+        cp -a "$payload/$f" "$XHY_ETC/" || return 1
+    done
+    init_dirs || return 1
     if [[ ! -x "$XRAY_BIN" ]]; then
-        warn "本机还没有 Xray。数据已还原，接下来: xhy core update 安装核心，再 xhy service start"
+        rm -f "$XHY_ETC/config.json" || return 1
+        warn "数据已恢复；先安装 Xray，再执行 xhy update config"
         return 0
     fi
-
-    # 5) 从 nodes 重建配置并验证；失败整体回滚到留底。
-    local frag
-    if ! ( for frag in "$XHY_NODES"/*.env; do
-              [[ -f "$frag" ]] || continue
-              write_fragment "$frag" || exit 1
-          done && rebuild_config && xray_config_test ); then
-        err "还原后的配置重建/校验失败，回滚到还原前状态"
-        rm -rf "$XHY_ETC/confs" "$XHY_ETC/nodes" "$XHY_ETC/certs"
-        rm -f "$XHY_ETC/state.env" "$XHY_ETC/config.json"
-        cp -a "$pre/." "$XHY_ETC/"
-        die "已回滚。备份清单是完整的，问题多半在目标机环境（版本/端口冲突），看上面的报错"
+    XHY_SKIP_SNAPSHOT=1 node_rebuild_all || return 1
+    if [[ "$(state_get FIREWALL_MODE off)" != off ]]; then
+        firewall_apply "$(state_get FIREWALL_MODE safe)" --quiet || return 1
     fi
-    config_reload || warn "配置已写入，但服务重启失败（尚未 install？可 xhy service start 手动起）"
-    ok "还原完成（配置已按 nodes 重建并通过 xray -test）"
+    ok "还原完成（配置已按节点与中继状态重建）"
 }
 
 # ---------------------------------------------------------------------------
@@ -5347,7 +5371,7 @@ _update_relay_fingerprint() {
         awk '
             /^[A-Za-z_][A-Za-z0-9_]*\(\)/ {
                 name = $0; sub(/\(.*/, "", name)
-                infn = (name ~ /^relay_/ || name ~ /^extra_/ || name == "firewall_extra_rules")
+                infn = (name ~ /^_?relay_/ || name ~ /^extra_/ || name == "firewall_extra_rules")
                 if (infn) { line = $0; sub(/[[:space:]]+$/, "", line); print "@" line }
                 next
             }
@@ -5465,10 +5489,16 @@ update_script() {
     if update_script_relay_reapply_needed "$old_src" "$tmp"; then
         need_relay_reapply=1
     fi
-    reconcile_bin
+    if [[ "${XHY_UPDATE_ALL:-0}" == 1 ]] &&
+       ! grep -qx 'XHY_UPDATE_CHAIN="1"' "$tmp"; then
+        rm -f "$tmp"
+        err "目标脚本不支持全量更新接力，请先单独运行 xhy update script"
+        return 1
+    fi
+    # mv replaces a symlink itself; leave the old entry usable until commit.
     # 只备份真正的单文件本体；仓库模式下的 $REPO/xhy 是开发入口，不进备份目录
     if (( ! repo_mode )) && [[ -f "$XHY_SELF" && ! -L "$XHY_SELF" ]]; then
-        backup_file "$XHY_SELF"
+        backup_file "$XHY_SELF" || { rm -f "$tmp"; return 1; }
     fi
     if ! install -m 0755 "$tmp" "$canonical.new" || ! mv -f "$canonical.new" "$canonical"; then
         rm -f "$tmp" "$canonical.new"
@@ -5480,31 +5510,33 @@ update_script() {
     if (( layout_bad )); then
         ok "入口布局已纠正：$canonical 现在是单文件实体（非软链）"
     fi
+    if [[ "${XHY_UPDATE_ALL:-0}" == 1 ]]; then
+        # The child takes a fresh lock and owns all remaining mutations.
+        XHY_UPDATE_DELEGATED=1
+        release_lock
+        exec 9>&-
+        "$canonical" update _continue "$need_relay_reapply"
+        return $?
+    fi
     if (( need_relay_reapply )); then
-        # 必须用新脚本的子进程跑：当前进程里的 relay_* 函数还是旧版本，
-        # 用旧逻辑重建等于没升级。
-        #
-        # 但 main() 从 acquire_lock 起就全程持有配置锁（flock fd 9 或 .lock.d），
-        # 子进程会继承 fd 9 / 看到目录还在，于是自己 acquire_lock 时等 15 秒后
-        # die —— v1.14.3 硅谷实机就是这样失败的。这里先把父进程的锁释放掉
-        # 再起子进程，让它自己拿锁；父进程之后只剩打印与 return，不再改配置。
         info "检测到 relay 渲染代码有变且本机已配置 relay，自动重建 config.json…"
         release_lock
-        exec 9>&- 2>/dev/null || true
+        exec 9>&-
         if "$canonical" relay reapply; then
             ok "relay 配置已按新版本重建（无需手动 reapply）"
         else
             warn "自动 relay reapply 失败，请手动执行：xhy relay reapply"
+            return 1
         fi
     fi
     info "当前进程仍是旧版，下次执行 xhy 生效"
     return 0
 }
 
-update_core() {
+update_core() (
     need_root
     init_dirs
-    local ver rollback="" force="${1:-}"
+    local ver rollback="" assets="" f recovery_failed=0 force="${1:-}"
     [[ "$force" == "--force" ]] || force=""
     ver="$(xray_resolve_version)"
     info "版本通道 $(xray_channel) -> 目标 $ver"
@@ -5524,19 +5556,46 @@ update_core() {
             [[ -n "$rollback" ]] || warn "回滚副本创建失败，继续安装（失败需手动重装旧版本）"
         fi
     fi
-    xray_install "$ver"
-    if [[ -s "$XHY_ETC/config.json" ]] && ! xray_config_test >/dev/null 2>&1; then
-        if [[ -n "$rollback" ]]; then
-            cp -a "$rollback" "$XRAY_BIN"
-            rm -f "$rollback"          # 回滚副本用完就删，别在小盘上留 30 MB
-            err "新版本 $ver 无法加载现有配置，已自动回滚到原二进制。"
-        fi
-        die "请检查 $XHY_ETC/config.json，或改用兼容版本"
+    trap '[[ -z "$rollback" ]] || rm -f "$rollback"; [[ -z "$assets" ]] || rm -rf "$assets"' EXIT
+    if [[ -n "$rollback" ]]; then
+        install -d -m 0755 "$XRAY_ASSET" || return 1
+        assets="$(mktemp -d "$XRAY_ASSET/.core-rollback.XXXXXX")" || return 1
+        for f in geoip.dat geosite.dat .geodata-source; do
+            [[ -e "$XRAY_ASSET/$f" ]] || continue
+            ln "$XRAY_ASSET/$f" "$assets/$f" || return 1
+        done
     fi
-    if [[ -s "$XHY_ETC/config.json" ]]; then config_reload; fi
-    [[ -n "$rollback" ]] && rm -f "$rollback"
-    ok "Xray 更新完成: $("$XRAY_BIN" version 2>/dev/null | head -1)"
-}
+    local reload_attempted=0
+    if xray_install "$ver"; then
+        if [[ ! -s "$XHY_ETC/config.json" ]]; then
+            ok "Xray 更新完成"
+            return 0
+        fi
+        reload_attempted=1
+        if config_reload --validated; then
+            ok "Xray 更新完成"
+            return 0
+        fi
+    fi
+    if [[ -n "$rollback" ]]; then
+        # Restore both the old binary and its data before trying the old service.
+        atomic_write "$XRAY_BIN" 0755 <"$rollback" || recovery_failed=1
+        for f in geoip.dat geosite.dat .geodata-source; do
+            if [[ -e "$assets/$f" ]]; then
+                ln -f "$assets/$f" "$XRAY_ASSET/$f" || recovery_failed=1
+            else
+                rm -f "$XRAY_ASSET/$f" || recovery_failed=1
+            fi
+        done
+        if (( recovery_failed )); then
+            trap - EXIT
+            err "Xray 自动回滚未完成，二进制副本: $rollback；数据副本: $assets"
+        elif (( reload_attempted )); then
+            svc_restart "$SVC_XRAY" || warn "旧 Xray 已恢复，但服务重启失败"
+        fi
+    fi
+    return 1
+)
 
 # geodata 默认 = Loyalsoldier 完整版（v1.14.0 起）。官方 release 自带的 dat
 # 是它的真子集（缺 gfw 全系 / google 114 条 / geolocation-!cn 3819 条等），
@@ -5582,21 +5641,12 @@ update_geodata() {
 
     # Loyalsoldier 两个 dat 约 30 MB，官方整包 16.7 MB + 解出 11 MB，都要余量写 .new。
     disk_need 45 "更新 geodata（约 30 MB）" || die "已中止：现有 geo 数据继续生效"
-    if [[ "$src" == "loyalsoldier" ]]; then
-        if geodata_install_loyalsoldier; then
-            printf '%s\n' "$src" > "$stamp"
-            ok "Geodata 更新完成（Loyalsoldier 完整版）"
-        else
-            warn "Loyalsoldier geodata 未完整更新，源标记未写入；下次 update geodata 会重试"
-        fi
+    if [[ "$src" == loyalsoldier ]]; then
+        geodata_install_loyalsoldier || return 1
     else
-        if geodata_install_official "$ver"; then
-            printf '%s\n' "$src" > "$stamp"
-            ok "Geodata 更新完成（官方版，Xray $ver）"
-        else
-            warn "官方版 geodata 未完整更新，源标记未写入；下次 update geodata 会重试"
-        fi
+        geodata_install_official "$ver" || return 1
     fi
+    ok "Geodata 更新完成（$src）"
 }
 
 update_config() {
@@ -5604,18 +5654,29 @@ update_config() {
     # 服务端本来就该开 BBR：每次重建配置顺手兜底，实测没生效就重新下发。
     # 安装时显式选了「不开」(BBR_ENABLED=off) 的不会被强行打开。
     bbr_ensure || warn "BBR 未生效，可执行 xhy bbr on 复查。"
-    node_rebuild_all
-    [[ "$(state_get FIREWALL_MODE off)" != "off" ]] && firewall_apply "$(state_get FIREWALL_MODE safe)" --quiet
+    node_rebuild_all || return 1
+    if [[ "$(state_get FIREWALL_MODE off)" != off ]]; then
+        firewall_apply "$(state_get FIREWALL_MODE safe)" --quiet || return 1
+    fi
     ok "配置已按当前设置重建"
 }
 
 update_all() {
-    update_script || true
-    update_core
-    # 核心安装已按 geodata_source 铺好 dat 并写 .geodata-source；这里只兜底
-    # 「核心没变动 / 数据缺失 / 源标记缺失」—— 同源且 1 小时内会跳过，不重复下 30 MB。
-    update_geodata
-    update_config
+    local XHY_UPDATE_ALL=1 XHY_UPDATE_DELEGATED=0
+    update_script "$@" || return 1
+    (( ! XHY_UPDATE_DELEGATED )) || return 0
+    update_continue 0
+}
+
+update_continue() {
+    case "${1:-}" in
+        0) ;;
+        1) relay_reapply || return 1 ;;
+        *) return 2 ;;
+    esac
+    update_core || return 1
+    update_geodata || return 1
+    update_config || return 1
     self_check
 }
 
@@ -6004,6 +6065,7 @@ relay_env_save() {
         [[ -n "$RELAY_FALLBACK" ]]   && printf 'RELAY_FALLBACK=%s\n' "$RELAY_FALLBACK"
         [[ -n "$RELAY_FALLBACK_TAG" ]] && printf 'RELAY_FALLBACK_TAG=%s\n' "$RELAY_FALLBACK_TAG"
         [[ -n "$RELAY_TFO" ]]        && printf 'RELAY_TFO=%s\n' "$RELAY_TFO"
+        :
     } | atomic_write "$XHY_NODES/relay.env" 0600 || return 1
     return 0
 }
@@ -6011,18 +6073,36 @@ relay_env_save() {
 # 每次都真读文件：rebuild_config 的钩子会调它，而 relay_del 会先删文件再重建，
 # 一旦做了缓存，删完还会拿旧值注入出一条指向已删端口的出站。
 relay_env_load() {
-    local f="$XHY_NODES/relay.env"
-    [[ -f "$f" ]] || return 1
-    # shellcheck disable=SC1090
-    source "$f"
-    [[ -n "$RELAY_ROLE" ]] || return 1
-    # 从 v1.10.x 升级：老 relay.env 可能写着 security=tls + pin + 证书路径。
-    # 这一版起恒明文，读的时候就地把这些字段降级，老机器不用重配，
-    # config.json 也不会再产出任何 tlsSettings。
-    RELAY_SECURITY="none"
+    local f="$XHY_NODES/relay.env" line key
+    relay_reset_vars
+    [[ -f "$f" && ! -L "$f" ]] || return 1
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        case "$line" in ''|\#*) continue ;; esac
+        [[ "$line" == *=* ]] || return 1
+        key="${line%%=*}"
+        case "$key" in
+            RELAY_ROLE|RELAY_PORT|RELAY_ALLOW|RELAY_UUID|RELAY_UPSTREAM|RELAY_CATEGORIES|RELAY_DOMAINS|RELAY_FW_CHAIN|RELAY_SECURITY|RELAY_SNI|RELAY_PIN|RELAY_CERT|RELAY_KEY|RELAY_GEOIP_US|RELAY_TAG|RELAY_FALLBACK|RELAY_FALLBACK_TAG|RELAY_TFO)
+                printf -v "$key" '%s' "${line#*=}" ;;
+        esac
+    done <"$f"
+    case "$RELAY_ROLE" in
+        entry) relay_split_upstream "$RELAY_UPSTREAM" >/dev/null || return 1 ;;
+        land) valid_port "$RELAY_PORT" && relay_valid_host "$RELAY_ALLOW" || return 1 ;;
+        *) return 1 ;;
+    esac
+    [[ "$RELAY_UUID" =~ ^[A-Za-z0-9-]+$ ]] || return 1
+    RELAY_SECURITY=none
     RELAY_SNI=""; RELAY_PIN=""; RELAY_CERT=""; RELAY_KEY=""
-    return 0
 }
+
+relay_render_land() (
+    [[ -e "$XHY_NODES/relay.env" ]] || return 0
+    relay_env_load || return 1
+    [[ "$RELAY_ROLE" == land ]] || return 0
+    relay_remove_fragments || return 1
+    relay_fragment "$RELAY_PORT" "$RELAY_UUID" |
+        atomic_write "$XHY_CONFDIR/relay_in_${RELAY_PORT}.json" 0600
+)
 
 # ---------------------------------------------------------------------------
 # 解析与校验
@@ -6091,7 +6171,9 @@ relay_norm_domains() {
             relay_say err "域名规则不能含空格：$in" "domain rules must not contain spaces: $in"
             return 1 ;;
     esac
-    for d in ${in//,/ }; do
+    local -a domains=()
+    IFS=, read -r -a domains <<<"$in"
+    for d in "${domains[@]}"; do
         [[ -n "$d" ]] || continue
         case "$d" in
             domain:*|full:*|keyword:*|regexp:*|geosite:*) ;;
@@ -6290,7 +6372,9 @@ relay_routing_rules_json() {
     done
     # v1.12.0：明文域名规则与 geosite 分类同处一条 domain 数组，谁命中都转发。
     # 这样 geosite.dat 缺哪个分类都不影响这些站，换机器重建也不会失效。
-    for c in ${RELAY_DOMAINS//,/ }; do
+    local -a domains=()
+    IFS=, read -r -a domains <<<"$RELAY_DOMAINS"
+    for c in "${domains[@]}"; do
         [[ -n "$c" ]] || continue
         # regexp 里可能有 \（如 regexp:^a\.b$），写进 JSON 前必须转义成 \\
         doms+="${sep}\"${c//\\/\\\\}\""; sep=","
@@ -6356,13 +6440,7 @@ extra_top_json() {
 # 必须手工 xhy service restart 才通。这里统一走 config_reload。
 relay_apply() {
     XHY_SKIP_SNAPSHOT=1 rebuild_config || return 1
-    if ! xray_config_test >/dev/null 2>&1; then
-        xray_config_test || true
-        relay_say err "配置校验失败，未重启服务（先看上面的报错）" \
-                     "config test failed; service not restarted"
-        return 1
-    fi
-    config_reload || return 1
+    config_reload --validated || return 1
     return 0
 }
 
@@ -6567,7 +6645,7 @@ relay_remove_fragments() {
     local f
     for f in "$XHY_CONFDIR"/relay_in_*.json; do
         [[ -f "$f" ]] || continue
-        rm -f "$f"
+        rm -f "$f" || return 1
     done
     return 0
 }
@@ -6582,7 +6660,9 @@ relay_port_owned() {
     [[ -f "$XHY_CONFDIR/relay_in_${1}.json" ]]
 }
 
-relay_land() {
+relay_land() { config_transaction _relay_land "$@"; }
+
+_relay_land() {
     local port="$RELAY_DEFAULT_PORT" allow="" uuid="" tls=0 crt="" key="" sni="" myip=""
     while (( $# > 0 )); do
         case "$1" in
@@ -6632,18 +6712,15 @@ relay_land() {
                       "relay hop is always plaintext since v1.11.0; --tls retired (ignored)"
     fi
 
-    # 旧 land 换了端口/UUID → 先删旧片段与旧规则；同端口则原地覆盖
-    if [[ "$prev_role" == "land" && -n "$prev_port" && "$prev_port" != "$port" ]]; then
-        rm -f "$XHY_CONFDIR/relay_in_${prev_port}.json"
+    RELAY_FW_CHAIN="$(relay_fw_chain "$([[ "$allow" == *:* ]] && printf ip6tables || printf iptables)")"
+    relay_env_save || return 1
+    relay_render_land || return 1
+    relay_apply || return 1
+    relay_fw_add "$port" "$allow" >/dev/null || return 1
+    if [[ "$prev_role" == land && -n "$prev_port" ]] &&
+       [[ "$prev_port" != "$port" || "$prev_allow" != "$allow" ]]; then
         relay_fw_del "$prev_port" "$prev_allow" ""
     fi
-    relay_fragment "$port" "$uuid" | atomic_write "$XHY_CONFDIR/relay_in_${port}.json" 0644 \
-        || die "入站片段写入失败: $XHY_CONFDIR/relay_in_${port}.json"
-    relay_fw_add "$port" "$allow" >/dev/null || true
-    RELAY_FW_CHAIN="$(relay_fw_chain iptables)"
-
-    relay_env_save || return 1
-    relay_apply || return 1
 
     [[ -n "$myip" ]] || myip="$(public_ip)"
     relay_say ok "中继入站已就绪：${myip}:${port}（仅放行 ${allow}）" \
@@ -6665,7 +6742,9 @@ relay_entry_hint() {
         "$RELAY_UUID" "$ip" "$RELAY_PORT"
 }
 
-relay_entry() {
+relay_entry() { config_transaction _relay_entry "$@"; }
+
+_relay_entry() {
     local upstream="" uuid="" categories="" domains="" domains_set=0 geoip="off" tls=0 sni="" pin="" tag="" fb="" fbtag="" tfo=""
     while (( $# > 0 )); do
         case "$1" in
@@ -6719,15 +6798,9 @@ relay_entry() {
     # 没传 --domains 时沿用 relay.env 里的旧值（它只是一层补丁，不该被顺手清掉）；
     # 要清空得显式 --no-domains。
     if (( domains_set )); then RELAY_DOMAINS="$dom_norm"; else RELAY_DOMAINS="$prev_domains"; fi
-    if [[ "$prev_role" == "land" ]]; then
-        relay_remove_fragments
-        [[ -n "$prev_port" ]] && relay_fw_del "$prev_port" "$prev_allow" ""
-        relay_say info "本机原为落地端，已移除入站片段与防火墙规则" \
-                      "this host was a landing node; inbound fragment and firewall rule removed"
-    fi
     disk_need 1 "中继出站配置" || return 1
-
     [[ "${XHY_SKIP_SNAPSHOT:-0}" == "1" ]] || snapshot_state
+    relay_remove_fragments || return 1
     RELAY_ROLE=entry
     RELAY_UPSTREAM="$upstream"
     RELAY_UUID="$uuid"
@@ -6745,6 +6818,9 @@ relay_entry() {
     fi
     relay_env_save || return 1
     relay_apply || return 1
+    if [[ "$prev_role" == land && -n "$prev_port" ]]; then
+        relay_fw_del "$prev_port" "$prev_allow" ""
+    fi
 
     relay_say ok "中继出站已就绪：流量 → ${RELAY_UPSTREAM}" \
                 "relay outbound ready: traffic -> ${RELAY_UPSTREAM}"
@@ -6791,18 +6867,15 @@ relay_export() {
     return 0
 }
 
-relay_reapply() {
+relay_reapply() { config_transaction _relay_reapply "$@"; }
+
+_relay_reapply() {
     relay_env_load || die "本机未配置 relay（先跑 xhy relay land / entry）"
-    if [[ "$RELAY_ROLE" == "land" ]]; then
-        local f="$XHY_CONFDIR/relay_in_${RELAY_PORT}.json"
-        if [[ ! -f "$f" ]]; then
-            relay_say info "入站片段缺失，按 relay.env 重建" "inbound fragment missing; re-rendering"
-            relay_fragment "$RELAY_PORT" "$RELAY_UUID" | atomic_write "$f" 0644 \
-                || die "片段写入失败: $f"
-        fi
-        relay_fw_add "$RELAY_PORT" "$RELAY_ALLOW" >/dev/null || true
-    fi
+    relay_render_land || return 1
     relay_apply || return 1
+    if [[ "$RELAY_ROLE" == land ]]; then
+        relay_fw_add "$RELAY_PORT" "$RELAY_ALLOW" >/dev/null || return 1
+    fi
     relay_say ok "已重新注入并生效" "re-injected and reloaded"
     return 0
 }
@@ -6961,24 +7034,19 @@ relay_test() {
     return 0
 }
 
-relay_del() {
-    relay_env_load >/dev/null 2>&1 || {
-        # 没状态文件也可能有残留片段，一并清
-        local f
-        for f in "$XHY_CONFDIR"/relay_in_*.json; do [[ -f "$f" ]] || continue; rm -f "$f"; done
-        relay_say info "本机无 relay 状态" "no relay state on this host"
-        return 0
-    }
-    need_root
-    local role="$RELAY_ROLE" port="$RELAY_PORT" allow="$RELAY_ALLOW"
-    relay_clean_land_state
-    rm -f "$XHY_NODES/relay.env"
-    relay_reset_vars
-    XHY_SKIP_SNAPSHOT=1 rebuild_config || true
-    if xray_config_test >/dev/null 2>&1; then
-        config_reload >/dev/null 2>&1 || relay_say warn "配置已写回但服务未重启（xhy service restart）" \
-                                                     "config written but service not restarted (xhy service restart)"
+relay_del() { config_transaction _relay_del "$@"; }
+
+_relay_del() {
+    local role="" port="" allow="" chain=""
+    if relay_env_load; then
+        role="$RELAY_ROLE"; port="$RELAY_PORT"; allow="$RELAY_ALLOW"; chain="$RELAY_FW_CHAIN"
     fi
+    [[ "${XHY_SKIP_SNAPSHOT:-0}" == 1 ]] || snapshot_state
+    relay_remove_fragments || return 1
+    rm -f "$XHY_NODES/relay.env" || return 1
+    relay_reset_vars
+    relay_apply || return 1
+    if [[ "$role" == land ]]; then relay_fw_del "$port" "$allow" "$chain"; fi
     if [[ "$role" == "land" ]]; then
         relay_say ok "落地端 relay 已移除（片段 ${port} + 防火墙规则 ${allow} + 配置已重建）" \
                     "landing relay removed (fragment ${port}, firewall rule ${allow}, config rebuilt)"
@@ -7664,10 +7732,12 @@ cmd_scan() {
     esac
 }
 
-cmd_config_set() {
+cmd_config_set() { config_transaction _cmd_config_set "$@"; }
+
+_cmd_config_set() {
     local key="$1" val="$2"
     case "$key" in
-        BLOCK_BT|BLOCK_PRIVATE|BLOCK_CN|BLOCK_ADS|SSH_GUARD|DUAL_STACK)
+        BLOCK_BT|BLOCK_PRIVATE|BLOCK_CN|BLOCK_ADS|SSH_GUARD|DUAL_STACK|ACCESS_LOG)
             [[ "$val" == "on" || "$val" == "off" ]] || die "$key 只能是 on/off" ;;
         DNS_PROVIDER)
             [[ "$val" =~ ^(cloudflare|quad9|dns-sb|system)$ ]] || die "DNS_PROVIDER 值不合法" ;;
@@ -7679,10 +7749,12 @@ cmd_config_set() {
     # Snapshot before the setting changes: a snapshot should always represent
     # the state you had *before* this command, otherwise it cannot undo it.
     snapshot_state
-    state_set "$key" "$val"
+    state_set "$key" "$val" || return 1
+    XHY_SKIP_SNAPSHOT=1 node_rebuild_all || return 1
+    if [[ "$key" == "SSH_GUARD" && "$(state_get FIREWALL_MODE off)" != off ]]; then
+        firewall_apply "$(state_get FIREWALL_MODE safe)" || return 1
+    fi
     ok "$key=$val"
-    XHY_SKIP_SNAPSHOT=1 node_rebuild_all
-    [[ "$key" == "SSH_GUARD" ]] && firewall_apply "$(state_get FIREWALL_MODE safe)"
 }
 
 cmd_config_menu() {
@@ -7935,7 +8007,8 @@ main() {
                         *) die "用法: xhy core [status|channel <值>|update [--force]]" ;;
                     esac ;;
         update)     case "${1:-all}" in
-                        all) update_all ;;
+                        all) shift; update_all "$@" ;;
+                        _continue) update_continue "${2:-}" ;;
                         script) shift; update_script "$@" ;;
                         core) shift; update_core "$@" ;;
                         geodata) shift; update_geodata "$@" ;; config) update_config ;;

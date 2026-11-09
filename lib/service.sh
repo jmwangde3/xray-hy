@@ -287,10 +287,11 @@ xray_config_test() {
 }
 
 config_reload() {
-    if ! xray_config_test; then
+    if [[ "${1:-}" != --validated ]] && ! xray_config_test; then
         err "配置校验失败，保持原有运行配置不变。"
         return 1
     fi
+    if [[ "${XHY_TX_ACTIVE:-0}" == 1 ]]; then XHY_TX_RESTARTED=1; fi
     svc_restart "$SVC_XRAY" || { err "Xray 重启失败，查看 $XHY_LOGDIR/xray.err"; return 1; }
     ok "配置已重载"
 }

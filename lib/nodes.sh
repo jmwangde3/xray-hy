@@ -154,8 +154,11 @@ snapshot_state() {
 }
 
 rebuild_config() {
-    local joined="" sep="" f
-    init_dirs
+    local joined="" sep="" f cfg
+    init_dirs || return 1
+    if [[ -e "$XHY_NODES/relay.env" ]]; then
+        relay_env_load || { err "relay 状态无效，保留原配置"; return 1; }
+    fi
     [[ "${XHY_SKIP_SNAPSHOT:-0}" == "1" ]] || snapshot_state
     for f in "$XHY_CONFDIR"/*.json; do
         [[ -s "$f" ]] || continue
@@ -187,7 +190,8 @@ rebuild_config() {
     rh_extra="$(extra_routing_head_json)"
     if [[ -n "$rh_extra" ]]; then rh_extra="${rh_extra},"; fi
     top_extra="$(extra_top_json)"
-    {
+    cfg="$(mktemp "$XHY_ETC/.config.XXXXXX")" || return 1
+    if ! {
         printf '{\n  "log": %s,\n' "$(log_json)"
         printf '  "inbounds": [%s],\n' "$joined"
         printf '  "dns": %s,\n' "$(dns_json)"
@@ -198,7 +202,10 @@ rebuild_config() {
         else
             printf '  "policy": %s\n}\n' "$(policy_json)"
         fi
-    } | atomic_write "$XHY_ETC/config.json" 0600
+    } >"$cfg" || ! xray_config_test "$cfg" || ! mv -f "$cfg" "$XHY_ETC/config.json"; then
+        rm -f "$cfg"
+        return 1
+    fi
     ok "配置已重建: $XHY_ETC/config.json ($(node_count) 个节点)"
 }
 
@@ -387,7 +394,7 @@ write_fragment() {
     m="$MODE"; p="$PORT"
     frag="$(node_frag "$m" "$p")"
     content="$(render_inbound "$env")" || return 1
-    printf '%s\n' "$content" | atomic_write "$frag" 0644
+    printf '%s\n' "$content" | atomic_write "$frag" 0600
 }
 
 # ---------------------------------------------------------------------------
@@ -398,7 +405,9 @@ write_fragment() {
 #                    [--token TOKEN] [--domain D] [--reality] [--uuid U]
 #                    [--scan] [--scan-cidr CIDR] [--scan-refresh]
 #                    [--masq-proxy] [--tfo auto|on|off]
-node_add() {
+node_add() { config_transaction _node_add "$@"; }
+
+_node_add() {
     local mode="$1" port="$2"; shift 2
     local host="" path="" sni="" target="" token="" domain="" uuid="" with_reality="0"
     local masq="" up="" down=""
@@ -473,6 +482,7 @@ node_add() {
     local pairs=() picked="" kp=""
     if [[ -n "$target" && "$target" != *:* ]]; then target="${target}:443"; fi
 
+    snapshot_state
     case "$mode" in
         reality)
             if [[ -n "$target" ]]; then
@@ -541,12 +551,10 @@ node_add() {
             [[ -n "$domain" ]] || die "tunnel 模式需要 --domain <CF 公开主机名>"
             token="${token:-}"
             if [[ -n "$token" ]]; then
-                printf '%s' "$token" | atomic_write "$XHY_ETC/tunnel.token" 0600
+                printf '%s' "$token" | atomic_write "$XHY_ETC/tunnel.token" 0600 || return 1
             fi
             [[ -s "$XHY_ETC/tunnel.token" ]] || die "tunnel 模式需要 --token <Cloudflare Tunnel Token>（也可预先写入 $XHY_ETC/tunnel.token）"
             [[ -x "$CF_BIN" ]] || cloudflared_install
-            install_cf_service
-            svc_restart "$SVC_CF" || warn "cloudflared 启动失败，请在 CF 控制台确认 Tunnel 配置"
             pairs=(
                 "MODE=tunnel" "PORT=$port" "PUBLIC=0" "UUID=$uuid" "NODE_PATH=$path"
                 "NODE_HOST=$domain" "CF_DOMAIN=$domain" "CF_TOKEN_SET=1"
@@ -576,29 +584,20 @@ node_add() {
 
     local envf
     envf="$(node_file "$mode" "$port")"
-    # Snapshot BEFORE the registry changes, so a snapshot always represents a
-    # state you can go back to (an "after add" snapshot would be useless).
-    snapshot_state
-    node_save "$envf" "${pairs[@]}"
-
-    # Roll back cleanly if the generated JSON is invalid.
-    if ! write_fragment "$envf"; then
-        rm -f "$envf" "$(node_frag "$mode" "$port")"
-        die "inbound 配置生成失败，已回滚"
-    fi
-    if ! XHY_SKIP_SNAPSHOT=1 rebuild_config || ! xray_config_test; then
-        rm -f "$envf" "$(node_frag "$mode" "$port")"
-        XHY_SKIP_SNAPSHOT=1 rebuild_config >/dev/null
-        err "配置校验失败，新节点已回滚，原有节点不受影响。"
-        return 1
-    fi
+    node_save "$envf" "${pairs[@]}" || return 1
+    write_fragment "$envf" || return 1
+    XHY_SKIP_SNAPSHOT=1 rebuild_config || return 1
 
     if [[ "$mode" == "tunnel" ]]; then
         info "Cloudflare 控制台请把 Public Hostname 的 Service 指向 http://127.0.0.1:${port}，路径与 WS path 一致: ${path}"
     fi
-    config_reload || { err "服务重启失败，节点配置已写入但未生效"; return 1; }
+    config_reload --validated || return 1
+    if [[ "$mode" == tunnel ]]; then
+        install_cf_service || return 1
+        svc_start "$SVC_CF" || return 1
+    fi
     if [[ "$(state_get FIREWALL_MODE off)" != "off" ]]; then
-        firewall_apply "$(state_get FIREWALL_MODE safe)" --quiet
+        firewall_apply "$(state_get FIREWALL_MODE safe)" --quiet || return 1
     fi
     ok "节点 ${mode}_${port} 已添加"
     link_from_env "$envf"
@@ -635,7 +634,9 @@ node_env_update() {
 # node_edit_apply MODE PORT KEY=VALUE...
 # 落盘 + 重建 + 校验 + 重启。改端口等于重命名注册表文件；hy2 改端口或 SNI
 # 必须重签证书（文件名带端口、SAN 带 SNI），否则客户端的 pinSHA256 会失配。
-node_edit_apply() {
+node_edit_apply() { config_transaction _node_edit_apply "$@"; }
+
+_node_edit_apply() {
     local mode="$1" port="$2"; shift 2
     local old_envf new_envf new_mode="$mode" new_port="$port"
     local o_sni="" o_cert="" o_key="" pair clash=""
@@ -666,12 +667,12 @@ node_edit_apply() {
 
     backup_file "$old_envf"
     snapshot_state
-    node_env_update "$old_envf" "$@"
+    node_env_update "$old_envf" "$@" || return 1
 
     if [[ "$new_port" != "$port" ]]; then
         new_envf="$(node_file "$new_mode" "$new_port")"
-        mv -f "$old_envf" "$new_envf"
-        rm -f "$(node_frag "$mode" "$port")"
+        mv -f "$old_envf" "$new_envf" || return 1
+        rm -f "$(node_frag "$mode" "$port")" || return 1
     else
         new_envf="$old_envf"
     fi
@@ -682,7 +683,7 @@ node_edit_apply() {
             local crt key pin64 pinhex
             read -r crt key pin64 pinhex <<<"$(hy2_gen_cert "$PORT" "$SNI")" || return 1
             node_env_update "$new_envf" "CERT_FILE=$crt" "KEY_FILE=$key" \
-                "PIN_B64=$pin64" "PIN_HEX=$pinhex"
+                "PIN_B64=$pin64" "PIN_HEX=$pinhex" || return 1
             if [[ -n "$o_cert" && "$o_cert" != "$crt" && -f "$o_cert" ]]; then
                 rm -f "$o_cert" "$o_key"
             fi
@@ -690,17 +691,11 @@ node_edit_apply() {
         fi
     fi
 
-    if ! write_fragment "$new_envf"; then
-        err "inbound 配置生成失败；节点参数已写入，可用 xhy snapshots + xhy rollback 回退"
-        return 1
-    fi
-    if ! XHY_SKIP_SNAPSHOT=1 rebuild_config || ! xray_config_test; then
-        err "配置校验失败；节点参数已写入但未生效，可用 xhy snapshots + xhy rollback 回退"
-        return 1
-    fi
-    config_reload || warn "配置已写入，但服务重启失败（可 xhy service restart 重试）"
+    write_fragment "$new_envf" || return 1
+    XHY_SKIP_SNAPSHOT=1 rebuild_config || return 1
+    config_reload --validated || return 1
     if [[ "$(state_get FIREWALL_MODE off)" != "off" ]]; then
-        firewall_apply "$(state_get FIREWALL_MODE safe)" --quiet
+        firewall_apply "$(state_get FIREWALL_MODE safe)" --quiet || return 1
     fi
     ok "节点 ${new_mode}_${new_port} 已更新"
     link_from_env "$new_envf" 2>/dev/null || true
@@ -930,26 +925,30 @@ node_pick() {
     ok "已选择节点 ${MODE}_${PORT}"
 }
 
-node_del() {
+node_del() { config_transaction _node_del "$@"; }
+
+_node_del() {
     local mode="$1" port="$2" envf
     envf="$(node_file "$mode" "$port")"
     [[ -f "$envf" ]] || die "节点不存在: ${mode}_${port}"
     need_root
     backup_file "$envf"
     snapshot_state          # before the registry changes: undoable delete
-    rm -f "$envf" "$(node_frag "$mode" "$port")"
+    rm -f "$envf" "$(node_frag "$mode" "$port")" || return 1
     if [[ "$mode" == "hy2" ]]; then
         rm -f "$XHY_CERTS/hy2_${port}.crt" "$XHY_CERTS/hy2_${port}.key"
         info "已清理该 Hysteria2 节点的自签证书"
+    fi
+    XHY_SKIP_SNAPSHOT=1 rebuild_config || return 1
+    config_reload --validated || return 1
+    if [[ "$(state_get FIREWALL_MODE off)" != "off" ]]; then
+        firewall_apply "$(state_get FIREWALL_MODE safe)" --quiet || return 1
     fi
     if [[ "$mode" == "tunnel" ]] && ! find "$XHY_NODES" -name 'tunnel_*.env' | grep -q .; then
         remove_cf_service
         rm -f "$XHY_ETC/tunnel.token"
         info "已无 tunnel 节点，cloudflared 服务与 token 已清理"
     fi
-    XHY_SKIP_SNAPSHOT=1 rebuild_config
-    xray_config_test && config_reload
-    [[ "$(state_get FIREWALL_MODE off)" != "off" ]] && firewall_apply "$(state_get FIREWALL_MODE safe)" --quiet
     ok "节点 ${mode}_${port} 已删除（凭据备份在 $XHY_BACKUP，可用 xhy snapshots 回滚整套状态）"
 }
 
@@ -967,17 +966,23 @@ node_list() {
     (( $(node_count) > 0 )) || printf '(暂无节点)\n'
 }
 
-node_rebuild_all() {
-    local f
+node_rebuild_all() { config_transaction _node_rebuild_all "$@"; }
+
+_node_rebuild_all() {
     need_root
-    init_dirs
-    for f in $(node_env_files); do
-        [[ -f "$f" ]] || continue
-        write_fragment "$f" || die "重建 ${f##*/} 失败"
-    done
-    rebuild_config
-    xray_config_test || { err "重建后的配置校验失败"; return 1; }
-    config_reload || warn "配置已写入，但服务未能重启（尚未 install 或服务未启用？）"
+    init_dirs || return 1
+    [[ "${XHY_SKIP_SNAPSHOT:-0}" == 1 ]] || snapshot_state
+    render_registered_fragments || return 1
+    XHY_SKIP_SNAPSHOT=1 rebuild_config || return 1
+    config_reload --validated
+}
+
+render_registered_fragments() {
+    local f
+    while IFS= read -r f; do
+        write_fragment "$f" || { err "重建 ${f##*/} 失败"; return 1; }
+    done < <(node_env_files)
+    relay_render_land
 }
 
 list_snapshots() {
@@ -990,7 +995,9 @@ list_snapshots() {
     done
 }
 
-rollback_config() {
+rollback_config() { config_transaction _rollback_config "$@"; }
+
+_rollback_config() {
     local target="${1:-}" pre
     need_root
     if [[ -z "$target" ]]; then
@@ -1003,7 +1010,7 @@ rollback_config() {
     chmod 600 "$pre" 2>/dev/null || true
     # Clear first: files that exist now but not in the snapshot must disappear,
     # otherwise the restore produces a union of two states.
-    rm -f "$XHY_NODES"/*.env "$XHY_CONFDIR"/*.json
+    rm -f "$XHY_NODES"/*.env "$XHY_CONFDIR"/*.json || return 1
     ( cd "$XHY_ETC" && tar xzf "$target" ) || die "快照解包失败，当前状态已另存为 $pre"
     chmod 700 "$XHY_NODES" "$XHY_CERTS" 2>/dev/null || true
     # Re-render every fragment from the restored registry, then validate and

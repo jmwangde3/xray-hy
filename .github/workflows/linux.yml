@@ -1,0 +1,33 @@
+name: Linux verification
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: debian:12-slim
+            setup: apt-get update && apt-get install -y --no-install-recommends bash ca-certificates curl openssl unzip python3 util-linux
+          - image: alpine:3.23
+            setup: apk add --no-cache bash ca-certificates curl openssl unzip python3 util-linux coreutils findutils grep
+    steps:
+      - uses: actions/checkout@v4
+      - name: Offline regression and real Xray config validation
+        env:
+          TEST_IMAGE: ${{ matrix.image }}
+          TEST_SETUP: ${{ matrix.setup }}
+        run: |
+          docker run --rm -v "$PWD:/repo:ro" -w /repo "$TEST_IMAGE" sh -ec '
+            eval "$1"
+            bash test/run-all.sh
+            bash test/real-core-test.sh
+          ' sh "$TEST_SETUP"

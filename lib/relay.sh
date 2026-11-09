@@ -176,6 +176,7 @@ relay_env_save() {
         [[ -n "$RELAY_FALLBACK" ]]   && printf 'RELAY_FALLBACK=%s\n' "$RELAY_FALLBACK"
         [[ -n "$RELAY_FALLBACK_TAG" ]] && printf 'RELAY_FALLBACK_TAG=%s\n' "$RELAY_FALLBACK_TAG"
         [[ -n "$RELAY_TFO" ]]        && printf 'RELAY_TFO=%s\n' "$RELAY_TFO"
+        :
     } | atomic_write "$XHY_NODES/relay.env" 0600 || return 1
     return 0
 }
@@ -183,18 +184,36 @@ relay_env_save() {
 # 每次都真读文件：rebuild_config 的钩子会调它，而 relay_del 会先删文件再重建，
 # 一旦做了缓存，删完还会拿旧值注入出一条指向已删端口的出站。
 relay_env_load() {
-    local f="$XHY_NODES/relay.env"
-    [[ -f "$f" ]] || return 1
-    # shellcheck disable=SC1090
-    source "$f"
-    [[ -n "$RELAY_ROLE" ]] || return 1
-    # 从 v1.10.x 升级：老 relay.env 可能写着 security=tls + pin + 证书路径。
-    # 这一版起恒明文，读的时候就地把这些字段降级，老机器不用重配，
-    # config.json 也不会再产出任何 tlsSettings。
-    RELAY_SECURITY="none"
+    local f="$XHY_NODES/relay.env" line key
+    relay_reset_vars
+    [[ -f "$f" && ! -L "$f" ]] || return 1
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        case "$line" in ''|\#*) continue ;; esac
+        [[ "$line" == *=* ]] || return 1
+        key="${line%%=*}"
+        case "$key" in
+            RELAY_ROLE|RELAY_PORT|RELAY_ALLOW|RELAY_UUID|RELAY_UPSTREAM|RELAY_CATEGORIES|RELAY_DOMAINS|RELAY_FW_CHAIN|RELAY_SECURITY|RELAY_SNI|RELAY_PIN|RELAY_CERT|RELAY_KEY|RELAY_GEOIP_US|RELAY_TAG|RELAY_FALLBACK|RELAY_FALLBACK_TAG|RELAY_TFO)
+                printf -v "$key" '%s' "${line#*=}" ;;
+        esac
+    done <"$f"
+    case "$RELAY_ROLE" in
+        entry) relay_split_upstream "$RELAY_UPSTREAM" >/dev/null || return 1 ;;
+        land) valid_port "$RELAY_PORT" && relay_valid_host "$RELAY_ALLOW" || return 1 ;;
+        *) return 1 ;;
+    esac
+    [[ "$RELAY_UUID" =~ ^[A-Za-z0-9-]+$ ]] || return 1
+    RELAY_SECURITY=none
     RELAY_SNI=""; RELAY_PIN=""; RELAY_CERT=""; RELAY_KEY=""
-    return 0
 }
+
+relay_render_land() (
+    [[ -e "$XHY_NODES/relay.env" ]] || return 0
+    relay_env_load || return 1
+    [[ "$RELAY_ROLE" == land ]] || return 0
+    relay_remove_fragments || return 1
+    relay_fragment "$RELAY_PORT" "$RELAY_UUID" |
+        atomic_write "$XHY_CONFDIR/relay_in_${RELAY_PORT}.json" 0600
+)
 
 # ---------------------------------------------------------------------------
 # 解析与校验
@@ -263,7 +282,9 @@ relay_norm_domains() {
             relay_say err "域名规则不能含空格：$in" "domain rules must not contain spaces: $in"
             return 1 ;;
     esac
-    for d in ${in//,/ }; do
+    local -a domains=()
+    IFS=, read -r -a domains <<<"$in"
+    for d in "${domains[@]}"; do
         [[ -n "$d" ]] || continue
         case "$d" in
             domain:*|full:*|keyword:*|regexp:*|geosite:*) ;;
@@ -462,7 +483,9 @@ relay_routing_rules_json() {
     done
     # v1.12.0：明文域名规则与 geosite 分类同处一条 domain 数组，谁命中都转发。
     # 这样 geosite.dat 缺哪个分类都不影响这些站，换机器重建也不会失效。
-    for c in ${RELAY_DOMAINS//,/ }; do
+    local -a domains=()
+    IFS=, read -r -a domains <<<"$RELAY_DOMAINS"
+    for c in "${domains[@]}"; do
         [[ -n "$c" ]] || continue
         # regexp 里可能有 \（如 regexp:^a\.b$），写进 JSON 前必须转义成 \\
         doms+="${sep}\"${c//\\/\\\\}\""; sep=","
@@ -528,13 +551,7 @@ extra_top_json() {
 # 必须手工 xhy service restart 才通。这里统一走 config_reload。
 relay_apply() {
     XHY_SKIP_SNAPSHOT=1 rebuild_config || return 1
-    if ! xray_config_test >/dev/null 2>&1; then
-        xray_config_test || true
-        relay_say err "配置校验失败，未重启服务（先看上面的报错）" \
-                     "config test failed; service not restarted"
-        return 1
-    fi
-    config_reload || return 1
+    config_reload --validated || return 1
     return 0
 }
 
@@ -739,7 +756,7 @@ relay_remove_fragments() {
     local f
     for f in "$XHY_CONFDIR"/relay_in_*.json; do
         [[ -f "$f" ]] || continue
-        rm -f "$f"
+        rm -f "$f" || return 1
     done
     return 0
 }
@@ -754,7 +771,9 @@ relay_port_owned() {
     [[ -f "$XHY_CONFDIR/relay_in_${1}.json" ]]
 }
 
-relay_land() {
+relay_land() { config_transaction _relay_land "$@"; }
+
+_relay_land() {
     local port="$RELAY_DEFAULT_PORT" allow="" uuid="" tls=0 crt="" key="" sni="" myip=""
     while (( $# > 0 )); do
         case "$1" in
@@ -804,18 +823,15 @@ relay_land() {
                       "relay hop is always plaintext since v1.11.0; --tls retired (ignored)"
     fi
 
-    # 旧 land 换了端口/UUID → 先删旧片段与旧规则；同端口则原地覆盖
-    if [[ "$prev_role" == "land" && -n "$prev_port" && "$prev_port" != "$port" ]]; then
-        rm -f "$XHY_CONFDIR/relay_in_${prev_port}.json"
+    RELAY_FW_CHAIN="$(relay_fw_chain "$([[ "$allow" == *:* ]] && printf ip6tables || printf iptables)")"
+    relay_env_save || return 1
+    relay_render_land || return 1
+    relay_apply || return 1
+    relay_fw_add "$port" "$allow" >/dev/null || return 1
+    if [[ "$prev_role" == land && -n "$prev_port" ]] &&
+       [[ "$prev_port" != "$port" || "$prev_allow" != "$allow" ]]; then
         relay_fw_del "$prev_port" "$prev_allow" ""
     fi
-    relay_fragment "$port" "$uuid" | atomic_write "$XHY_CONFDIR/relay_in_${port}.json" 0644 \
-        || die "入站片段写入失败: $XHY_CONFDIR/relay_in_${port}.json"
-    relay_fw_add "$port" "$allow" >/dev/null || true
-    RELAY_FW_CHAIN="$(relay_fw_chain iptables)"
-
-    relay_env_save || return 1
-    relay_apply || return 1
 
     [[ -n "$myip" ]] || myip="$(public_ip)"
     relay_say ok "中继入站已就绪：${myip}:${port}（仅放行 ${allow}）" \
@@ -837,7 +853,9 @@ relay_entry_hint() {
         "$RELAY_UUID" "$ip" "$RELAY_PORT"
 }
 
-relay_entry() {
+relay_entry() { config_transaction _relay_entry "$@"; }
+
+_relay_entry() {
     local upstream="" uuid="" categories="" domains="" domains_set=0 geoip="off" tls=0 sni="" pin="" tag="" fb="" fbtag="" tfo=""
     while (( $# > 0 )); do
         case "$1" in
@@ -891,15 +909,9 @@ relay_entry() {
     # 没传 --domains 时沿用 relay.env 里的旧值（它只是一层补丁，不该被顺手清掉）；
     # 要清空得显式 --no-domains。
     if (( domains_set )); then RELAY_DOMAINS="$dom_norm"; else RELAY_DOMAINS="$prev_domains"; fi
-    if [[ "$prev_role" == "land" ]]; then
-        relay_remove_fragments
-        [[ -n "$prev_port" ]] && relay_fw_del "$prev_port" "$prev_allow" ""
-        relay_say info "本机原为落地端，已移除入站片段与防火墙规则" \
-                      "this host was a landing node; inbound fragment and firewall rule removed"
-    fi
     disk_need 1 "中继出站配置" || return 1
-
     [[ "${XHY_SKIP_SNAPSHOT:-0}" == "1" ]] || snapshot_state
+    relay_remove_fragments || return 1
     RELAY_ROLE=entry
     RELAY_UPSTREAM="$upstream"
     RELAY_UUID="$uuid"
@@ -917,6 +929,9 @@ relay_entry() {
     fi
     relay_env_save || return 1
     relay_apply || return 1
+    if [[ "$prev_role" == land && -n "$prev_port" ]]; then
+        relay_fw_del "$prev_port" "$prev_allow" ""
+    fi
 
     relay_say ok "中继出站已就绪：流量 → ${RELAY_UPSTREAM}" \
                 "relay outbound ready: traffic -> ${RELAY_UPSTREAM}"
@@ -963,18 +978,15 @@ relay_export() {
     return 0
 }
 
-relay_reapply() {
+relay_reapply() { config_transaction _relay_reapply "$@"; }
+
+_relay_reapply() {
     relay_env_load || die "本机未配置 relay（先跑 xhy relay land / entry）"
-    if [[ "$RELAY_ROLE" == "land" ]]; then
-        local f="$XHY_CONFDIR/relay_in_${RELAY_PORT}.json"
-        if [[ ! -f "$f" ]]; then
-            relay_say info "入站片段缺失，按 relay.env 重建" "inbound fragment missing; re-rendering"
-            relay_fragment "$RELAY_PORT" "$RELAY_UUID" | atomic_write "$f" 0644 \
-                || die "片段写入失败: $f"
-        fi
-        relay_fw_add "$RELAY_PORT" "$RELAY_ALLOW" >/dev/null || true
-    fi
+    relay_render_land || return 1
     relay_apply || return 1
+    if [[ "$RELAY_ROLE" == land ]]; then
+        relay_fw_add "$RELAY_PORT" "$RELAY_ALLOW" >/dev/null || return 1
+    fi
     relay_say ok "已重新注入并生效" "re-injected and reloaded"
     return 0
 }
@@ -1133,24 +1145,19 @@ relay_test() {
     return 0
 }
 
-relay_del() {
-    relay_env_load >/dev/null 2>&1 || {
-        # 没状态文件也可能有残留片段，一并清
-        local f
-        for f in "$XHY_CONFDIR"/relay_in_*.json; do [[ -f "$f" ]] || continue; rm -f "$f"; done
-        relay_say info "本机无 relay 状态" "no relay state on this host"
-        return 0
-    }
-    need_root
-    local role="$RELAY_ROLE" port="$RELAY_PORT" allow="$RELAY_ALLOW"
-    relay_clean_land_state
-    rm -f "$XHY_NODES/relay.env"
-    relay_reset_vars
-    XHY_SKIP_SNAPSHOT=1 rebuild_config || true
-    if xray_config_test >/dev/null 2>&1; then
-        config_reload >/dev/null 2>&1 || relay_say warn "配置已写回但服务未重启（xhy service restart）" \
-                                                     "config written but service not restarted (xhy service restart)"
+relay_del() { config_transaction _relay_del "$@"; }
+
+_relay_del() {
+    local role="" port="" allow="" chain=""
+    if relay_env_load; then
+        role="$RELAY_ROLE"; port="$RELAY_PORT"; allow="$RELAY_ALLOW"; chain="$RELAY_FW_CHAIN"
     fi
+    [[ "${XHY_SKIP_SNAPSHOT:-0}" == 1 ]] || snapshot_state
+    relay_remove_fragments || return 1
+    rm -f "$XHY_NODES/relay.env" || return 1
+    relay_reset_vars
+    relay_apply || return 1
+    if [[ "$role" == land ]]; then relay_fw_del "$port" "$allow" "$chain"; fi
     if [[ "$role" == "land" ]]; then
         relay_say ok "落地端 relay 已移除（片段 ${port} + 防火墙规则 ${allow} + 配置已重建）" \
                     "landing relay removed (fragment ${port}, firewall rule ${allow}, config rebuilt)"

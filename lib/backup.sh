@@ -31,17 +31,15 @@ backup_create() {
     # 备份只打包配置（config.json / nodes / confs / certs / state.env），
     # 二进制与 geoip/geosite 不入档 —— 它们能重新下载，且 65 MB 在小盘上是灾难。
     disk_need 15 "打包配置备份" || die "已中止：先腾出空间再备份"
-    local ts stage f cnt=0
+    local ts stage f archive_tmp cnt=0
     ts="$(date +%Y%m%d-%H%M%S)"
-    [[ -n "$out" ]] || out="$XHY_BACKUP/xhy-backup-$ts.tar.gz"
+    [[ -n "$out" ]] || out="$XHY_BACKUP/xhy-backup-$ts-${BASHPID}.tar.gz"
     stage="$(mktemp -d "${TMPDIR:-/tmp}/xhy-bak.XXXXXX")"
     mkdir -p "$stage/payload"
-    if [[ -d "$XHY_ETC" ]]; then
-        cp -a "$XHY_ETC/." "$stage/payload/"
-    else
-        die "$XHY_ETC 不存在：还没有可备份的数据（先 install）"
-    fi
-    rm -rf "$stage/payload/snapshots" "$stage/payload/backups"
+    for f in confs nodes certs config.json state.env tunnel.token target.env scan-cache.tsv; do
+        [[ -e "$XHY_ETC/$f" ]] || continue
+        cp -a "$XHY_ETC/$f" "$stage/payload/" || { rm -rf "$stage"; return 1; }
+    done
     {
         printf '# xray-hy backup manifest v1\n'
         _backup_meta "$ts"
@@ -55,92 +53,87 @@ backup_create() {
             done
     } >"$stage/manifest.tsv"
     cnt="$(grep -c $'^[0-9a-f]\{64\}\t' "$stage/manifest.tsv" || true)"
-    if ! tar -C "$stage" -czf "$out" payload manifest.tsv; then
+    archive_tmp="$(mktemp "$out.tmp.XXXXXX")" || { rm -rf "$stage"; return 1; }
+    if ! tar -C "$stage" -czf "$archive_tmp" payload manifest.tsv ||
+       ! chmod 0600 "$archive_tmp" || ! mv -f "$archive_tmp" "$out"; then
         rm -rf "$stage"
+        rm -f "$archive_tmp"
         die "打包失败: $out"
     fi
     rm -rf "$stage"
-    chmod 0600 "$out"
     ok "备份完成: $out"
     printf '  文件数: %s   大小: %s 字节\n' "$cnt" "$(wc -c <"$out")"
     printf '  %s\n' "提示：备份含全部节点凭证与证书私钥，请按敏感文件保管。"
 }
 
-backup_restore() {
-    local arc="${1:-}"
-    [[ -n "$arc" ]] || die "用法: xhy restore <备份文件.tar.gz>"
-    [[ -f "$arc" ]] || die "备份文件不存在: $arc"
+# Validate before extracting: only regular files and directories within the
+# backup layout, no symlinks/hardlinks, absolute paths or traversal.
+backup_archive_safe() {
+    local arc="$1" stage="$2" member
+    tar -tzf "$arc" >"$stage/members" &&
+        tar -tvzf "$arc" >"$stage/types" || return 1
+    if grep -qvE '^[-d]' "$stage/types"; then return 1; fi
+    while IFS= read -r member; do
+        [[ "$member" =~ ^[A-Za-z0-9_./+-]+$ && "/$member/" != */../* && "/$member/" != */./* ]] || return 1
+        case "$member" in
+            manifest.tsv|payload/|payload/confs/|payload/nodes/|payload/certs/|payload/confs/*|payload/nodes/*|payload/certs/*|payload/config.json|payload/state.env|payload/tunnel.token|payload/target.env|payload/scan-cache.tsv|payload/.lock|payload/.lock.d/) ;;
+            *) return 1 ;;
+        esac
+    done <"$stage/members"
+    [[ -z "$(LC_ALL=C sort "$stage/members" | uniq -d)" ]]
+}
+
+backup_restore() (
+    local arc="${1:-}" stage sum size f total=0
+    [[ -f "$arc" ]] || die "用法: xhy restore <备份文件.tar.gz>"
     need_root
-    init_dirs
-    local stage bad=0 total=0 sum size f
-    stage="$(mktemp -d "${TMPDIR:-/tmp}/xhy-rst.XXXXXX")"
-    if ! tar -xzf "$arc" -C "$stage"; then
-        rm -rf "$stage"
-        die "解包失败：文件损坏或不是 tar.gz"
-    fi
-    [[ -d "$stage/payload" && -f "$stage/manifest.tsv" ]] \
-        || { rm -rf "$stage"; die "不是 xray-hy 备份（缺 payload/manifest.tsv）"; }
-
-    # 1) 完整性校验 —— 任何一项不过就整体放弃，绝不部分还原。
+    stage="$(mktemp -d "${TMPDIR:-/tmp}/xhy-rst.XXXXXX")" || return 1
+    trap 'rm -rf "$stage"' EXIT
+    backup_archive_safe "$arc" "$stage" || die "备份含有不支持或不安全的条目"
+    tar -xzf "$arc" -C "$stage" || die "解包失败"
+    [[ -d "$stage/payload" && -f "$stage/manifest.tsv" ]] || die "缺少备份清单或 payload"
+    local -A seen=()
     while IFS=$'\t' read -r sum size f; do
-        [[ "$sum" == "meta" || "$f" == "relative-path" ]] && continue
-        case "$sum" in '#'*) continue ;; esac
-        total=$((total + 1))
-        if [[ ! -f "$stage/payload/$f" ]] \
-           || [[ "$(sha256sum "$stage/payload/$f" 2>/dev/null | awk '{print $1}')" != "$sum" ]]; then
-            warn "校验失败: $f"
-            bad=1
-        fi
+        case "$sum" in \#*|meta) continue ;; esac
+        [[ "$sum" =~ ^[0-9a-f]{64}$ && "$size" =~ ^[0-9]+$ && "$f" =~ ^[A-Za-z0-9_./+-]+$ &&
+           "$f" != /* && "/$f/" != */../* && "/$f/" != */./* ]] || die "备份清单格式错误"
+        [[ ! "${seen[$f]+yes}" && -f "$stage/payload/$f" ]] || die "备份清单缺失或重复: $f"
+        [[ "$(sha256_file "$stage/payload/$f")" == "$sum" &&
+           "$(wc -c <"$stage/payload/$f" | tr -d '[:space:]')" == "$size" ]] || die "备份校验失败: $f"
+        seen["$f"]=1
+        total=$(( total + 1 ))
     done <"$stage/manifest.tsv"
-    if (( bad )); then
-        rm -rf "$stage"
-        die "备份完整性校验未通过（$total 项中存在损坏），已放弃还原，目标机未做任何改动"
-    fi
+    (( total > 0 )) || die "备份清单为空"
+    while IFS= read -r f; do
+        [[ "${seen[$f]+yes}" ]] || die "备份有未列入清单的文件: $f"
+    done < <(cd "$stage/payload" && find . -type f | sed 's|^\./||')
     ok "清单校验通过: $total 个文件"
-    grep '^meta' "$stage/manifest.tsv" | sed 's/^meta\t/  /'
+    confirm "用这份备份覆盖 $XHY_ETC？" "n" || { info "已取消"; return 0; }
+    config_transaction _backup_restore_apply "$stage/payload"
+)
 
-    # 2) 确认 + 现状留底
-    local pre="$XHY_BACKUP/pre-restore-$(date +%Y%m%d-%H%M%S)"
-    if [[ -d "$XHY_ETC" ]] && [[ -n "$(ls -A "$XHY_ETC" 2>/dev/null || true)" ]]; then
-        mkdir -p "$pre"
-        cp -a "$XHY_ETC/." "$pre/"
-        info "还原前现状已留底: $pre"
-    fi
-    if ! confirm "用这份备份覆盖 $XHY_ETC？（备份里没有的 nodes/confs 条目会被删除，保持与备份一致）" "n"; then
-        rm -rf "$stage"
-        info "已取消"
-        return 0
-    fi
-
-    # 3) 清掉会与备份产生歧义的内容，再整体拷入。
-    rm -rf "$XHY_ETC/confs" "$XHY_ETC/nodes" "$XHY_ETC/certs"
-    rm -f "$XHY_ETC/state.env" "$XHY_ETC/config.json"
-    cp -a "$stage/payload/." "$XHY_ETC/"
-    rm -rf "$stage"                                         # 配置一律从 nodes 重建：
-    rm -rf "$XHY_ETC/confs" "$XHY_ETC/config.json"          # confs/ 与 config.json 不沿用备份
-    chmod 0700 "$XHY_ETC/nodes" "$XHY_ETC/certs" 2>/dev/null || true
-    chmod 0600 "$XHY_ETC/state.env" 2>/dev/null || true
-
-    # 4) 新机器没有 Xray：数据已还原，指引装核心后再起服务。
+_backup_restore_apply() {
+    local payload="$1" f
+    # Retain an independent copy for manual recovery after a successful restore.
+    backup_create || return 1
+    for f in confs nodes certs state.env tunnel.token target.env scan-cache.tsv; do
+        rm -rf "$XHY_ETC/$f" || return 1
+        [[ -e "$payload/$f" ]] || continue
+        # Generated fragments are rebuilt from the registry, including relay.
+        [[ "$f" == confs ]] && continue
+        cp -a "$payload/$f" "$XHY_ETC/" || return 1
+    done
+    init_dirs || return 1
     if [[ ! -x "$XRAY_BIN" ]]; then
-        warn "本机还没有 Xray。数据已还原，接下来: xhy core update 安装核心，再 xhy service start"
+        rm -f "$XHY_ETC/config.json" || return 1
+        warn "数据已恢复；先安装 Xray，再执行 xhy update config"
         return 0
     fi
-
-    # 5) 从 nodes 重建配置并验证；失败整体回滚到留底。
-    local frag
-    if ! ( for frag in "$XHY_NODES"/*.env; do
-              [[ -f "$frag" ]] || continue
-              write_fragment "$frag" || exit 1
-          done && rebuild_config && xray_config_test ); then
-        err "还原后的配置重建/校验失败，回滚到还原前状态"
-        rm -rf "$XHY_ETC/confs" "$XHY_ETC/nodes" "$XHY_ETC/certs"
-        rm -f "$XHY_ETC/state.env" "$XHY_ETC/config.json"
-        cp -a "$pre/." "$XHY_ETC/"
-        die "已回滚。备份清单是完整的，问题多半在目标机环境（版本/端口冲突），看上面的报错"
+    XHY_SKIP_SNAPSHOT=1 node_rebuild_all || return 1
+    if [[ "$(state_get FIREWALL_MODE off)" != off ]]; then
+        firewall_apply "$(state_get FIREWALL_MODE safe)" --quiet || return 1
     fi
-    config_reload || warn "配置已写入，但服务重启失败（尚未 install？可 xhy service start 手动起）"
-    ok "还原完成（配置已按 nodes 重建并通过 xray -test）"
+    ok "还原完成（配置已按节点与中继状态重建）"
 }
 
 # ---------------------------------------------------------------------------

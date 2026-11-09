@@ -620,10 +620,12 @@ cmd_scan() {
     esac
 }
 
-cmd_config_set() {
+cmd_config_set() { config_transaction _cmd_config_set "$@"; }
+
+_cmd_config_set() {
     local key="$1" val="$2"
     case "$key" in
-        BLOCK_BT|BLOCK_PRIVATE|BLOCK_CN|BLOCK_ADS|SSH_GUARD|DUAL_STACK)
+        BLOCK_BT|BLOCK_PRIVATE|BLOCK_CN|BLOCK_ADS|SSH_GUARD|DUAL_STACK|ACCESS_LOG)
             [[ "$val" == "on" || "$val" == "off" ]] || die "$key 只能是 on/off" ;;
         DNS_PROVIDER)
             [[ "$val" =~ ^(cloudflare|quad9|dns-sb|system)$ ]] || die "DNS_PROVIDER 值不合法" ;;
@@ -635,10 +637,12 @@ cmd_config_set() {
     # Snapshot before the setting changes: a snapshot should always represent
     # the state you had *before* this command, otherwise it cannot undo it.
     snapshot_state
-    state_set "$key" "$val"
+    state_set "$key" "$val" || return 1
+    XHY_SKIP_SNAPSHOT=1 node_rebuild_all || return 1
+    if [[ "$key" == "SSH_GUARD" && "$(state_get FIREWALL_MODE off)" != off ]]; then
+        firewall_apply "$(state_get FIREWALL_MODE safe)" || return 1
+    fi
     ok "$key=$val"
-    XHY_SKIP_SNAPSHOT=1 node_rebuild_all
-    [[ "$key" == "SSH_GUARD" ]] && firewall_apply "$(state_get FIREWALL_MODE safe)"
 }
 
 cmd_config_menu() {
@@ -891,7 +895,8 @@ main() {
                         *) die "用法: xhy core [status|channel <值>|update [--force]]" ;;
                     esac ;;
         update)     case "${1:-all}" in
-                        all) update_all ;;
+                        all) shift; update_all "$@" ;;
+                        _continue) update_continue "${2:-}" ;;
                         script) shift; update_script "$@" ;;
                         core) shift; update_core "$@" ;;
                         geodata) shift; update_geodata "$@" ;; config) update_config ;;

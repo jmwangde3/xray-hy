@@ -24,7 +24,7 @@ _update_relay_fingerprint() {
         awk '
             /^[A-Za-z_][A-Za-z0-9_]*\(\)/ {
                 name = $0; sub(/\(.*/, "", name)
-                infn = (name ~ /^relay_/ || name ~ /^extra_/ || name == "firewall_extra_rules")
+                infn = (name ~ /^_?relay_/ || name ~ /^extra_/ || name == "firewall_extra_rules")
                 if (infn) { line = $0; sub(/[[:space:]]+$/, "", line); print "@" line }
                 next
             }
@@ -142,10 +142,16 @@ update_script() {
     if update_script_relay_reapply_needed "$old_src" "$tmp"; then
         need_relay_reapply=1
     fi
-    reconcile_bin
+    if [[ "${XHY_UPDATE_ALL:-0}" == 1 ]] &&
+       ! grep -qx 'XHY_UPDATE_CHAIN="1"' "$tmp"; then
+        rm -f "$tmp"
+        err "目标脚本不支持全量更新接力，请先单独运行 xhy update script"
+        return 1
+    fi
+    # mv replaces a symlink itself; leave the old entry usable until commit.
     # 只备份真正的单文件本体；仓库模式下的 $REPO/xhy 是开发入口，不进备份目录
     if (( ! repo_mode )) && [[ -f "$XHY_SELF" && ! -L "$XHY_SELF" ]]; then
-        backup_file "$XHY_SELF"
+        backup_file "$XHY_SELF" || { rm -f "$tmp"; return 1; }
     fi
     if ! install -m 0755 "$tmp" "$canonical.new" || ! mv -f "$canonical.new" "$canonical"; then
         rm -f "$tmp" "$canonical.new"
@@ -157,31 +163,33 @@ update_script() {
     if (( layout_bad )); then
         ok "入口布局已纠正：$canonical 现在是单文件实体（非软链）"
     fi
+    if [[ "${XHY_UPDATE_ALL:-0}" == 1 ]]; then
+        # The child takes a fresh lock and owns all remaining mutations.
+        XHY_UPDATE_DELEGATED=1
+        release_lock
+        exec 9>&-
+        "$canonical" update _continue "$need_relay_reapply"
+        return $?
+    fi
     if (( need_relay_reapply )); then
-        # 必须用新脚本的子进程跑：当前进程里的 relay_* 函数还是旧版本，
-        # 用旧逻辑重建等于没升级。
-        #
-        # 但 main() 从 acquire_lock 起就全程持有配置锁（flock fd 9 或 .lock.d），
-        # 子进程会继承 fd 9 / 看到目录还在，于是自己 acquire_lock 时等 15 秒后
-        # die —— v1.14.3 硅谷实机就是这样失败的。这里先把父进程的锁释放掉
-        # 再起子进程，让它自己拿锁；父进程之后只剩打印与 return，不再改配置。
         info "检测到 relay 渲染代码有变且本机已配置 relay，自动重建 config.json…"
         release_lock
-        exec 9>&- 2>/dev/null || true
+        exec 9>&-
         if "$canonical" relay reapply; then
             ok "relay 配置已按新版本重建（无需手动 reapply）"
         else
             warn "自动 relay reapply 失败，请手动执行：xhy relay reapply"
+            return 1
         fi
     fi
     info "当前进程仍是旧版，下次执行 xhy 生效"
     return 0
 }
 
-update_core() {
+update_core() (
     need_root
     init_dirs
-    local ver rollback="" force="${1:-}"
+    local ver rollback="" assets="" f recovery_failed=0 force="${1:-}"
     [[ "$force" == "--force" ]] || force=""
     ver="$(xray_resolve_version)"
     info "版本通道 $(xray_channel) -> 目标 $ver"
@@ -201,19 +209,46 @@ update_core() {
             [[ -n "$rollback" ]] || warn "回滚副本创建失败，继续安装（失败需手动重装旧版本）"
         fi
     fi
-    xray_install "$ver"
-    if [[ -s "$XHY_ETC/config.json" ]] && ! xray_config_test >/dev/null 2>&1; then
-        if [[ -n "$rollback" ]]; then
-            cp -a "$rollback" "$XRAY_BIN"
-            rm -f "$rollback"          # 回滚副本用完就删，别在小盘上留 30 MB
-            err "新版本 $ver 无法加载现有配置，已自动回滚到原二进制。"
-        fi
-        die "请检查 $XHY_ETC/config.json，或改用兼容版本"
+    trap '[[ -z "$rollback" ]] || rm -f "$rollback"; [[ -z "$assets" ]] || rm -rf "$assets"' EXIT
+    if [[ -n "$rollback" ]]; then
+        install -d -m 0755 "$XRAY_ASSET" || return 1
+        assets="$(mktemp -d "$XRAY_ASSET/.core-rollback.XXXXXX")" || return 1
+        for f in geoip.dat geosite.dat .geodata-source; do
+            [[ -e "$XRAY_ASSET/$f" ]] || continue
+            ln "$XRAY_ASSET/$f" "$assets/$f" || return 1
+        done
     fi
-    if [[ -s "$XHY_ETC/config.json" ]]; then config_reload; fi
-    [[ -n "$rollback" ]] && rm -f "$rollback"
-    ok "Xray 更新完成: $("$XRAY_BIN" version 2>/dev/null | head -1)"
-}
+    local reload_attempted=0
+    if xray_install "$ver"; then
+        if [[ ! -s "$XHY_ETC/config.json" ]]; then
+            ok "Xray 更新完成"
+            return 0
+        fi
+        reload_attempted=1
+        if config_reload --validated; then
+            ok "Xray 更新完成"
+            return 0
+        fi
+    fi
+    if [[ -n "$rollback" ]]; then
+        # Restore both the old binary and its data before trying the old service.
+        atomic_write "$XRAY_BIN" 0755 <"$rollback" || recovery_failed=1
+        for f in geoip.dat geosite.dat .geodata-source; do
+            if [[ -e "$assets/$f" ]]; then
+                ln -f "$assets/$f" "$XRAY_ASSET/$f" || recovery_failed=1
+            else
+                rm -f "$XRAY_ASSET/$f" || recovery_failed=1
+            fi
+        done
+        if (( recovery_failed )); then
+            trap - EXIT
+            err "Xray 自动回滚未完成，二进制副本: $rollback；数据副本: $assets"
+        elif (( reload_attempted )); then
+            svc_restart "$SVC_XRAY" || warn "旧 Xray 已恢复，但服务重启失败"
+        fi
+    fi
+    return 1
+)
 
 # geodata 默认 = Loyalsoldier 完整版（v1.14.0 起）。官方 release 自带的 dat
 # 是它的真子集（缺 gfw 全系 / google 114 条 / geolocation-!cn 3819 条等），
@@ -259,21 +294,12 @@ update_geodata() {
 
     # Loyalsoldier 两个 dat 约 30 MB，官方整包 16.7 MB + 解出 11 MB，都要余量写 .new。
     disk_need 45 "更新 geodata（约 30 MB）" || die "已中止：现有 geo 数据继续生效"
-    if [[ "$src" == "loyalsoldier" ]]; then
-        if geodata_install_loyalsoldier; then
-            printf '%s\n' "$src" > "$stamp"
-            ok "Geodata 更新完成（Loyalsoldier 完整版）"
-        else
-            warn "Loyalsoldier geodata 未完整更新，源标记未写入；下次 update geodata 会重试"
-        fi
+    if [[ "$src" == loyalsoldier ]]; then
+        geodata_install_loyalsoldier || return 1
     else
-        if geodata_install_official "$ver"; then
-            printf '%s\n' "$src" > "$stamp"
-            ok "Geodata 更新完成（官方版，Xray $ver）"
-        else
-            warn "官方版 geodata 未完整更新，源标记未写入；下次 update geodata 会重试"
-        fi
+        geodata_install_official "$ver" || return 1
     fi
+    ok "Geodata 更新完成（$src）"
 }
 
 update_config() {
@@ -281,18 +307,29 @@ update_config() {
     # 服务端本来就该开 BBR：每次重建配置顺手兜底，实测没生效就重新下发。
     # 安装时显式选了「不开」(BBR_ENABLED=off) 的不会被强行打开。
     bbr_ensure || warn "BBR 未生效，可执行 xhy bbr on 复查。"
-    node_rebuild_all
-    [[ "$(state_get FIREWALL_MODE off)" != "off" ]] && firewall_apply "$(state_get FIREWALL_MODE safe)" --quiet
+    node_rebuild_all || return 1
+    if [[ "$(state_get FIREWALL_MODE off)" != off ]]; then
+        firewall_apply "$(state_get FIREWALL_MODE safe)" --quiet || return 1
+    fi
     ok "配置已按当前设置重建"
 }
 
 update_all() {
-    update_script || true
-    update_core
-    # 核心安装已按 geodata_source 铺好 dat 并写 .geodata-source；这里只兜底
-    # 「核心没变动 / 数据缺失 / 源标记缺失」—— 同源且 1 小时内会跳过，不重复下 30 MB。
-    update_geodata
-    update_config
+    local XHY_UPDATE_ALL=1 XHY_UPDATE_DELEGATED=0
+    update_script "$@" || return 1
+    (( ! XHY_UPDATE_DELEGATED )) || return 0
+    update_continue 0
+}
+
+update_continue() {
+    case "${1:-}" in
+        0) ;;
+        1) relay_reapply || return 1 ;;
+        *) return 2 ;;
+    esac
+    update_core || return 1
+    update_geodata || return 1
+    update_config || return 1
     self_check
 }
 

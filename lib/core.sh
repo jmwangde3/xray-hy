@@ -79,91 +79,91 @@ geodata_source() {
     printf '%s' "$v"
 }
 
-# Loyalsoldier 直接单独发两个 dat（并附 .sha256sum），不需要下 16.7 MB 整包。
-# 两个 dat 都过 SHA-256 才落盘、全部成功才返回 0 —— 调用方据此写 .geodata-source。
-geodata_install_loyalsoldier() {
-    local f sz sum expected actual failed=0 base
+# Stage both assets, then validate the active config against that pair.
+# Keep rollback copies via hard links on the same filesystem to save disk.
+geodata_publish() (
+    local dir="$1" src="$2" f old
+    for f in geoip.dat geosite.dat; do
+        [[ -s "$dir/$f" ]] || { err "缺少 $f，保留原 geodata"; return 1; }
+        chmod 0644 "$dir/$f" || return 1
+    done
+    if [[ -s "$XHY_ETC/config.json" && -x "$XRAY_BIN" ]]; then
+        XRAY_ASSET="$dir" xray_config_test || { err "现有配置无法使用候选 geodata"; return 1; }
+    fi
+    printf '%s\n' "$src" >"$dir/.geodata-source" || return 1
+    old="$dir/previous"
+    mkdir -m 0700 "$old" || return 1
+    for f in geoip.dat geosite.dat .geodata-source; do
+        [[ -e "$XRAY_ASSET/$f" ]] || continue
+        ln "$XRAY_ASSET/$f" "$old/$f" || return 1
+    done
+    # A forced interruption can never leave a stale marker claiming the new pair.
+    rm -f "$XRAY_ASSET/.geodata-source" || return 1
+    if mv -f "$dir/geoip.dat" "$XRAY_ASSET/geoip.dat" &&
+       mv -f "$dir/geosite.dat" "$XRAY_ASSET/geosite.dat" &&
+       mv -f "$dir/.geodata-source" "$XRAY_ASSET/.geodata-source"; then return 0; fi
+    local failed=0
+    for f in geoip.dat geosite.dat; do
+        if [[ -e "$old/$f" ]]; then
+            mv -f "$old/$f" "$XRAY_ASSET/$f" || failed=1
+        else
+            rm -f "$XRAY_ASSET/$f" || failed=1
+        fi
+    done
+    if (( ! failed )) && [[ -e "$old/.geodata-source" ]]; then
+        mv -f "$old/.geodata-source" "$XRAY_ASSET/.geodata-source" || failed=1
+    fi
+    if (( failed )); then
+        # Move the recovery copies outside the caller's cleanup directory.
+        local recover="$XRAY_ASSET/.geodata-recovery.${BASHPID}"
+        if mv "$old" "$recover"; then err "geodata 回滚未完成，备份在 $recover"; fi
+    fi
+    return 1
+)
+
+geodata_stage_loyalsoldier() {
+    local dir="$1" base f sz expected actual
     base="https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download"
     for f in geoip.dat geosite.dat; do
-        info "更新 $f（Loyalsoldier 完整版）"
-        if fetch "$base/$f" "$XRAY_ASSET/$f.new" \
-            && fetch "$base/$f.sha256sum" "$XRAY_ASSET/$f.sum"; then
-            sz="$(stat -c%s "$XRAY_ASSET/$f.new" 2>/dev/null || echo 0)"
-            expected="$(awk 'NR==1 {print $1}' "$XRAY_ASSET/$f.sum" 2>/dev/null | tr 'A-F' 'a-f' || true)"
-            actual="$(sha256_file "$XRAY_ASSET/$f.new" 2>/dev/null | tr 'A-F' 'a-f' || true)"
-            if (( sz < 102400 )); then
-                warn "$f 下载内容异常（${sz} bytes），保留现有文件"; failed=1
-            elif [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]]; then
-                warn "$f 摘要格式异常，拒绝安装未校验内容"; failed=1
-            elif [[ "$expected" != "$actual" ]]; then
-                warn "$f SHA-256 校验失败（期望 ${expected:0:16}… / 实际 ${actual:0:16}…），保留现有文件"; failed=1
-            else
-                mv -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f"
-                chmod 0644 "$XRAY_ASSET/$f"
-                ok "$f 已更新（$(( sz / 1024 )) KB，Loyalsoldier 版，SHA-256 通过）"
-            fi
-        else
-            warn "$f 下载失败，保留现有文件"; failed=1
+        info "下载 $f（Loyalsoldier 完整版）"
+        fetch "$base/$f" "$dir/$f" &&
+            fetch "$base/$f.sha256sum" "$dir/$f.sum" || return 1
+        sz="$(wc -c <"$dir/$f")" || return 1
+        expected="$(awk 'NR==1 {print $1}' "$dir/$f.sum" | tr 'A-F' 'a-f')" || return 1
+        actual="$(sha256_file "$dir/$f")" || return 1
+        if (( sz < 102400 )) || [[ ! "$expected" =~ ^[0-9a-f]{64}$ || "$expected" != "$actual" ]]; then
+            err "$f 的大小或 SHA-256 校验失败"
+            return 1
         fi
-        rm -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f.sum"
-        [[ -s "$XRAY_ASSET/$f" ]] || {
-            warn "$XRAY_ASSET/$f 仍缺失，geoip:private 等规则将不生效"; failed=1; }
     done
-    # 两个 dat 必须都成功：调用方据此决定是否写 .geodata-source 标记。
-    return "$failed"
 }
 
-geodata_install_official() {
-    local ver asset url tmp unpack f sz failed=0
-    ver="${1:-}"
-    [[ -n "$ver" && "$ver" != "未安装" && "$ver" != "latest" ]] || ver="latest"
+geodata_install_loyalsoldier() (
+    local dir
+    dir="$(mktemp -d "$XRAY_ASSET/.geodata.XXXXXX")" || return 1
+    trap 'rm -rf "$dir"' EXIT
+    geodata_stage_loyalsoldier "$dir" && geodata_publish "$dir" loyalsoldier
+)
+
+geodata_install_official() (
+    local ver="${1:-}" asset url dir
     asset="Xray-linux-${XHY_ARCH}.zip"
-    # release tag 带 v 前缀（v26.10.31），而 `xray version` 输出不带（26.10.31）。
-    # latest 走 releases/latest/download/<asset>，不带 tag 段。
-    if [[ "$ver" == "latest" ]]; then
-        url="${XHY_RELEASE_DL%/download}/latest/download/$asset"
-    elif [[ "$ver" == v* ]]; then
-        url="${XHY_RELEASE_DL}/$ver/$asset"
-    else
-        url="${XHY_RELEASE_DL}/v$ver/$asset"
-    fi
-    tmp="$(mktemp -d)" || die "无法创建临时目录"
-    # shellcheck disable=SC2064
-    trap "rm -rf '$tmp'" RETURN
-
-    info "下载官方 geodata（取自 Xray $ver 的 $asset）"
-    fetch "$url" "$tmp/$asset" \
-        || die "geodata 下载失败（Xray $ver 的 $asset 是否存在？）"
-    fetch "$url.dgst" "$tmp/$asset.dgst" \
-        || die "摘要文件下载失败，拒绝安装未校验的 geodata"
-    verify_release_digest "$tmp/$asset.dgst" "$tmp/$asset" || die "geodata 校验失败，已中止"
-
-    mkdir -p "$tmp/unpack"
+    case "$ver" in
+        ''|latest|未安装) url="${XHY_RELEASE_DL%/download}/latest/download/$asset" ;;
+        v*) url="${XHY_RELEASE_DL}/$ver/$asset" ;;
+        *) url="${XHY_RELEASE_DL}/v$ver/$asset" ;;
+    esac
+    dir="$(mktemp -d "$XRAY_ASSET/.geodata.XXXXXX")" || return 1
+    trap 'rm -rf "$dir"' EXIT
+    fetch "$url" "$dir/$asset" && fetch "$url.dgst" "$dir/$asset.dgst" || return 1
+    verify_release_digest "$dir/$asset.dgst" "$dir/$asset" || return 1
     if have_cmd unzip; then
-        unzip -o -q "$tmp/$asset" -d "$tmp/unpack" geosite.dat geoip.dat || die "解压 geodata 失败"
+        unzip -o -q "$dir/$asset" -d "$dir" geosite.dat geoip.dat || return 1
     else
-        busybox unzip -o -q "$tmp/$asset" -d "$tmp/unpack" geosite.dat geoip.dat || die "解压 geodata 失败"
+        busybox unzip -o -q "$dir/$asset" -d "$dir" geosite.dat geoip.dat || return 1
     fi
-
-    install -d -m 0755 "$XRAY_ASSET"
-    for f in geoip.dat geosite.dat; do
-        if [[ ! -s "$tmp/unpack/$f" ]]; then
-            warn "$asset 里没有 $f，保留现有文件"; failed=1; continue
-        fi
-        sz="$(stat -c%s "$tmp/unpack/$f" 2>/dev/null || echo 0)"
-        if (( sz < 102400 )); then
-            warn "$f 大小异常（${sz} bytes），保留现有文件"; failed=1; continue
-        fi
-        install -m 0644 "$tmp/unpack/$f" "$XRAY_ASSET/$f.new" 2>/dev/null \
-            || { rm -f "$XRAY_ASSET/$f.new"; warn "$f 写入失败（磁盘满？），保留旧文件"; failed=1; continue; }
-        mv -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f" || { warn "$f 替换失败"; failed=1; continue; }
-        ok "$f 已更新（$(( sz / 1024 )) KB，官方版）"
-    done
-    rm -rf "$tmp"
-    trap - RETURN
-    # 与 Loyalsoldier 分支一致：两个 dat 全成功才写 .geodata-source 标记。
-    return "$failed"
-}
+    geodata_publish "$dir" official
+)
 
 # Download a pinned-or-latest Xray release. The .dgst checksum is MANDATORY:
 # unlike most one-key scripts, a missing digest aborts instead of continuing.
@@ -175,8 +175,8 @@ geodata_install_official() {
 # 反过来做（先 install 再 version）就是 47.88.102.45 那次事故：0 MB 余量下
 # install 先把目标 truncate 掉再写到一半，留下 11 MB 的半截文件，而 version
 # 失败被误报成「架构或依赖不匹配」。
-xray_install() {
-    local ver="$1" asset tmp unpack f oldver got
+xray_install() (
+    local ver="$1" asset tmp="" unpack oldver got geo="" src="" candidate
     # 旧二进制不再归档：36 MB 一份，切几次 channel 就是几百 MB，而它能按版本号
     # 重新下载。要留一份保险就显式 XHY_BACKUP_CORE=1（只留最新 1 份）。
     if [[ -x "$XRAY_BIN" && "${XHY_BACKUP_CORE:-0}" == "1" ]]; then
@@ -190,8 +190,7 @@ xray_install() {
     asset="Xray-linux-${XHY_ARCH}.zip"
     tmp="$(mktemp -d)" || die "无法创建临时目录"
     unpack="$tmp/unpack"
-    # shellcheck disable=SC2064
-    trap "rm -rf '$tmp'" RETURN
+    trap '[[ -z "$geo" ]] || rm -rf "$geo"; rm -rf "$tmp"' EXIT
 
     # ① 写前闸门：36 MB 二进制 + geo 数据 + 余量。不足就中止，原文件未动。
     disk_need 90 "安装 Xray $ver" || die "已中止安装：原二进制未改动"
@@ -204,14 +203,14 @@ xray_install() {
         || die "SHA-256 摘要文件下载失败。出于安全考虑拒绝安装未校验的二进制。"
     verify_release_digest "$tmp/$asset.dgst" "$tmp/$asset" || die "校验失败，已中止。"
 
-    mkdir -p "$unpack"
+    mkdir -p "$unpack" || return 1
     if have_cmd unzip; then
         unzip -o -q "$tmp/$asset" -d "$unpack" || die "解压失败"
     else
         busybox unzip -o -q "$tmp/$asset" -d "$unpack" || die "解压失败"
     fi
     [[ -f "$unpack/xray" ]] || die "压缩包中缺少 xray 二进制"
-    chmod 0755 "$unpack/xray"
+    chmod 0755 "$unpack/xray" || return 1
 
     # ② 先在临时目录验证，通过后才碰目标文件
     got="$(XRAY_LOCATION_ASSET="$XRAY_ASSET" "$unpack/xray" version 2>/dev/null \
@@ -223,7 +222,29 @@ xray_install() {
     fi
 
     # ③ 原子替换：同一文件系统用 rename（零拷贝、瞬间），跨盘才退化成 .new + mv
-    install -d -m 0755 "$(dirname "$XRAY_BIN")" "$XRAY_ASSET"
+    install -d -m 0755 "$(dirname "$XRAY_BIN")" "$XRAY_ASSET" || return 1
+    candidate="$XRAY_ASSET"
+    if [[ "${XHY_SKIP_GEODATA:-0}" != 1 ]]; then
+        src="$(geodata_source)"
+        geo="$(mktemp -d "$XRAY_ASSET/.geodata.XXXXXX")" || return 1
+        if [[ "$src" == official ]]; then
+            mv "$unpack/geoip.dat" "$unpack/geosite.dat" "$geo/" || return 1
+            candidate="$geo"
+        elif geodata_stage_loyalsoldier "$geo"; then
+            candidate="$geo"
+        elif [[ -s "$XRAY_ASSET/geoip.dat" && -s "$XRAY_ASSET/geosite.dat" ]]; then
+            warn "Loyalsoldier 下载失败，保留原 geodata 和源标记"
+        else
+            err "Loyalsoldier 下载失败，重试或显式选择官方源"
+            return 1
+        fi
+    fi
+    if [[ -s "$XHY_ETC/config.json" ]]; then
+        XRAY_BIN="$unpack/xray" XRAY_ASSET="$candidate" xray_config_test || return 1
+    fi
+    if [[ "$candidate" == "$geo" ]]; then
+        XRAY_BIN="$unpack/xray" geodata_publish "$geo" "$src" || return 1
+    fi
     if [[ "$(df -P "$unpack" 2>/dev/null | awk 'NR==2 {print $1}')" \
         == "$(df -P "$(dirname "$XRAY_BIN")" 2>/dev/null | awk 'NR==2 {print $1}')" ]]; then
         mv -f "$unpack/xray" "$XRAY_BIN" || die "替换 $XRAY_BIN 失败（磁盘满？）；原文件未动"
@@ -234,47 +255,11 @@ xray_install() {
                  die "原二进制未改动"; }
         mv -f "$XRAY_BIN.new" "$XRAY_BIN" || die "替换 $XRAY_BIN 失败；原文件未动"
     fi
-    sync
-    # v1.14.0：zip 自带的官方 dat 先铺好保底，然后按 geodata_source 决定要不要
-    # 覆盖成 Loyalsoldier 完整版（默认）。官方版是它的真子集，缺 gfw 全系、
-    # google 114 条、geolocation-!cn 3819 条、category-ai-!cn 2 条等 ——
-    # 不是「差一张用不到的广告表」，是 AI / Google 覆盖真的少了。
-    if [[ "${XHY_SKIP_GEODATA:-0}" == "1" ]]; then
-        info "XHY_SKIP_GEODATA=1，保留现有 geodata 不覆盖"
-    else
-        for f in geoip.dat geosite.dat; do
-            [[ -s "$unpack/$f" ]] || continue
-            install -m 0644 "$unpack/$f" "$XRAY_ASSET/$f.new" 2>/dev/null \
-                || { rm -f "$XRAY_ASSET/$f.new"; warn "$f 写入失败（磁盘满？），保留旧文件"; continue; }
-            mv -f "$XRAY_ASSET/$f.new" "$XRAY_ASSET/$f"
-        done
-        local src; src="$(geodata_source)"
-        if [[ "$src" == "loyalsoldier" ]]; then
-            # 覆盖失败不致命：zip 自带的官方 dat 已就位，xray 仍能起来。
-            # 成功才写源标记，避免 update all 里 update_geodata 误判「刚更新过」。
-            if (( $(disk_free_mb /) >= 45 )); then
-                if geodata_install_loyalsoldier; then
-                    printf '%s\n' "$src" > "$XRAY_ASSET/.geodata-source"
-                else
-                    warn "Loyalsoldier 覆盖未完成，源标记未写入（下次 update geodata 会重试）"
-                fi
-            else
-                warn "磁盘余量 $(disk_free_mb /) MB < 45 MB，跳过 Loyalsoldier 覆盖（保留官方版保底）"
-            fi
-        else
-            info "XHY_GEODATA_SOURCE=official，保留 release 自带的官方版"
-            printf '%s\n' "$src" > "$XRAY_ASSET/.geodata-source"
-        fi
-        for f in geoip.dat geosite.dat; do
-            [[ -s "$XRAY_ASSET/$f" ]] || warn "$XRAY_ASSET/$f 缺失，geoip:private 等规则将不生效"
-        done
-    fi
-
     if [[ "v$got" != "$ver" ]]; then
         warn "版本校验: 请求 $ver，实际 v$got（预发布版或镜像差异时可能不同，请确认）"
     fi
     ok "Xray v$got 安装完成，SHA-256 校验通过"
-}
+)
 
 x25519_keypair() {
     local out priv pub

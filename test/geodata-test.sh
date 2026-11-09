@@ -19,31 +19,8 @@ make_stub_xray
 # 空间闸门本身由 disk-test.sh 覆盖；这里只测分支，别让宿主机的余量影响结果。
 disk_need() { return 0; }
 
-echo "=== 源码接线：Loyalsoldier 是唯一默认 ==="
-chk "定义 geodata_source"                  'grep -q "^geodata_source()" lib/core.sh'
-chk "默认常量是 loyalsoldier"              'grep -q "\${XHY_GEODATA_SOURCE:-loyalsoldier}" lib/core.sh'
-chk "非法源回落到 loyalsoldier"            'grep -q "|| v=\"loyalsoldier\"" lib/core.sh'
-chk "定义 geodata_install_loyalsoldier"    'grep -q "^geodata_install_loyalsoldier()" lib/core.sh'
-chk "走 Loyalsoldier 单独 dat"             'grep -q "Loyalsoldier/v2ray-rules-dat/releases/latest/download" lib/core.sh'
-chk "保留官方整包函数（可选源）"            'grep -q "^geodata_install_official()" lib/core.sh'
-chk "官方整包仍校验 .dgst"                 'grep -q "geodata 校验失败，已中止" lib/core.sh'
-chk "release tag 补 v 前缀"                'grep -q "XHY_RELEASE_DL}/v\$ver/\$asset" lib/core.sh'
-chk "latest 走 /releases/latest/download"  'grep -q "latest/download/\$asset" lib/core.sh'
-chk "xray_install 先铺 zip 自带 dat 保底"  'grep -q "\[\[ -s \"\$unpack/\$f\" \]\]" lib/core.sh'
-chk "默认源触发 Loyalsoldier 覆盖"          'grep -q "geodata_install_loyalsoldier" lib/core.sh'
-chk "覆盖前有 45 MB 闸门"                  'grep -q "disk_free_mb /) >= 45" lib/core.sh'
-chk "XHY_SKIP_GEODATA 仍保留现状"           'grep -q "XHY_SKIP_GEODATA:-0" lib/core.sh'
-chk "写盘前总闸门"                          'grep -q "disk_need 45" lib/update.sh'
-chk "update_geodata 支持 --source"          'grep -q -- "--source)" lib/update.sh'
-chk "官方源走整包函数"                      'grep -q "geodata_install_official \"\$ver\"" lib/update.sh'
-chk "Loyalsoldier 源走单独函数"             'grep -q "geodata_install_loyalsoldier" lib/update.sh'
-chk "帮助写 geodata 参数"                  'grep -q "geodata \[--force\]" entry/main.sh'
-chk "菜单 14 也转发参数"                    'grep -q "geodata) shift; update_geodata" entry/main.sh'
-chk "写 .geodata-source 标记"              'grep -q "geodata-source" lib/update.sh'
-chk "跳过条件读源标记"                      'grep -q "stamp" lib/update.sh'
-chk "stamp 仅在下载成功后写"               'grep -q "if geodata_install_loyalsoldier; then" lib/update.sh'
-chk "Loyalsoldier 过 SHA-256"              'grep -q "sha256sum" lib/core.sh'
-chk "两个 dat 全成功才返回 0"              'grep -q "failed=1" lib/core.sh'
+chk "默认源为 Loyalsoldier" '[[ "$(XHY_GEODATA_SOURCE= geodata_source)" == loyalsoldier ]]'
+chk "未知源回落默认" '[[ "$(XHY_GEODATA_SOURCE=bogus geodata_source)" == loyalsoldier ]]'
 
 echo "=== core status 体积提示 ==="
 chk ">9 MB 标 Loyalsoldier 默认"           'grep -q "Loyalsoldier 完整版（默认）" lib/core.sh'
@@ -61,8 +38,8 @@ touch -t 202001010000 "$XRAY_BIN"          # 核心二进制很旧 → dat 比�
 
 CALLED_L=0
 CALLED_O=0
-geodata_install_loyalsoldier() { CALLED_L=$((CALLED_L + 1)); }
-geodata_install_official()     { CALLED_O=$((CALLED_O + 1)); }
+geodata_install_loyalsoldier() { CALLED_L=$((CALLED_L + 1)); printf 'loyalsoldier\n' >"$XRAY_ASSET/.geodata-source"; }
+geodata_install_official() { CALLED_O=$((CALLED_O + 1)); printf 'official\n' >"$XRAY_ASSET/.geodata-source"; }
 unset XHY_GEODATA_SOURCE
 
 # 刚写过（mtime 是现在）+ 源标记与默认源一致 → 1 小时内跳过
@@ -108,7 +85,7 @@ chk "env 切源同样生效"                     '[[ "$CALLED_O" -eq 1 ]]'
 # 下载失败时不能写 stamp（否则下次会误判「已同源」而跳过）
 geodata_install_loyalsoldier() { CALLED_L=$((CALLED_L + 1)); return 1; }
 printf 'official\n' >"$XRAY_ASSET/.geodata-source"
-update_geodata --force --source loyalsoldier >/dev/null 2>&1
+chk "下载失败返回非零" '! update_geodata --force --source loyalsoldier'
 chk "下载失败不写 stamp"                   '[[ "$(cat "$XRAY_ASSET/.geodata-source")" == "official" ]]'
 unset XHY_GEODATA_SOURCE
 

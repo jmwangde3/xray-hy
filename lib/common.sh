@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.14.5}"
+XHY_VERSION="${XHY_VERSION:-1.14.6}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -118,10 +118,10 @@ confirm() {
 }
 
 init_dirs() {
-    mkdir -p "$XHY_ETC" "$XHY_CONFDIR" "$XHY_LOGDIR" "$XHY_BACKUP" "$XHY_NODES" "$XHY_SNAPSHOTS" "$XHY_CERTS"
-    chmod 0755 "$XHY_ETC" "$XHY_CONFDIR" "$XHY_LOGDIR" "$XHY_BACKUP" 2>/dev/null || true
-    chmod 0700 "$XHY_NODES" "$XHY_SNAPSHOTS" "$XHY_CERTS" 2>/dev/null || true
-    [[ -f "$XHY_STATE" ]] || : >"$XHY_STATE"
+    mkdir -p "$XHY_ETC" "$XHY_CONFDIR" "$XHY_LOGDIR" "$XHY_BACKUP" "$XHY_NODES" "$XHY_SNAPSHOTS" "$XHY_CERTS" || return 1
+    chmod 0755 "$XHY_ETC" "$XHY_LOGDIR" 2>/dev/null || true
+    chmod 0700 "$XHY_NODES" "$XHY_SNAPSHOTS" "$XHY_CERTS" "$XHY_CONFDIR" "$XHY_BACKUP" 2>/dev/null || true
+    [[ -f "$XHY_STATE" ]] || : >"$XHY_STATE" || return 1
     chmod 0600 "$XHY_STATE" 2>/dev/null || true
 }
 
@@ -165,16 +165,60 @@ atomic_write() {
     local dest="$1" mode="${2:-0644}" tmp
     tmp="$(mktemp "${dest}.tmp.XXXXXX")" || return 1
     if ! cat >"$tmp"; then rm -f "$tmp" || true; return 1; fi
-    if ! install -m "$mode" "$tmp" "$dest"; then rm -f "$tmp" || true; return 1; fi
-    # The write already succeeded; a failing cleanup must not be reported as a
-    # failed write (that produced misleading "配置生成失败" aborts).
-    rm -f "$tmp" || true
+    if ! chmod "$mode" "$tmp" || ! mv -f "$tmp" "$dest"; then
+        rm -f "$tmp" || true
+        return 1
+    fi
     return 0
 }
 
 # 根分区剩余 MB。df -Pm 是 POSIX 格式，BusyBox 也支持；-m 直接给 MB，
 # 免得自己拿 1K 块换算。取不到时返回 0（调用方按"没空间"处理更安全）。
 # 11-07 事故当晚手工装的清理钩子。路径做成变量，测试才能指到临时目录。
+# Preserve only managed configuration, excluding locks and historical backups.
+# The subshell exit trap also handles die/exit in a callback.
+config_transaction() (
+    if [[ "${XHY_TX_ACTIVE:-0}" == 1 ]]; then "$@"; return $?; fi
+    need_root
+    init_dirs || return 1
+    local tx f rc
+    local -a files=(confs nodes certs state.env config.json tunnel.token target.env scan-cache.tsv)
+    tx="$(mktemp -d "$XHY_ETC/.transaction.XXXXXX")" || return 1
+    trap 'rm -rf "$tx"' EXIT
+    for f in "${files[@]}"; do
+        [[ -e "$XHY_ETC/$f" ]] || continue
+        cp -a "$XHY_ETC/$f" "$tx/" || return 1
+    done
+    local XHY_TX_ACTIVE=1 XHY_TX_RESTARTED=0
+    trap '
+        rc=$?
+        if (( rc != 0 )); then
+            failed=0
+            for f in "${files[@]}"; do
+                # Leave an unchanged config file in place, including its inode.
+                if [[ "$f" == config.json && -f "$tx/$f" ]] &&
+                    cmp -s "$tx/$f" "$XHY_ETC/$f"; then continue; fi
+                rm -rf "$XHY_ETC/$f" || { failed=1; continue; }
+                if [[ -e "$tx/$f" ]]; then
+                    mv -f "$tx/$f" "$XHY_ETC/" || failed=1
+                fi
+            done
+            if (( ! failed && XHY_TX_RESTARTED )) && [[ -s "$XHY_ETC/config.json" ]]; then
+                svc_restart "$SVC_XRAY" || warn "原配置已恢复，但 Xray 重启失败"
+            fi
+            if (( failed )); then
+                err "自动回滚未完成，备份保留在 $tx"
+                exit "$rc"
+            fi
+        fi
+        rm -rf "$tx"
+        exit "$rc"
+    ' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    "$@"
+)
+
 legacy_prune_hook() {
     printf '%s/xhy-backup-prune' "${XHY_PERIODIC_DIR:-/etc/periodic/daily}"
 }
@@ -242,7 +286,7 @@ backup_file() {
     fi
     mkdir -p "$XHY_BACKUP"
     base="$(basename "$f")"
-    cp -a "$f" "$XHY_BACKUP/$base.$(date +%Y%m%d%H%M%S).bak"
+    cp -a "$f" "$XHY_BACKUP/$base.$(date +%Y%m%d%H%M%S).bak" || return 1
     # 写完就裁：同名只留最新 N 份。备份该在写入时收敛，而不是等 xhy clean 收拾。
     while IFS= read -r old; do
         n=$(( n + 1 ))
@@ -260,26 +304,19 @@ state_get() {
 }
 
 state_set() {
-    local key="$1" value="$2" tmp
-    init_dirs
-    tmp="$(mktemp)"
-    if [[ -f "$XHY_STATE" ]]; then
-        grep -v "^${key}=" "$XHY_STATE" >"$tmp" || true
-    fi
-    printf '%s=%s\n' "$key" "$value" >>"$tmp"
-    install -m 0600 "$tmp" "$XHY_STATE"
-    rm -f "$tmp" || true
-    return 0
+    local key="$1" value="$2"
+    init_dirs || return 1
+    {
+        grep -v "^${key}=" "$XHY_STATE" || [[ $? == 1 ]] || return 1
+        printf '%s=%s\n' "$key" "$value"
+    } | atomic_write "$XHY_STATE" 0600
 }
 
 state_del() {
-    local key="$1" tmp
+    local key="$1"
     [[ -f "$XHY_STATE" ]] || return 0
-    tmp="$(mktemp)"
-    grep -v "^${key}=" "$XHY_STATE" >"$tmp" || true
-    install -m 0600 "$tmp" "$XHY_STATE"
-    rm -f "$tmp" || true
-    return 0
+    { grep -v "^${key}=" "$XHY_STATE" || [[ $? == 1 ]]; } |
+        atomic_write "$XHY_STATE" 0600
 }
 
 rand_hex() {
