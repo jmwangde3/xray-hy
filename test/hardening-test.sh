@@ -140,6 +140,12 @@ PROTO=tcp
 PORT=18443
 MODE=vless
 EOF
+# v1.14.3：落地机 relay 放行规则由防火墙钩子补回（链重建会清掉它）
+cat >"$XHY_NODES/relay.env" <<'EOF'
+RELAY_ROLE=land
+RELAY_PORT=14430
+RELAY_ALLOW=203.0.113.30
+EOF
 
 echo "===== 阈值常量 ====="
 chk "爆发窗口 30 次/60s"   '[ "$SSH_BURST_HITS" = 30 ] && [ "$SSH_BURST_WINDOW" = 60 ]'
@@ -164,6 +170,9 @@ chk "节点 TCP 8443 放行"       'grep -qx -- "-p tcp --dport 8443 -j ACCEPT" 
 chk "节点 UDP 9443 放行"       'grep -qx -- "-p udp --dport 9443 -j ACCEPT" "$IPT_STATE/XHY-IN"'
 chk "隧道节点端口未放行"       '! grep -q 18443 "$IPT_STATE/XHY-IN"'
 chk "safe 模式链尾是 RETURN"   '[ "$(chain_lines | tail -1)" = "-j RETURN" ]'
+chk "链重建后 relay 放行被补回"  'chain_lines | grep -q "xhy-relay-14430"'
+chk "relay 放行源是 entry IP"    'grep -q -- "-s 203.0.113.30" "$IPT_STATE/XHY-IN"'
+chk "relay 规则在 RETURN 之前"   'r="$(line_of xhy-relay-14430)"; t="$(line_of "-j RETURN")"; [ -n "$r" ] && [ -n "$t" ] && [ "$r" -lt "$t" ]'
 chk "safe 模式无 tcp DROP"     '! grep -q -- "-p tcp -j DROP" "$IPT_STATE/XHY-IN"'
 chk "INPUT 挂了 XHY-IN"        'grep -qx -- "-j XHY-IN" "$IPT_STATE/INPUT"'
 
@@ -176,6 +185,16 @@ chk "strict 模式有 tcp DROP"   'grep -qx -- "-p tcp -j DROP" "$IPT_STATE/XHY-
 chk "strict 模式有 udp DROP"   'grep -qx -- "-p udp -j DROP" "$IPT_STATE/XHY-IN"'
 chk "strict 模式链尾仍是 RETURN" '[ "$(chain_lines | tail -1)" = "-j RETURN" ]'
 chk "strict 下 SSH ACCEPT 在 DROP 之前" 'a="$(line_of "--dport $XHY_SSH_PORT -j ACCEPT")"; d="$(line_of "-p tcp -j DROP")"; [ -n "$a" ] && [ -n "$d" ] && [ "$a" -lt "$d" ]'
+chk "strict 下 relay 规则在 DROP 之前" 'r="$(line_of xhy-relay-14430)"; d="$(line_of "-p tcp -j DROP")"; [ -n "$r" ] && [ -n "$d" ] && [ "$r" -lt "$d" ]'
+
+echo ""
+echo "===== 防火墙钩子：未配 relay 时不加规则 ====="
+rm -f "$XHY_NODES/relay.env"
+chain_reset
+: >"$IPT_STATE/INPUT"
+_apply_family iptables safe on
+chk "无 relay.env → 无放行规则"  '! chain_lines | grep -q "xhy-relay"'
+chk "无 relay.env → 链仍完整"    '[ "$(chain_lines | tail -1)" = "-j RETURN" ]'
 
 echo ""
 echo "===== 守卫关闭：不写 recent 规则 ====="

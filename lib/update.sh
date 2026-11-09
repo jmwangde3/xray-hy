@@ -10,7 +10,8 @@
 #   --allow-major  跨主版本（v1 -> v2）时解除 --yes 的限制，需与 --yes 同用
 
 # 「本次升级是否动了 relay 渲染逻辑」的指纹。
-# 取脚本里所有 relay_* / extra_* 函数的签名与函数体（去注释/空行/缩进），
+# 取脚本里所有 relay_* / extra_* 函数（外加防火墙钩子 firewall_extra_rules）
+# 的签名与函数体（去注释/空行/缩进），
 # 再拼上 XHY_RELAY_SCHEMA，最后算 SHA-256。用「下一个顶层函数签名」当边界，
 # 不依赖行首 `}`（heredoc 里的 JSON 大括号会误判），单行函数也因签名行
 # 全文入哈希而不会被漏掉。命名故意不以 relay_ 开头，避免把自己算进去。
@@ -23,7 +24,7 @@ _update_relay_fingerprint() {
         awk '
             /^[A-Za-z_][A-Za-z0-9_]*\(\)/ {
                 name = $0; sub(/\(.*/, "", name)
-                infn = (name ~ /^relay_/ || name ~ /^extra_/)
+                infn = (name ~ /^relay_/ || name ~ /^extra_/ || name == "firewall_extra_rules")
                 if (infn) { line = $0; sub(/[[:space:]]+$/, "", line); print "@" line }
                 next
             }

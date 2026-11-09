@@ -161,6 +161,13 @@ bbr_status() {
     printf '脚本状态 : %s\n' "$(state_get BBR_STATUS 'unset')"
 }
 
+# 由 lib/relay.sh 覆盖：_apply_family 每次都是「清空链 → 重写」，而 relay 的
+# 放行规则是 relay_fw_add 单独 -I 插进去的、不在本文件的规则集里。没有这个钩子，
+# `xhy update config` / `firewall apply` / 开机重放都会把落地机那条
+# ACCEPT tcp dpt:14430 src <entry> 静默清掉（v1.14.2 实机坐实）。
+# 默认空实现，relay.sh 加载后覆盖；参数 <iptables|ip6tables> <链名>。
+firewall_extra_rules() { return 0; }
+
 # Collect public TCP ports from the node registry. Tunnel nodes bind to
 # 127.0.0.1 (PUBLIC=0) and are intentionally not exposed.
 firewall_node_ports() {
@@ -253,6 +260,9 @@ _apply_family() {
         "$ipt" -w -A "$FW_CHAIN" -p udp -j DROP
     fi
     "$ipt" -w -A "$FW_CHAIN" -j RETURN
+    # 放在 RETURN 之后：relay_fw_add 的 -I 需要能先找到 terminator，
+    # 才能把放行规则插到 DROP/RETURN 之前（v1.13.3 的位置修复）。
+    firewall_extra_rules "$ipt" "$FW_CHAIN" || warn "附加防火墙规则写入失败（$ipt）"
     "$ipt" -w -I INPUT 1 -j "$FW_CHAIN" || return 1
     return 0
 }

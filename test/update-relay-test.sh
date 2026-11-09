@@ -105,6 +105,15 @@ chk "XHY_RELAY_SCHEMA 改动 → 指纹变化"       '[[ "$FP_A" != "$FP_D" ]]'
 chk "缺失文件 → 空指纹"                      '[[ -z "$(_update_relay_fingerprint "$TEST_TMP/nope.sh")" ]]'
 printf 'XHY_RELAY_SCHEMA="1"\nrelay_extra() { printf "new\n"; }\n' >"$TEST_TMP/e.sh"
 chk "新增 relay 函数 → 指纹变化"             '[[ "$FP_A" != "$(_update_relay_fingerprint "$TEST_TMP/e.sh")" ]]'
+mk_script "$TEST_TMP/f.sh" 1 "printf 'one\n'"
+cat >>"$TEST_TMP/f.sh" <<'EOF'
+firewall_extra_rules() {
+    echo hook
+}
+EOF
+cp "$TEST_TMP/f.sh" "$TEST_TMP/g.sh"
+sed -i 's|echo hook|echo HOOK2|' "$TEST_TMP/g.sh"
+chk "防火墙钩子函数体改动 → 指纹变化"       '[[ "$(_update_relay_fingerprint "$TEST_TMP/f.sh")" != "$(_update_relay_fingerprint "$TEST_TMP/g.sh")" ]]'
 chk "指纹函数自身不以 relay_ 开头（防自指）" 'grep -q "^_update_relay_fingerprint()" lib/update.sh'
 
 echo ""
@@ -128,5 +137,8 @@ chk "prelude 定义 XHY_RELAY_SCHEMA"          'grep -q "^XHY_RELAY_SCHEMA=" ent
 chk "替换前调用判定函数"                     'grep -Fq "update_script_relay_reapply_needed \"\$old_src\" \"\$tmp\"" lib/update.sh'
 chk "替换后执行 canonical relay reapply"     'grep -Fq "\"\$canonical\" relay reapply" lib/update.sh'
 chk "失败只 warn 不让升级失败"               'grep -q "自动 relay reapply 失败" lib/update.sh'
+chk "hardening 有防火墙空钩子"               'grep -q "^firewall_extra_rules() { return 0; }" lib/hardening.sh'
+chk "_apply_family 调用钩子"                 '[[ "$(grep -Fc "firewall_extra_rules" lib/hardening.sh)" -eq 2 ]]'
+chk "relay.sh 覆盖钩子"                      'grep -q "^firewall_extra_rules()" lib/relay.sh'
 
 summary

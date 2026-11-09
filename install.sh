@@ -144,15 +144,17 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.14.2"
-XHY_BUILD="96c871e907f9"
+XHY_VERSION="1.14.3"
+XHY_BUILD="fb74b9d92f18"
 
 # relay 渲染契约版本。改了 lib/relay.sh / nodes.sh 的 config 生成逻辑、
 # 或新增「函数体没变但 config.json 必须重建」的字段时，手工 +1。
+# 1 = v1.14.2 引入指纹；2 = v1.14.3 新增 firewall_extra_rules（链重建后补回
+# 落地机放行规则），该函数不以 relay_ 开头，靠 bump 保证旧机升级自动 reapply。
 # update script 会把它连同 relay_* / extra_* 函数体的指纹一起比对，
 # 变了且本机配了 relay 就自动 `relay reapply`，不用人记升级步骤。
 # 纯改文案 / 注释 / 其它模块不要动它（会让每次升级都无谓重载 Xray）。
-XHY_RELAY_SCHEMA="1"
+XHY_RELAY_SCHEMA="2"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -170,7 +172,7 @@ fi
 # ===================== lib/common.sh =====================
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.14.2}"
+XHY_VERSION="${XHY_VERSION:-1.14.3}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -2214,6 +2216,13 @@ bbr_status() {
     printf '脚本状态 : %s\n' "$(state_get BBR_STATUS 'unset')"
 }
 
+# 由 lib/relay.sh 覆盖：_apply_family 每次都是「清空链 → 重写」，而 relay 的
+# 放行规则是 relay_fw_add 单独 -I 插进去的、不在本文件的规则集里。没有这个钩子，
+# `xhy update config` / `firewall apply` / 开机重放都会把落地机那条
+# ACCEPT tcp dpt:14430 src <entry> 静默清掉（v1.14.2 实机坐实）。
+# 默认空实现，relay.sh 加载后覆盖；参数 <iptables|ip6tables> <链名>。
+firewall_extra_rules() { return 0; }
+
 # Collect public TCP ports from the node registry. Tunnel nodes bind to
 # 127.0.0.1 (PUBLIC=0) and are intentionally not exposed.
 firewall_node_ports() {
@@ -2306,6 +2315,9 @@ _apply_family() {
         "$ipt" -w -A "$FW_CHAIN" -p udp -j DROP
     fi
     "$ipt" -w -A "$FW_CHAIN" -j RETURN
+    # 放在 RETURN 之后：relay_fw_add 的 -I 需要能先找到 terminator，
+    # 才能把放行规则插到 DROP/RETURN 之前（v1.13.3 的位置修复）。
+    firewall_extra_rules "$ipt" "$FW_CHAIN" || warn "附加防火墙规则写入失败（$ipt）"
     "$ipt" -w -I INPUT 1 -j "$FW_CHAIN" || return 1
     return 0
 }
@@ -5319,7 +5331,8 @@ cmd_clean() {
 #   --allow-major  跨主版本（v1 -> v2）时解除 --yes 的限制，需与 --yes 同用
 
 # 「本次升级是否动了 relay 渲染逻辑」的指纹。
-# 取脚本里所有 relay_* / extra_* 函数的签名与函数体（去注释/空行/缩进），
+# 取脚本里所有 relay_* / extra_* 函数（外加防火墙钩子 firewall_extra_rules）
+# 的签名与函数体（去注释/空行/缩进），
 # 再拼上 XHY_RELAY_SCHEMA，最后算 SHA-256。用「下一个顶层函数签名」当边界，
 # 不依赖行首 `}`（heredoc 里的 JSON 大括号会误判），单行函数也因签名行
 # 全文入哈希而不会被漏掉。命名故意不以 relay_ 开头，避免把自己算进去。
@@ -5332,7 +5345,7 @@ _update_relay_fingerprint() {
         awk '
             /^[A-Za-z_][A-Za-z0-9_]*\(\)/ {
                 name = $0; sub(/\(.*/, "", name)
-                infn = (name ~ /^relay_/ || name ~ /^extra_/)
+                infn = (name ~ /^relay_/ || name ~ /^extra_/ || name == "firewall_extra_rules")
                 if (infn) { line = $0; sub(/[[:space:]]+$/, "", line); print "@" line }
                 next
             }
@@ -6456,6 +6469,26 @@ relay_fw_present() {
     if [[ -n "$own" && -n "$term" ]] && (( own >= term )); then
         return 1
     fi
+    return 0
+}
+
+# 覆盖 hardening.sh 的空钩子：防火墙链重建后补回落地机放行规则。
+# 只认 land 角色（entry 侧不接收入站中继），并且按 family 过滤 ——
+# IPv4 的 allow 只在 iptables 那一轮加，IPv6 同理，避免重复 -C 命中。
+firewall_extra_rules() {
+    local t="${1:-iptables}" env="$XHY_NODES/relay.env" role port allow
+    [[ -r "$env" ]] || return 0
+    role="$(grep -m1 '^RELAY_ROLE=' "$env" 2>/dev/null | cut -d= -f2- || true)"
+    [[ "$role" == "land" ]] || return 0
+    port="$(grep -m1 '^RELAY_PORT=' "$env" 2>/dev/null | cut -d= -f2- || true)"
+    allow="$(grep -m1 '^RELAY_ALLOW=' "$env" 2>/dev/null | cut -d= -f2- || true)"
+    [[ -n "$port" && -n "$allow" ]] || return 0
+    if [[ "$allow" == *:* ]]; then
+        [[ "$t" == "ip6tables" ]] || return 0
+    else
+        [[ "$t" == "iptables" ]] || return 0
+    fi
+    relay_fw_add "$port" "$allow" >/dev/null 2>&1 || true
     return 0
 }
 

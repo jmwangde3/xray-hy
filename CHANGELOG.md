@@ -2,6 +2,12 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.14.3 — 2026-11-09
+
+- fix(firewall): 链重建不再静默清掉落地机 relay 放行规则 —— v1.14.2 修好 node_rebuild_all 后，xhy update config 第一次真正跑通，反而暴露 _apply_family 每次「清空链 → 重写」会把 relay_fw_add 单独插入的 ACCEPT tcp dpt:14430 src <entry> 清掉（硅谷实机：update config 后 relay status 报「防火墙规则缺失」、iptables 链里无该规则）。新增 firewall_extra_rules 空钩子（hardening.sh），在 _apply_family 写完 RETURN 后调用；relay.sh 覆盖它，仅对 land 角色按 family 补回规则。开机重放 / firewall apply / update config 全部覆盖
+- feat(update): XHY_RELAY_SCHEMA 1 → 2（relay 契约变更），指纹白名单补 firewall_extra_rules（该函数不以 relay_ 开头，否则新增它不会被指纹发现）。v1.14.2 → v1.14.3 因此成为首次真正触发「自动 relay reapply」的升级：旧脚本已内置判定逻辑，新脚本 relay 函数集有变 + schema 不同 → 东京/硅谷自动 reapply，新加坡无 relay.env 不触发
+- test: hardening-test 42→48（链重建后 relay 放行被补回 / 源 IP 正确 / safe 与 strict 下均在 DROP/RETURN 之前 / 无 relay.env 时不加规则）；update-relay-test 38→42（钩子源码接线 + 钩子函数体改动能被指纹发现）。全套 19 文件 844 项断言全绿
+
 ## v1.14.2 — 2026-11-09
 
 - fix(nodes): relay.env 不再被当成节点 —— 新增公共 node_env_files()（文件名 <mode>_<port>.env + 必须有 MODE= 行），替换 nodes/export/hardening/update/links 共 11 处裸扫 *.env 的遍历点。旧版 node_list 出现一行 MODE/PORT/UUID 全空的幽灵记录、node_count 把 relay.env 算成第 2 个节点（菜单显示「节点 2 个」）、node_pick 把它列成可选节点，而 xhy update config（node_rebuild_all）拿 relay.env 去 write_fragment 直接报「未知节点类型: 」rc=1。东京/硅谷实机复现，新加坡无 relay.env 故正常

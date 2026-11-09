@@ -653,6 +653,26 @@ relay_fw_present() {
     return 0
 }
 
+# 覆盖 hardening.sh 的空钩子：防火墙链重建后补回落地机放行规则。
+# 只认 land 角色（entry 侧不接收入站中继），并且按 family 过滤 ——
+# IPv4 的 allow 只在 iptables 那一轮加，IPv6 同理，避免重复 -C 命中。
+firewall_extra_rules() {
+    local t="${1:-iptables}" env="$XHY_NODES/relay.env" role port allow
+    [[ -r "$env" ]] || return 0
+    role="$(grep -m1 '^RELAY_ROLE=' "$env" 2>/dev/null | cut -d= -f2- || true)"
+    [[ "$role" == "land" ]] || return 0
+    port="$(grep -m1 '^RELAY_PORT=' "$env" 2>/dev/null | cut -d= -f2- || true)"
+    allow="$(grep -m1 '^RELAY_ALLOW=' "$env" 2>/dev/null | cut -d= -f2- || true)"
+    [[ -n "$port" && -n "$allow" ]] || return 0
+    if [[ "$allow" == *:* ]]; then
+        [[ "$t" == "ip6tables" ]] || return 0
+    else
+        [[ "$t" == "iptables" ]] || return 0
+    fi
+    relay_fw_add "$port" "$allow" >/dev/null 2>&1 || true
+    return 0
+}
+
 # ---------------------------------------------------------------------------
 # TLS（可选）：自签证书 + 证书链 pin
 #
