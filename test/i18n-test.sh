@@ -78,8 +78,8 @@ chk "XHY_ASCII=1 -> en"        '( XHY_ASCII=1 xhy_lang_init; [[ "$XHY_LANG_EFFEC
 chk "LANG=C -> en"             '( XHY_LANG=auto LANG=C LC_ALL=C TERM=xterm xhy_lang_init; [[ "$XHY_LANG_EFFECTIVE" == en ]] )'
 chk "TERM=linux 非中文 -> en"  '( XHY_LANG=auto LANG=en_US.UTF-8 TERM=linux xhy_lang_init; [[ "$XHY_LANG_EFFECTIVE" == en ]] )'
 chk "state 里 en -> en"        'state_set XHY_LANG en; ( XHY_LANG=auto xhy_lang_init; [[ "$XHY_LANG_EFFECTIVE" == en ]] )'
-chk "UTF-8 xterm 保持中文"     'state_del XHY_LANG; ( XHY_LANG=auto LANG=zh_CN.UTF-8 TERM=xterm-256color xhy_lang_init; [[ "$XHY_LANG_EFFECTIVE" == zh ]] )'
-chk "TERM=dumb 不是控制台，保持中文" 'state_del XHY_LANG; ( XHY_LANG=auto LANG=zh_CN.UTF-8 TERM=dumb xhy_lang_init; [[ "$XHY_LANG_EFFECTIVE" == zh ]] )'
+chk "UTF-8 xterm 保持中文"     'state_del XHY_LANG; ( XHY_LANG=auto LANG=C.UTF-8 LC_ALL= LC_CTYPE= TERM=xterm-256color xhy_lang_init; [[ "$XHY_LANG_EFFECTIVE" == zh ]] )'
+chk "TERM=dumb 不是控制台，保持中文" 'state_del XHY_LANG; ( XHY_LANG=auto LANG=C.UTF-8 LC_ALL= LC_CTYPE= TERM=dumb xhy_lang_init; [[ "$XHY_LANG_EFFECTIVE" == zh ]] )'
 chk "空 LANG（Alpine 默认）保持中文" 'state_del XHY_LANG; ( XHY_LANG=auto LANG= LC_ALL= LC_CTYPE= TERM=xterm-256color xhy_lang_init; [[ "$XHY_LANG_EFFECTIVE" == zh ]] )'
 chk "空 LANG + 控制台 TERM -> en"   'state_del XHY_LANG; ( XHY_LANG=auto LANG= LC_ALL= LC_CTYPE= TERM=linux xhy_lang_init; [[ "$XHY_LANG_EFFECTIVE" == en ]] )'
 

@@ -137,11 +137,13 @@ policy_json() {
 snapshot_state() {
     local snap f n=0
     [[ -d "$XHY_NODES" ]] || return 0
-    snap="$XHY_SNAPSHOTS/state.$(date +%Y%m%d%H%M%S).tar.gz"
+    snap="$(mktemp "$XHY_SNAPSHOTS/state.$(date +%Y%m%d%H%M%S).XXXXXX")" ||
+        { warn "无法创建状态快照临时文件"; return 0; }
     # `cd` instead of `tar -C`: a path containing ":" is read as host:path by
     # GNU tar, which silently produced empty snapshots in mixed environments.
-    if ( cd "$XHY_ETC" && tar czf "$snap" confs nodes certs state.env ) 2>/dev/null; then
-        chmod 600 "$snap" 2>/dev/null || true
+    if ( cd "$XHY_ETC" && tar czf "$snap" confs nodes certs state.env ) 2>/dev/null &&
+       mv -f "$snap" "$snap.tar.gz"; then
+        chmod 600 "$snap.tar.gz" 2>/dev/null || true
     else
         rm -f "$snap"
         warn "状态快照创建失败（$XHY_ETC）；xhy rollback 将没有可用快照"
