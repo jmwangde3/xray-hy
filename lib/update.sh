@@ -8,6 +8,52 @@
 # 非交互门控（借鉴 idleleo 的发布序列策略）：
 #   --yes          自动确认；仅限同一主版本序列内（v1.x -> v1.y）
 #   --allow-major  跨主版本（v1 -> v2）时解除 --yes 的限制，需与 --yes 同用
+
+# 「本次升级是否动了 relay 渲染逻辑」的指纹。
+# 取脚本里所有 relay_* / extra_* 函数的签名与函数体（去注释/空行/缩进），
+# 再拼上 XHY_RELAY_SCHEMA，最后算 SHA-256。用「下一个顶层函数签名」当边界，
+# 不依赖行首 `}`（heredoc 里的 JSON 大括号会误判），单行函数也因签名行
+# 全文入哈希而不会被漏掉。命名故意不以 relay_ 开头，避免把自己算进去。
+_update_relay_fingerprint() {
+    local f="${1:-}" schema
+    [[ -n "$f" && -r "$f" ]] || { printf ''; return 0; }
+    schema="$(sed -n 's/^XHY_RELAY_SCHEMA="\(.*\)"$/\1/p' "$f" 2>/dev/null | head -1 || true)"
+    {
+        printf 'schema=%s\n' "${schema:-0}"
+        awk '
+            /^[A-Za-z_][A-Za-z0-9_]*\(\)/ {
+                name = $0; sub(/\(.*/, "", name)
+                infn = (name ~ /^relay_/ || name ~ /^extra_/)
+                if (infn) { line = $0; sub(/[[:space:]]+$/, "", line); print "@" line }
+                next
+            }
+            infn {
+                line = $0
+                sub(/^[[:space:]]+/, "", line)
+                sub(/[[:space:]]+$/, "", line)
+                if (line == "" || substr(line, 1, 1) == "#") next
+                print line
+            }
+        ' "$f" 2>/dev/null
+    } | sha256sum 2>/dev/null | awk '{print $1}'
+}
+
+# 三个条件全满足才需要自动 reapply：
+#   ① 本机确实配了 relay（relay.env 存在且角色是 entry/land）
+#   ② 新旧脚本都能算出指纹（文件缺失/损坏时宁可不碰）
+#   ③ 指纹不同（relay 函数体或 XHY_RELAY_SCHEMA 有变）
+# 抽成独立函数是为了能离线单测「涉及 / 不涉及 / 未配置」三个分支。
+update_script_relay_reapply_needed() {
+    local old_file="$1" new_file="$2" relay_env="${3:-${XHY_NODES:-}/relay.env}"
+    [[ -n "$relay_env" && -s "$relay_env" ]] || return 1
+    grep -qE '^RELAY_ROLE=(entry|land)$' "$relay_env" 2>/dev/null || return 1
+    local a b
+    a="$(_update_relay_fingerprint "$old_file")"
+    b="$(_update_relay_fingerprint "$new_file")"
+    [[ -n "$a" && -n "$b" && "$a" != "$b" ]] || return 1
+    return 0
+}
+
 update_script() {
     local autoyes=0 allowmajor=0 a
     for a in "$@"; do
@@ -85,6 +131,16 @@ update_script() {
             return 0
         fi
     fi
+    # v1.14.2：涉及 relay 的升级自动 reapply，不涉及就不重载 Xray。
+    # 指纹必须在替换「之前」取 —— 替换后 canonical 已经是新文件了。
+    # old 优先用规范路径；仓库模式下 $XHY_SELF 是 42 行 dev 入口（无 relay
+    # 函数，指纹为空），此时 canonical 若存在仍取 canonical。
+    local old_src need_relay_reapply=0
+    old_src="$XHY_SELF"
+    [[ -f "$canonical" && ! -L "$canonical" ]] && old_src="$canonical"
+    if update_script_relay_reapply_needed "$old_src" "$tmp"; then
+        need_relay_reapply=1
+    fi
     reconcile_bin
     # 只备份真正的单文件本体；仓库模式下的 $REPO/xhy 是开发入口，不进备份目录
     if (( ! repo_mode )) && [[ -f "$XHY_SELF" && ! -L "$XHY_SELF" ]]; then
@@ -99,6 +155,16 @@ update_script() {
     ok "已更新到 build $newbuild（$canonical）"
     if (( layout_bad )); then
         ok "入口布局已纠正：$canonical 现在是单文件实体（非软链）"
+    fi
+    if (( need_relay_reapply )); then
+        # 必须用新脚本的子进程跑：当前进程里的 relay_* 函数还是旧版本，
+        # 用旧逻辑重建等于没升级。
+        info "检测到 relay 渲染代码有变且本机已配置 relay，自动重建 config.json…"
+        if "$canonical" relay reapply; then
+            ok "relay 配置已按新版本重建（无需手动 reapply）"
+        else
+            warn "自动 relay reapply 失败，请手动执行：xhy relay reapply"
+        fi
     fi
     info "当前进程仍是旧版，下次执行 xhy 生效"
     return 0
@@ -291,7 +357,7 @@ self_check() {
     # v1.4.3 起 TFO 跟随伪装站（--tfo auto|on|off）；显示现网节点的实际判定，
     # 不再摆一个永远为 0 的「命中数」，也不再写「固定、无开关」那种过时文案。
     local _f _tfo_on=0 _tfo_off=0
-    for _f in "$XHY_NODES"/*.env; do
+    for _f in $(node_env_files); do
         [[ -f "$_f" ]] || continue
         if grep -q '^TFO=1$' "$_f" 2>/dev/null; then
             _tfo_on=$(( _tfo_on + 1 ))

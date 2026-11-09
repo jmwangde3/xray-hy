@@ -14,14 +14,8 @@ _link_host() {
 # 节点 env 一定有 MODE= 行；同目录的 relay.env 是中继状态文件（无 MODE），
 # 不是节点。旧版 link_all 把 *.env 全遍历，遇到 relay.env 会让 link_uri 报
 # 「未知模式」并把 xhy link --qr 整个退出码带成 1（落地机必现）。
-link_node_files() {
-    local f
-    for f in "$XHY_NODES"/*.env; do
-        [[ -f "$f" ]] || continue
-        grep -q '^MODE=' "$f" 2>/dev/null || continue
-        printf '%s\n' "$f"
-    done
-}
+# v1.14.2 起统一走 nodes.sh 的 node_env_files()，避免两套过滤逻辑漂移。
+link_node_files() { node_env_files; }
 
 link_uri() {
     local envf="$1" host_ov="${2:-}" host="" q="" name=""

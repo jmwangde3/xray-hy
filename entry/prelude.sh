@@ -144,8 +144,15 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.14.1"
+XHY_VERSION="1.14.2"
 XHY_BUILD="__XHY_BUILD__"
+
+# relay 渲染契约版本。改了 lib/relay.sh / nodes.sh 的 config 生成逻辑、
+# 或新增「函数体没变但 config.json 必须重建」的字段时，手工 +1。
+# update script 会把它连同 relay_* / extra_* 函数体的指纹一起比对，
+# 变了且本机配了 relay 就自动 `relay reapply`，不用人记升级步骤。
+# 纯改文案 / 注释 / 其它模块不要动它（会让每次升级都无谓重载 Xray）。
+XHY_RELAY_SCHEMA="1"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then

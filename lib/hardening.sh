@@ -165,7 +165,7 @@ bbr_status() {
 # 127.0.0.1 (PUBLIC=0) and are intentionally not exposed.
 firewall_node_ports() {
     local f p public proto
-    for f in "$XHY_NODES"/*.env; do
+    for f in $(node_env_files); do
         [[ -f "$f" ]] || continue
         public="$(grep -m1 '^PUBLIC=' "$f" 2>/dev/null | cut -d= -f2- || true)"
         [[ "$public" == "0" ]] && continue
@@ -180,7 +180,7 @@ firewall_node_ports() {
 # freshly created hy2 node looks "up" but never connects.
 firewall_udp_ports() {
     local f p public proto
-    for f in "$XHY_NODES"/*.env; do
+    for f in $(node_env_files); do
         [[ -f "$f" ]] || continue
         public="$(grep -m1 '^PUBLIC=' "$f" 2>/dev/null | cut -d= -f2- || true)"
         [[ "$public" == "0" ]] && continue

@@ -4,15 +4,31 @@
 # (a single inbound object). `rebuild_config` merges fragments into a single
 # config.json so `xray run -test -c` can validate the whole thing atomically.
 
+# 只返回「真节点」env。$XHY_NODES 里还有 relay.env（中继状态，不是节点）、
+# 备份 *.env.bak-*、临时文件；旧版所有遍历点都裸扫 *.env，于是 node_list 出现
+# 一行 MODE/PORT/UUID 全空的幽灵记录、node_count 把 relay.env 算成第 2 个节点，
+# 而 node_rebuild_all（xhy update config）会拿 relay.env 去 write_fragment，
+# 渲染出「未知节点类型: 」直接 rc=1。判据双保险：文件名 <mode>_<port>.env + 有 MODE= 行。
+node_env_files() {
+    local f base
+    for f in "$XHY_NODES"/*.env; do
+        [[ -f "$f" ]] || continue
+        base="${f##*/}"
+        [[ "$base" =~ ^[A-Za-z0-9_]+_[0-9]+\.env$ ]] || continue
+        grep -q '^MODE=' "$f" 2>/dev/null || continue
+        printf '%s\n' "$f"
+    done
+}
+
 node_file()   { printf '%s/%s_%s.env' "$XHY_NODES" "$1" "$2"; }
 node_frag()   { printf '%s/%s_%s.json' "$XHY_CONFDIR" "$1" "$2"; }
 node_exists() { [[ -f "$(node_file "$1" "$2")" ]]; }
-node_count()  { find "$XHY_NODES" -maxdepth 1 -name '*.env' -type f 2>/dev/null | wc -l; }
+node_count()  { node_env_files | wc -l; }
 
 # A port must be unique across ALL modes, not just within one mode.
 port_used_by_node() {
     local p="$1" f v
-    for f in "$XHY_NODES"/*.env; do
+    for f in $(node_env_files); do
         [[ -f "$f" ]] || continue
         v="$(grep -m1 '^PORT=' "$f" 2>/dev/null | cut -d= -f2- || true)"
         if [[ "$v" == "$p" ]]; then basename "$f" .env; return 0; fi
@@ -824,7 +840,7 @@ node_retarget_menu() {
         info "没有新的伪装站可应用"
         return 0
     fi
-    for f in "$XHY_NODES"/*.env; do
+    for f in $(node_env_files); do
         [[ -f "$f" ]] || continue
         node_load "$f"
         [[ "$SECURITY" == "reality" ]] || continue
@@ -884,7 +900,7 @@ node_retarget_menu() {
 node_pick() {
     local -a files=()
     local f i=0 pick
-    for f in "$XHY_NODES"/*.env; do
+    for f in $(node_env_files); do
         [[ -f "$f" ]] || continue
         files+=("$f")
     done
@@ -941,7 +957,7 @@ node_list() {
     local f mode port uuid sec created
     printf '%-10s %-7s %-6s %-38s %-10s %s\n' "模式" "端口" "公网" "UUID" "安全" "创建时间"
     printf '%s\n' "--------------------------------------------------------------------------------------------"
-    for f in "$XHY_NODES"/*.env; do
+    for f in $(node_env_files); do
         [[ -f "$f" ]] || continue
         node_load "$f"
         printf '%-10s %-7s %-6s %-38s %-10s %s\n' \
@@ -955,7 +971,7 @@ node_rebuild_all() {
     local f
     need_root
     init_dirs
-    for f in "$XHY_NODES"/*.env; do
+    for f in $(node_env_files); do
         [[ -f "$f" ]] || continue
         write_fragment "$f" || die "重建 ${f##*/} 失败"
     done

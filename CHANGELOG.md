@@ -2,6 +2,13 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.14.2 — 2026-11-09
+
+- fix(nodes): relay.env 不再被当成节点 —— 新增公共 node_env_files()（文件名 <mode>_<port>.env + 必须有 MODE= 行），替换 nodes/export/hardening/update/links 共 11 处裸扫 *.env 的遍历点。旧版 node_list 出现一行 MODE/PORT/UUID 全空的幽灵记录、node_count 把 relay.env 算成第 2 个节点（菜单显示「节点 2 个」）、node_pick 把它列成可选节点，而 xhy update config（node_rebuild_all）拿 relay.env 去 write_fragment 直接报「未知节点类型: 」rc=1。东京/硅谷实机复现，新加坡无 relay.env 故正常
+- feat(update): 涉及 relay 的脚本升级自动 relay reapply，不涉及就不动 Xray —— 新增 _update_relay_fingerprint()（新旧脚本里所有 relay_*/extra_* 函数体 + XHY_RELAY_SCHEMA 的 SHA-256）与 update_script_relay_reapply_needed()。只有「本机 relay.env 存在且角色 entry/land」+「指纹有变化」同时满足，才用替换后的新脚本起子进程跑 relay reapply；纯注释 / 文案 / 其它模块改动不触发。失败只 warn，不影响升级本身。XHY_RELAY_SCHEMA 是逃生口：改了 config 生成逻辑但函数体没变时手工 +1
+- docs: README 把「涉及 relay 的升级另跑 xhy relay reapply」改为自动机制说明；xhy relay reapply 降级为手动兜底。测试状态 18 文件约 800 项 → 19 文件约 840 项
+- test: 新增 test/update-relay-test.sh 38 项（node_env_files 过滤 / node_count / node_list 无幽灵行 / node_pick / node_rebuild_all 有 relay.env 仍 rc=0 / 指纹对注释与 relay 改动的区分 / 自动 reapply 三分支 / 源码接线）；修 hardening-test 的夹具文件名（n1.env → vless_8443.env 等，旧夹具不符合生产命名会被过滤）。全套 19 文件 834 项断言全绿
+
 ## v1.14.1 — 2026-11-09
 
 - fix(core/update): geodata 切源不再被「1h 内跳过」静默吞掉 —— 新增 /usr/local/share/xray/.geodata-source 源标记，只在两个 dat 全部下载成功后写入；update_geodata 的跳过条件同时比对 age 与源标记，切 --source / 改 XHY_GEODATA_SOURCE 一小时内立即可生效，ok 文案也不再拿本次请求值冒充实际来源。xray_install 铺完 dat 后同步写标记，update all 不会重复下 30 MB

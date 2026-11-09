@@ -119,7 +119,7 @@ xhy check                                 # 全量环境自检
 | CF Tunnel | 可选；WS 只监听 `127.0.0.1`，cloudflared 由独立服务托管，Token 存 0600 文件；分享链接按 CF 边缘 TLS 生成 |
 | 防火墙 | `safe`（默认）/ `strict` / `off`；**同时构建 iptables 与 ip6tables 链** —— 只防 IPv4 等于给 `:::22` 留了后门；每次变更前备份两个 family 的规则转储 |
 | 伪装站 | 三档：**`xhy scan` 自动扫描本机机房网段**（RealiTLScanner + 真实 SNI 验证 + 结果缓存，见上节）、`conf/targets.tsv` 地区库按 VPS 出口国家匹配、`xhy target` 手动固定 target/SNI 或单独校验；三者都做 TLS 1.3 / HTTP/2 / 无重定向 / 非 CDN 校验，并支持「dest=源站 IP、SNI=域名」（`--target 1.2.3.4:443 --sni www.example.com`，交互菜单写作 `1.2.3.4:443,sni=www.example.com`）|
-| 后续更新 | `xhy update script`（新构建整文件替换）/ `core` / `geodata [--force] [--source loyalsoldier\|official]` / `config`（重建全部节点）/ `all`；涉及 relay 的升级另跑 `xhy relay reapply` |
+| 后续更新 | `xhy update script`（新构建整文件替换；**涉及 relay 的升级自动 `relay reapply`**）/ `core` / `geodata [--force] [--source loyalsoldier\|official]` / `config`（重建全部节点）/ `all` |
 | 五种模式 | `direct`、`tunnel`、`reality`、`xhttp`、`hy2`（Xray 原生 Hysteria2 入站，UDP/QUIC + 自签证书 + `pinSHA256` 分享链接） |
 | 导出链接 | `xhy link --all` / `--uri` / `--qr` / `--png FILE`（终端二维码 65×33 列，PNG 0600；服务器是 IPv4 字面量且开了双栈时自动附 **IPv6 变体链接**） |
 | 导出客户端配置 | `xhy export clash|singbox [--out FILE]` —— 生成 mihomo/Clash.Meta 的 `proxies` YAML 或 sing-box 的 outbounds JSON；xHTTP 两边都暂不支持，自动跳过并提示 |
@@ -317,12 +317,14 @@ xhy update geodata [--force] [--source loyalsoldier|official]
                       # 更新 geoip.dat / geosite.dat；1 小时内同源跳过；失败保留旧文件
 xhy update config     # 从节点注册表重建全部 inbound + 重载 + 刷新防火墙
 xhy update all        # 以上全部 + 自检
-xhy relay reapply     # 涉及 relay 的升级：按 relay.env 重新注入 config.json
+xhy relay reapply     # 手动兜底：按 relay.env 重新注入 config.json（正常升级不用敲）
 ```
 
 脚本更新**不会**改动节点配置。`update script` 拿到新脚本后先 `bash -n` 语法检查、再比对构建号，任一步不对就放弃且本地文件分毫未动；确认替换前旧版本会备份到 `/etc/xray-hy/backups/`。所有会改配置的命令都持有全局 `flock`，并发执行不会互相踩。
 
-但 `update script` **不会自动重建 `config.json`** —— 涉及 relay 的变更（如 v1.14.0 把 `fallbackTag` 从 `direct` 改成 `block`）升级后要跑一次 `xhy relay reapply`，否则 `relay.env` 已是新值、`config.json` 还是旧值。`relay status` / `relay test` 会比对两者并提示不一致。
+**v1.14.2 起 `update script` 会自动判断要不要重建 `config.json`**：它比对新旧脚本里所有 `relay_*` / `extra_*` 函数的函数体指纹（去注释/缩进）+ `XHY_RELAY_SCHEMA`，只有 **① 本机 `relay.env` 存在且角色为 `entry`/`land`、② 指纹有变化** 两个条件同时满足，才用**替换后的新脚本**起子进程跑 `relay reapply`；纯文案、注释或其它模块的升级不会重载 Xray。判定抽成 `update_script_relay_reapply_needed()`，离线可单测。旧版（v1.14.1 及更早）没有 `XHY_RELAY_SCHEMA`，首次升到 v1.14.2 会做一次幂等 reapply，顺带把可能残留的旧 `fallbackTag` 对齐。
+
+`relay status` / `relay test` 仍会比对 config.json 与 relay.env，不一致就提示；`xhy relay reapply` 保留为手动兜底。`XHY_RELAY_SCHEMA` 是逃生口：改了 config 生成逻辑但函数体没变时手工 +1 即可强制触发。
 
 若配置渲染或校验失败，新增节点会被回滚，已有配置保持原样。
 
@@ -367,10 +369,10 @@ tools/bump-version.sh major --note "破坏性变更"   # 1.3.1 -> 2.0.0
 已在真实 VPS（Alpine 3.23 / OpenRC）上完成端到端部署：`install` 七步全过、REALITY 节点实测可连、`xhy scan` 实机扫出并应用了同机房伪装站；三台机跑 `xhy relay` 中继链路（东京 entry → 硅谷 land）并验收分流。下面的离线测试仍保留，任何机器上都能复跑（不需要 root、不需要网络、不需要真实 Xray）：
 
 ```sh
-bash test/run-all.sh     # 18 个测试文件、约 800 项断言（含 build.sh --check）
+bash test/run-all.sh     # 19 个测试文件、约 840 项断言（含 build.sh --check）
 ```
 
-覆盖：全部脚本语法与单文件产物一致性；五种节点模式的 inbound 片段与合并 `config.json` 合法性；`hy2` 自签证书与 `pinSHA256` 链接；`link --qr/--png`；`i18n` 按 tty 分中英；`add → snapshot → del → rollback` 状态恢复；跨模式端口冲突；伪装站扫描 / 打分 / 缓存；**`hardening` 的 iptables 规则行序**（`--rcheck` 在 `--set` 前、relay 放行在 `RETURN` 前）；**`relay` 的恒明文 / balancer / `burstObservatory` / `fallbackTag` / `streamSettings.sockopt` 层级 / config 与 relay.env 一致性**；**`geodata` 的默认源 / `--source` 切换 / 源标记 / 失败不写标记**；`core` 下载与 `.dgst` 校验；磁盘闸门与 `clean` 行为；`bootstrap` 单文件直装与软链自愈。
+覆盖：全部脚本语法与单文件产物一致性；五种节点模式的 inbound 片段与合并 `config.json` 合法性；`hy2` 自签证书与 `pinSHA256` 链接；`link --qr/--png`；`i18n` 按 tty 分中英；`add → snapshot → del → rollback` 状态恢复；跨模式端口冲突；伪装站扫描 / 打分 / 缓存；**`hardening` 的 iptables 规则行序**（`--rcheck` 在 `--set` 前、relay 放行在 `RETURN` 前）；**`relay` 的恒明文 / balancer / `burstObservatory` / `fallbackTag` / `streamSettings.sockopt` 层级 / config 与 relay.env 一致性**；**`geodata` 的默认源 / `--source` 切换 / 源标记 / 失败不写标记**；`core` 下载与 `.dgst` 校验；磁盘闸门与 `clean` 行为；`bootstrap` 单文件直装与软链自愈；**`update-relay`** 的 `node_env_files` 过滤（relay.env 不再被当节点）与 relay 指纹 / 自动 reapply 三分支判定。
 
 此外 `hy2` 的配置字段在真实 Xray **26.10.31** 上用 `xray run -test` 验证通过（`protocol: hysteria` / `version: 2` / `alpn: ["h3"]` / `masquerade` / `finalmask.quicParams`），`hysteria2://` 链接格式经人工核对。
 

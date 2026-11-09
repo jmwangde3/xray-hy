@@ -120,7 +120,7 @@ cmd_export() {
     else
         printf '[\n' >>"$tmp"
     fi
-    for f in "$XHY_NODES"/*.env; do
+    for f in $(node_env_files); do
         [[ -f "$f" ]] || continue
         if [[ "$fmt" == "clash" ]]; then
             if item="$(_clash_node "$f")"; then

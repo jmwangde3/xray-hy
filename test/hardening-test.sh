@@ -119,21 +119,22 @@ line_of() {
     return 1
 }
 
-# 一个公开节点，让 firewall_node_ports 有东西可枚举
-cat >"$XHY_NODES/n1.env" <<'EOF'
+# 一个公开节点，让 firewall_node_ports 有东西可枚举。
+# 文件名必须是生产里的 <mode>_<port>.env（node_env_files 的判据），否则会被过滤。
+cat >"$XHY_NODES/vless_8443.env" <<'EOF'
 PUBLIC=1
 PROTO=tcp
 PORT=8443
 MODE=vless
 EOF
-cat >"$XHY_NODES/n2.env" <<'EOF'
+cat >"$XHY_NODES/hysteria2_9443.env" <<'EOF'
 PUBLIC=1
 PROTO=udp
 PORT=9443
 MODE=hysteria2
 EOF
 # 隧道节点不该暴露
-cat >"$XHY_NODES/tunnel.env" <<'EOF'
+cat >"$XHY_NODES/vless_18443.env" <<'EOF'
 PUBLIC=0
 PROTO=tcp
 PORT=18443
