@@ -160,7 +160,14 @@ update_script() {
     if (( need_relay_reapply )); then
         # 必须用新脚本的子进程跑：当前进程里的 relay_* 函数还是旧版本，
         # 用旧逻辑重建等于没升级。
+        #
+        # 但 main() 从 acquire_lock 起就全程持有配置锁（flock fd 9 或 .lock.d），
+        # 子进程会继承 fd 9 / 看到目录还在，于是自己 acquire_lock 时等 15 秒后
+        # die —— v1.14.3 硅谷实机就是这样失败的。这里先把父进程的锁释放掉
+        # 再起子进程，让它自己拿锁；父进程之后只剩打印与 return，不再改配置。
         info "检测到 relay 渲染代码有变且本机已配置 relay，自动重建 config.json…"
+        release_lock
+        exec 9>&- 2>/dev/null || true
         if "$canonical" relay reapply; then
             ok "relay 配置已按新版本重建（无需手动 reapply）"
         else

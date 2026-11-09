@@ -137,6 +137,8 @@ chk "prelude 定义 XHY_RELAY_SCHEMA"          'grep -q "^XHY_RELAY_SCHEMA=" ent
 chk "替换前调用判定函数"                     'grep -Fq "update_script_relay_reapply_needed \"\$old_src\" \"\$tmp\"" lib/update.sh'
 chk "替换后执行 canonical relay reapply"     'grep -Fq "\"\$canonical\" relay reapply" lib/update.sh'
 chk "失败只 warn 不让升级失败"               'grep -q "自动 relay reapply 失败" lib/update.sh'
+chk "起子进程前先释放父进程配置锁"          'grep -q "^        release_lock$" lib/update.sh'
+chk "起子进程前关闭继承的 flock fd 9"       'grep -q "^        exec 9>&- 2>/dev/null || true$" lib/update.sh'
 chk "hardening 有防火墙空钩子"               'grep -q "^firewall_extra_rules() { return 0; }" lib/hardening.sh'
 chk "_apply_family 调用钩子"                 '[[ "$(grep -Fc "firewall_extra_rules" lib/hardening.sh)" -eq 2 ]]'
 chk "relay.sh 覆盖钩子"                      'grep -q "^firewall_extra_rules()" lib/relay.sh'

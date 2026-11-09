@@ -144,17 +144,18 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.14.3"
-XHY_BUILD="fb74b9d92f18"
+XHY_VERSION="1.14.4"
+XHY_BUILD="7f29331020a7"
 
 # relay 渲染契约版本。改了 lib/relay.sh / nodes.sh 的 config 生成逻辑、
 # 或新增「函数体没变但 config.json 必须重建」的字段时，手工 +1。
 # 1 = v1.14.2 引入指纹；2 = v1.14.3 新增 firewall_extra_rules（链重建后补回
-# 落地机放行规则），该函数不以 relay_ 开头，靠 bump 保证旧机升级自动 reapply。
+# 落地机放行规则，非 relay_ 前缀）；3 = v1.14.4 修自动 reapply 的配置锁冲突
+# （改的是 update_script，不在指纹白名单里，靠 bump 强制触发一次）。
 # update script 会把它连同 relay_* / extra_* 函数体的指纹一起比对，
 # 变了且本机配了 relay 就自动 `relay reapply`，不用人记升级步骤。
 # 纯改文案 / 注释 / 其它模块不要动它（会让每次升级都无谓重载 Xray）。
-XHY_RELAY_SCHEMA="2"
+XHY_RELAY_SCHEMA="3"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
 if [[ "${XHY_TRACE:-0}" == "1" ]]; then
@@ -172,7 +173,7 @@ fi
 # ===================== lib/common.sh =====================
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.14.3}"
+XHY_VERSION="${XHY_VERSION:-1.14.4}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -5481,7 +5482,14 @@ update_script() {
     if (( need_relay_reapply )); then
         # 必须用新脚本的子进程跑：当前进程里的 relay_* 函数还是旧版本，
         # 用旧逻辑重建等于没升级。
+        #
+        # 但 main() 从 acquire_lock 起就全程持有配置锁（flock fd 9 或 .lock.d），
+        # 子进程会继承 fd 9 / 看到目录还在，于是自己 acquire_lock 时等 15 秒后
+        # die —— v1.14.3 硅谷实机就是这样失败的。这里先把父进程的锁释放掉
+        # 再起子进程，让它自己拿锁；父进程之后只剩打印与 return，不再改配置。
         info "检测到 relay 渲染代码有变且本机已配置 relay，自动重建 config.json…"
+        release_lock
+        exec 9>&- 2>/dev/null || true
         if "$canonical" relay reapply; then
             ok "relay 配置已按新版本重建（无需手动 reapply）"
         else
