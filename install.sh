@@ -144,8 +144,8 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.14.7"
-XHY_BUILD="486050aee074"
+XHY_VERSION="1.14.8"
+XHY_BUILD="95aa6dd952df"
 
 # relay 渲染契约版本。改了 lib/relay.sh / nodes.sh 的 config 生成逻辑、
 # 或新增「函数体没变但 config.json 必须重建」的字段时，手工 +1。
@@ -175,7 +175,7 @@ fi
 # ===================== lib/common.sh =====================
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.14.7}"
+XHY_VERSION="${XHY_VERSION:-1.14.8}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -2227,18 +2227,71 @@ EOF
     return 0
 }
 
+# 持久化配置是否完整。判据必须是「文件 + 关键键」，不能拿运行时值代理：
+# v1.3.0（commit 56f2e7c）之前只写 /etc/sysctl.conf 的老部署，运行时
+# bbr/fq 全对、tcp_mtu_probing=1、mptcp=0 也对，但 90-xray-hy.conf 和
+# modules-load.d 从未生成 —— 重启就丢 TFO / PMTU / MPTCP / 端口范围 / BBR 模块。
+# 输出人话原因；返回 0=完整，1=缺失或不全。
+bbr_persist_check() {
+    # 路径可覆盖仅为离线回归用；生产默认就是这两个标准位置。
+    local f="${XHY_SYSCTL_CONF:-/etc/sysctl.d/90-xray-hy.conf}"
+    local m="${XHY_MODULES_CONF:-/etc/modules-load.d/xray-hy.conf}"
+    local k miss=()
+    if [[ ! -f "$f" ]]; then
+        printf '缺失 %s\n' "$f"
+        return 1
+    fi
+    for k in net.core.default_qdisc net.ipv4.tcp_congestion_control \
+             net.core.somaxconn net.ipv4.tcp_fastopen \
+             net.ipv4.tcp_max_syn_backlog net.core.rmem_max net.core.wmem_max \
+             net.ipv4.ip_forward net.ipv4.tcp_mtu_probing \
+             net.ipv4.tcp_slow_start_after_idle net.ipv4.ip_local_port_range \
+             net.core.netdev_max_backlog net.ipv6.bindv6only; do
+        # add_sysctl 写的是 "key = value"；[.] 让 ERE 里的点只匹配字面点。
+        grep -qE "^[[:space:]]*${k//./[.]}[[:space:]]*=" "$f" 2>/dev/null || miss+=("$k")
+    done
+    # 条件键：内核暴露了就必须落盘，否则重启后 MPTCP 又回到默认开。
+    if [[ -e /proc/sys/net/mptcp/enabled ]] &&
+       ! grep -qE '^[[:space:]]*net[.]mptcp[.]enabled[[:space:]]*=' "$f" 2>/dev/null; then
+        miss+=("net.mptcp.enabled")
+    fi
+    if [[ -e /proc/sys/net/ipv4/tcp_migrate_req ]] &&
+       ! grep -qE '^[[:space:]]*net[.]ipv4[.]tcp_migrate_req[[:space:]]*=' "$f" 2>/dev/null; then
+        miss+=("net.ipv4.tcp_migrate_req")
+    fi
+    # Alpine 不在 boot 加载 tcp_bbr / sch_fq，缺这个文件连 BBR 本身都保不住。
+    if [[ "$XHY_DISTRO" == "alpine" && ! -f "$m" ]]; then
+        miss+=("modules-load.d/xray-hy.conf")
+    fi
+    if (( ${#miss[@]} )); then
+        printf '不完整（缺 %s）\n' "${miss[*]}"
+        return 1
+    fi
+    printf '完整\n'
+    return 0
+}
+
 # 幂等兜底：服务端本来就该开 BBR，发现没生效就重新下发。
 # BBR_ENABLED=off 是用户在安装时显式选的「不开」，此时完全不干预；
-# 未设置（老部署 / 默认）视为 on。只在实测未生效时才调 tune_bbr，
-# 避免每次 update config 都重写 sysctl 文件、堆备份。
+# 未设置（老部署 / 默认）视为 on。除了实测运行时值，还要查持久化文件：
+# 老部署靠 /etc/sysctl.conf 开机生效，运行时永远「已就绪」，只判运行时值
+# 就会永远跳过 tune_bbr，90-xray-hy.conf 静默漏一辈子。
+# 完整时仍直接 return，不会每次 update config 重写 sysctl 文件、堆备份。
 bbr_ensure() {
-    local cur qd
+    local cur qd persist
     if [[ "$(state_get BBR_ENABLED on)" == "off" ]]; then
         return 0
     fi
     cur="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
     qd="$(sysctl -n net.core.default_qdisc 2>/dev/null || true)"
     if [[ "$cur" == "bbr" && "$qd" == "fq" ]]; then
+        # 运行时生效 != 重启后还在。容器里 tune_bbr 本来就跳过，别反复空转。
+        if ! in_container; then
+            if ! persist="$(bbr_persist_check)"; then
+                info "BBR 运行时已生效，但内核参数持久化${persist}；重新下发…"
+                tune_bbr || return 1
+            fi
+        fi
         state_set BBR_STATUS "on"
         return 0
     fi
@@ -2250,7 +2303,7 @@ bbr_ensure() {
 }
 
 bbr_status() {
-    local cc qd
+    local cc qd persist
     cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
     qd="$(sysctl -n net.core.default_qdisc 2>/dev/null || true)"
     printf '拥塞控制 : %s\n' "${cc:-?}"
@@ -2259,6 +2312,14 @@ bbr_status() {
         printf '实际生效 : yes (congestion=bbr + qdisc=fq)\n'
     else
         printf '实际生效 : NO (congestion=%s qdisc=%s) → 执行 xhy bbr on\n' "${cc:-?}" "${qd:-?}"
+    fi
+    # xhy check 会原样打印这一段。老部署只写 /etc/sysctl.conf 时这里会提示
+    # 「缺失」，并给出补全命令，而不是让「实际生效 : yes」掩盖重启即丢。
+    if persist="$(bbr_persist_check)"; then
+        printf '持久化配置 : %s\n' "$persist"
+    else
+        printf '持久化配置 : %s\n' "$persist"
+        warn "内核参数重启后会丢失，执行 xhy bbr on 重新下发"
     fi
     printf '可用算法 : %s\n' "$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || echo '?')"
     printf 'MPTCP    : %s (应为 0)\n' "$(sysctl -n net.mptcp.enabled 2>/dev/null || echo '内核未暴露')"
@@ -5226,10 +5287,13 @@ _clean_legacy_hook() {
 }
 
 cmd_clean() {
-    local what="${1:-all}" keep_bin="${XHY_BACKUP_CORE:-0}" keep_snap=5 keep_bak=20 keep_tar=3 keep_big=2
-    local before after f i k p
+    local what="${1:-all}" keep_bin="${XHY_BACKUP_CORE:-0}" \
+          keep_snap="${XHY_KEEP_SNAP:-5}" keep_bak="${XHY_KEEP_BAK:-20}" \
+          keep_tar="${XHY_KEEP_TAR:-3}" keep_big="${XHY_KEEP_BIG:-2}" \
+          keep_rules="${XHY_KEEP_RULES:-3}" purge=0
+    local before after f i k p left_snaps
     local _keep=0
-    local -a bins=() rt=() snaps=() baks=() bigs=() tars=() drop=()
+    local -a bins=() rt=() snaps=() baks=() bigs=() tars=() rules=() scandrop=() drop=()
     local -A fbseen=()
     need_root
     init_dirs
@@ -5237,8 +5301,13 @@ cmd_clean() {
     _CLEAN_KB=0
 
     case "$what" in
+        # purge = 真正的清零：所有保留数归 0，并额外清掉扫描缓存 / 历史结果。
+        # 做镜像、交机器、脱手之前用；all 仍是「跑完各类别、按保留数留档」。
+        purge) purge=1; what=all
+               keep_bin=0 keep_snap=0 keep_bak=0 keep_tar=0 keep_big=0 keep_rules=0
+               warn "purge：将删除全部回滚点（含明文凭证快照）与扫描缓存，不可恢复" ;;
         all|backups|snapshots|tarballs|tmp) ;;
-        *) die "用法：xhy clean [all|backups|snapshots|tarballs|tmp]" ;;
+        *) die "用法：xhy clean [all|backups|snapshots|tarballs|tmp|purge]" ;;
     esac
 
     before="$(disk_free_mb /)"
@@ -5270,6 +5339,15 @@ cmd_clean() {
     done < <(ls -1t "$XHY_BACKUP"/*.bak 2>/dev/null || true)
     while IFS= read -r f; do [[ -e "$f" ]] && tars+=("$f"); done \
         < <(ls -1t "$XHY_BACKUP"/xhy-backup-*.tar.gz "$XHY_BACKUP"/pre-restore-* 2>/dev/null || true)
+    # 防火墙规则快照：_fw_snapshot() 写 $XHY_BACKUP/<tool>.<ts>.rules、自己留 3 份。
+    # 之前 cmd_clean 完全不认这个模式，all 也对它视而不见（名不副实的缺口）。
+    while IFS= read -r f; do [[ -e "$f" ]] && rules+=("$f"); done \
+        < <(ls -1t "$XHY_BACKUP"/*.rules 2>/dev/null || true)
+    # 扫描缓存 / 历史结果只在 purge 清：7 天内有用，日常 all 清掉会逼下次重扫。
+    if (( purge )); then
+        if [[ -e "$XHY_ETC/scan-cache.tsv" ]]; then scandrop+=("$XHY_ETC/scan-cache.tsv"); fi
+        if [[ -d "$XHY_ETC/scan" ]]; then scandrop+=("$XHY_ETC/scan"); fi
+    fi
 
     printf '\n清理前：根分区剩余 %s MB\n' "$before"
     printf '  备份目录 %s / 快照目录 %s\n' \
@@ -5278,6 +5356,7 @@ cmd_clean() {
         "${#bins[@]}" "${#rt[@]}" "${#snaps[@]}" "${#tars[@]}"
     printf '  .bak 小文件 %d 个 / 大体积 .bak %d 个（%s）\n' \
         "${#baks[@]}" "${#bigs[@]}" "$(human_kb "$(_clean_sum "${bigs[@]}")")"
+    printf '  防火墙规则快照 %d 个 / 待清扫描项 %d 个\n' "${#rules[@]}" "${#scandrop[@]}"
 
     # ---- 临时副本：按定义就是可丢的，不看数量 ----
     if [[ "$what" == "tmp" || "$what" == "backups" || "$what" == "all" ]]; then
@@ -5362,6 +5441,23 @@ cmd_clean() {
         fi
     fi
 
+    # ---- 防火墙规则快照：留最新 keep_rules 份（purge 时 0）----
+    if [[ "$what" == "backups" || "$what" == "all" ]]; then
+        drop=()
+        for (( i = keep_rules; i < ${#rules[@]}; i++ )); do drop+=("${rules[$i]}"); done
+        if (( ${#drop[@]} > 0 )); then
+            _clean_drop "旧防火墙规则快照" "${drop[@]}"
+        fi
+        if (( ${#rules[@]} > 0 )); then
+            info "保留 $(( ${#rules[@]} > keep_rules ? keep_rules : ${#rules[@]} )) 份规则快照"
+        fi
+    fi
+
+    # ---- purge 专属：扫描缓存与历史结果（做镜像前连凭证带缓存一起清）----
+    if (( purge )) && (( ${#scandrop[@]} > 0 )); then
+        _clean_drop "扫描缓存与历史结果" "${scandrop[@]}"
+    fi
+
     after="$(disk_free_mb /)"
     printf '\n清理后：根分区剩余 %s MB\n' "$after"
     if (( _CLEAN_N == 0 )); then
@@ -5373,6 +5469,16 @@ cmd_clean() {
         else
             printf '；df 未变（删的多是零字节残留，或文件仍被进程占用）\n'
         fi
+    fi
+
+    # 快照里是 nodes/*.env 的明文凭证（UUID / REALITY privateKey / shortId）。
+    # 只跑 all 不够：默认留 5 份等于把 5 份凭证副本带进镜像。
+    left_snaps="$(ls -1 "$XHY_SNAPSHOTS"/state.*.tar.gz 2>/dev/null | wc -l | tr -d ' ')"
+    if (( left_snaps > 0 )); then
+        warn "仍有 $left_snaps 份状态快照含节点明文凭证；做镜像前请执行 xhy clean purge"
+    fi
+    if (( purge )); then
+        ok "purge 完成：回滚点 / 规则快照 / 扫描缓存已清空（不可恢复）"
     fi
 
     if (( after < 200 )); then
@@ -7383,7 +7489,7 @@ Usage: xhy <command> [options]
   Backup, export & disk
     backup [--out FILE]         Back up /etc/xray-hy (per-file SHA256 list)
     restore <file>              Verify then restore (auto rollback on failure)
-    clean [backups|snapshots|tarballs|tmp|all]  Drop old core backups / snapshots / tarballs
+    clean [backups|snapshots|tarballs|tmp|all|purge]  Drop old core backups / snapshots; purge = wipe ALL (before imaging)
                                 A full root fs makes sshd unreachable while the
                                 proxy keeps working; check `xhy check` disk line
                                 tarballs = xhy backup output, tmp = xray-rollback.*
@@ -7510,7 +7616,7 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
   备份、导出与磁盘
     backup [--out FILE]              备份 /etc/xray-hy（内含逐文件 SHA256 清单）
     restore <备份文件>               校验清单后还原（先备份现状，失败自动回滚）
-    clean [backups|snapshots|tarballs|tmp|all]  清理旧核心二进制 / 旧快照 / 旧打包备份（小硬盘必用）
+    clean [backups|snapshots|tarballs|tmp|all|purge]  清理旧核心二进制 / 旧快照 / 旧打包备份；purge 全清含凭证快照（做镜像前必用）
                                      根分区满时 sshd 会连不上、而代理仍在工作；
                                      xhy check 里有「磁盘余量」一行
                                      tarballs = xhy backup 产物，tmp = xray-rollback.* 残留

@@ -204,10 +204,13 @@ _clean_legacy_hook() {
 }
 
 cmd_clean() {
-    local what="${1:-all}" keep_bin="${XHY_BACKUP_CORE:-0}" keep_snap=5 keep_bak=20 keep_tar=3 keep_big=2
-    local before after f i k p
+    local what="${1:-all}" keep_bin="${XHY_BACKUP_CORE:-0}" \
+          keep_snap="${XHY_KEEP_SNAP:-5}" keep_bak="${XHY_KEEP_BAK:-20}" \
+          keep_tar="${XHY_KEEP_TAR:-3}" keep_big="${XHY_KEEP_BIG:-2}" \
+          keep_rules="${XHY_KEEP_RULES:-3}" purge=0
+    local before after f i k p left_snaps
     local _keep=0
-    local -a bins=() rt=() snaps=() baks=() bigs=() tars=() drop=()
+    local -a bins=() rt=() snaps=() baks=() bigs=() tars=() rules=() scandrop=() drop=()
     local -A fbseen=()
     need_root
     init_dirs
@@ -215,8 +218,13 @@ cmd_clean() {
     _CLEAN_KB=0
 
     case "$what" in
+        # purge = 真正的清零：所有保留数归 0，并额外清掉扫描缓存 / 历史结果。
+        # 做镜像、交机器、脱手之前用；all 仍是「跑完各类别、按保留数留档」。
+        purge) purge=1; what=all
+               keep_bin=0 keep_snap=0 keep_bak=0 keep_tar=0 keep_big=0 keep_rules=0
+               warn "purge：将删除全部回滚点（含明文凭证快照）与扫描缓存，不可恢复" ;;
         all|backups|snapshots|tarballs|tmp) ;;
-        *) die "用法：xhy clean [all|backups|snapshots|tarballs|tmp]" ;;
+        *) die "用法：xhy clean [all|backups|snapshots|tarballs|tmp|purge]" ;;
     esac
 
     before="$(disk_free_mb /)"
@@ -248,6 +256,15 @@ cmd_clean() {
     done < <(ls -1t "$XHY_BACKUP"/*.bak 2>/dev/null || true)
     while IFS= read -r f; do [[ -e "$f" ]] && tars+=("$f"); done \
         < <(ls -1t "$XHY_BACKUP"/xhy-backup-*.tar.gz "$XHY_BACKUP"/pre-restore-* 2>/dev/null || true)
+    # 防火墙规则快照：_fw_snapshot() 写 $XHY_BACKUP/<tool>.<ts>.rules、自己留 3 份。
+    # 之前 cmd_clean 完全不认这个模式，all 也对它视而不见（名不副实的缺口）。
+    while IFS= read -r f; do [[ -e "$f" ]] && rules+=("$f"); done \
+        < <(ls -1t "$XHY_BACKUP"/*.rules 2>/dev/null || true)
+    # 扫描缓存 / 历史结果只在 purge 清：7 天内有用，日常 all 清掉会逼下次重扫。
+    if (( purge )); then
+        if [[ -e "$XHY_ETC/scan-cache.tsv" ]]; then scandrop+=("$XHY_ETC/scan-cache.tsv"); fi
+        if [[ -d "$XHY_ETC/scan" ]]; then scandrop+=("$XHY_ETC/scan"); fi
+    fi
 
     printf '\n清理前：根分区剩余 %s MB\n' "$before"
     printf '  备份目录 %s / 快照目录 %s\n' \
@@ -256,6 +273,7 @@ cmd_clean() {
         "${#bins[@]}" "${#rt[@]}" "${#snaps[@]}" "${#tars[@]}"
     printf '  .bak 小文件 %d 个 / 大体积 .bak %d 个（%s）\n' \
         "${#baks[@]}" "${#bigs[@]}" "$(human_kb "$(_clean_sum "${bigs[@]}")")"
+    printf '  防火墙规则快照 %d 个 / 待清扫描项 %d 个\n' "${#rules[@]}" "${#scandrop[@]}"
 
     # ---- 临时副本：按定义就是可丢的，不看数量 ----
     if [[ "$what" == "tmp" || "$what" == "backups" || "$what" == "all" ]]; then
@@ -340,6 +358,23 @@ cmd_clean() {
         fi
     fi
 
+    # ---- 防火墙规则快照：留最新 keep_rules 份（purge 时 0）----
+    if [[ "$what" == "backups" || "$what" == "all" ]]; then
+        drop=()
+        for (( i = keep_rules; i < ${#rules[@]}; i++ )); do drop+=("${rules[$i]}"); done
+        if (( ${#drop[@]} > 0 )); then
+            _clean_drop "旧防火墙规则快照" "${drop[@]}"
+        fi
+        if (( ${#rules[@]} > 0 )); then
+            info "保留 $(( ${#rules[@]} > keep_rules ? keep_rules : ${#rules[@]} )) 份规则快照"
+        fi
+    fi
+
+    # ---- purge 专属：扫描缓存与历史结果（做镜像前连凭证带缓存一起清）----
+    if (( purge )) && (( ${#scandrop[@]} > 0 )); then
+        _clean_drop "扫描缓存与历史结果" "${scandrop[@]}"
+    fi
+
     after="$(disk_free_mb /)"
     printf '\n清理后：根分区剩余 %s MB\n' "$after"
     if (( _CLEAN_N == 0 )); then
@@ -351,6 +386,16 @@ cmd_clean() {
         else
             printf '；df 未变（删的多是零字节残留，或文件仍被进程占用）\n'
         fi
+    fi
+
+    # 快照里是 nodes/*.env 的明文凭证（UUID / REALITY privateKey / shortId）。
+    # 只跑 all 不够：默认留 5 份等于把 5 份凭证副本带进镜像。
+    left_snaps="$(ls -1 "$XHY_SNAPSHOTS"/state.*.tar.gz 2>/dev/null | wc -l | tr -d ' ')"
+    if (( left_snaps > 0 )); then
+        warn "仍有 $left_snaps 份状态快照含节点明文凭证；做镜像前请执行 xhy clean purge"
+    fi
+    if (( purge )); then
+        ok "purge 完成：回滚点 / 规则快照 / 扫描缓存已清空（不可恢复）"
     fi
 
     if (( after < 200 )); then

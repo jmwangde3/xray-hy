@@ -231,7 +231,7 @@ Usage: xhy <command> [options]
   Backup, export & disk
     backup [--out FILE]         Back up /etc/xray-hy (per-file SHA256 list)
     restore <file>              Verify then restore (auto rollback on failure)
-    clean [backups|snapshots|tarballs|tmp|all]  Drop old core backups / snapshots / tarballs
+    clean [backups|snapshots|tarballs|tmp|all|purge]  Drop old core backups / snapshots; purge = wipe ALL (before imaging)
                                 A full root fs makes sshd unreachable while the
                                 proxy keeps working; check `xhy check` disk line
                                 tarballs = xhy backup output, tmp = xray-rollback.*
@@ -358,7 +358,7 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
   备份、导出与磁盘
     backup [--out FILE]              备份 /etc/xray-hy（内含逐文件 SHA256 清单）
     restore <备份文件>               校验清单后还原（先备份现状，失败自动回滚）
-    clean [backups|snapshots|tarballs|tmp|all]  清理旧核心二进制 / 旧快照 / 旧打包备份（小硬盘必用）
+    clean [backups|snapshots|tarballs|tmp|all|purge]  清理旧核心二进制 / 旧快照 / 旧打包备份；purge 全清含凭证快照（做镜像前必用）
                                      根分区满时 sshd 会连不上、而代理仍在工作；
                                      xhy check 里有「磁盘余量」一行
                                      tarballs = xhy backup 产物，tmp = xray-rollback.* 残留

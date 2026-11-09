@@ -74,8 +74,8 @@ chk "定义 cmd_clean"               'grep -q "^cmd_clean()" lib/backup.sh'
 chk "定义 disk_free_mb"            'grep -q "^disk_free_mb()" lib/common.sh'
 chk "分发表有 clean"               'grep -q "clean)      cmd_clean" entry/main.sh'
 chk "菜单 16 支持 clean"           'grep -q "clean)  cmd_clean all" entry/main.sh'
-chk "中文帮助有 clean"             'grep -Fq "clean [backups|snapshots|tarballs|tmp|all]  清理旧核心二进制" entry/main.sh'
-chk "英文帮助有 clean"             'grep -Fq "clean [backups|snapshots|tarballs|tmp|all]  Drop old core backups" entry/main.sh'
+chk "中文帮助有 clean+purge"       'grep -Fq "clean [backups|snapshots|tarballs|tmp|all|purge]  清理旧核心二进制" entry/main.sh'
+chk "英文帮助有 clean+purge"       'grep -Fq "clean [backups|snapshots|tarballs|tmp|all|purge]  Drop old core backups" entry/main.sh'
 chk "定义 legacy_prune_hook"        'grep -q "^legacy_prune_hook()" lib/common.sh'
 chk "clean 调用 _clean_legacy_hook" 'grep -q "_clean_legacy_hook" lib/backup.sh'
 chk "self_check 检测遗留钩子"       'grep -q "发现遗留定时任务" lib/update.sh'
@@ -221,5 +221,48 @@ chk "定义 _fw_snapshot"        'grep -q "^_fw_snapshot()" lib/hardening.sh'
 chk "firewall_apply 走该函数"   'grep -q "_fw_snapshot iptables" lib/hardening.sh'
 chk "空表跳过并提示"           'grep -q "跳过快照" lib/hardening.sh'
 chk "同类只留 3 份"            'grep -q "n > 3" lib/hardening.sh'
+
+echo "=== cmd_clean purge：all 名不副实的清零路径 ==="
+rm -rf "$XHY_BACKUP" "$XHY_SNAPSHOTS"; mkdir -p "$XHY_BACKUP" "$XHY_SNAPSHOTS"
+for i in 1 2 3; do printf 'bin' >"$XHY_BACKUP/xray-26.1.$i-2026010100000$i"; done
+for i in 1 2 3 4; do printf 'snap' >"$XHY_SNAPSHOTS/state.2026010100000$i.tar.gz"; done
+for i in 1 2 3 4 5 6; do printf 'bak' >"$XHY_BACKUP/config.json.2026010100000$i.bak"; done
+for i in 1 2; do printf 'tar' >"$XHY_BACKUP/xhy-backup-2026010100000$i.tar.gz"; done
+for i in 1 2 3 4 5; do printf 'rules' >"$XHY_BACKUP/iptables.2026010100000$i.rules"; done
+printf '# xray-hy scan-cache 1\n' >"$XHY_ETC/scan-cache.tsv"
+mkdir -p "$XHY_ETC/scan"; printf 'csv' >"$XHY_ETC/scan/scan-20260101000000.csv"
+
+out="$(cmd_clean purge 2>&1)"; rc=$?
+chk "purge 返回 0"                  '[[ $rc -eq 0 ]]'
+chk "二进制备份全清"                '[[ -z "$(ls -1 "$XHY_BACKUP"/xray-* 2>/dev/null)" ]]'
+chk "状态快照全清"                  '[[ -z "$(ls -1 "$XHY_SNAPSHOTS"/state.*.tar.gz 2>/dev/null)" ]]'
+chk ".bak 全清"                     '[[ -z "$(ls -1 "$XHY_BACKUP"/*.bak 2>/dev/null)" ]]'
+chk "打包备份全清"                  '[[ -z "$(ls -1 "$XHY_BACKUP"/xhy-backup-*.tar.gz 2>/dev/null)" ]]'
+chk "防火墙规则快照全清"            '[[ -z "$(ls -1 "$XHY_BACKUP"/*.rules 2>/dev/null)" ]]'
+chk "扫描缓存清掉"                  '[[ ! -e "$XHY_ETC/scan-cache.tsv" ]]'
+chk "scan 工作目录清掉"             '[[ ! -d "$XHY_ETC/scan" ]]'
+chk "purge 输出点明不可恢复"        'grep -q "不可恢复" <<<"$out"'
+chk "清完后不再提示残留凭证快照"    '! grep -q "仍有 .* 份状态快照" <<<"$out"'
+
+echo "=== cmd_clean：保留数可用环境变量覆盖 ==="
+rm -rf "$XHY_BACKUP" "$XHY_SNAPSHOTS"; mkdir -p "$XHY_BACKUP" "$XHY_SNAPSHOTS"
+for i in 1 2 3 4; do printf 'snap' >"$XHY_SNAPSHOTS/state.2026020100000$i.tar.gz"; done
+for i in 1 2 3; do printf 'rules' >"$XHY_BACKUP/iptables.2026020100000$i.rules"; done
+printf '# cache\n' >"$XHY_ETC/scan-cache.tsv"
+XHY_KEEP_SNAP=2 XHY_KEEP_RULES=1 cmd_clean all >/dev/null 2>&1
+chk "XHY_KEEP_SNAP=2 生效"          '[[ $(ls -1 "$XHY_SNAPSHOTS"/state.*.tar.gz 2>/dev/null | wc -l | tr -d " ") -eq 2 ]]'
+chk "XHY_KEEP_RULES=1 生效"         '[[ $(ls -1 "$XHY_BACKUP"/*.rules 2>/dev/null | wc -l | tr -d " ") -eq 1 ]]'
+chk "all 不动扫描缓存"              '[[ -e "$XHY_ETC/scan-cache.tsv" ]]'
+out="$(cmd_clean all 2>&1)"
+chk "all 提示快照含明文凭证"        'grep -q "做镜像前请执行 xhy clean purge" <<<"$out"'
+
+echo "=== 源码接线：purege / 持久化判据 ==="
+chk "purge 分支存在"               'grep -q "purge) purge=1" lib/backup.sh'
+chk "保留数走 XHY_KEEP_*"          'grep -q "XHY_KEEP_SNAP:-5" lib/backup.sh'
+chk "规则快照纳入枚举"             'grep -q "\*.rules" lib/backup.sh'
+chk "scan-cache 纳入 purge"        'grep -q "scan-cache.tsv" lib/backup.sh'
+chk "定义 bbr_persist_check"       'grep -q "^bbr_persist_check()" lib/hardening.sh'
+chk "bbr_ensure 查持久化"          '[[ $(grep -c "bbr_persist_check" lib/hardening.sh) -ge 3 ]]'
+chk "bbr_status 打印持久化行"      'grep -q "持久化配置 : " lib/hardening.sh'
 
 summary

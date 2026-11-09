@@ -2,6 +2,13 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.14.8 — 2026-11-09
+
+- fix(clean): `xhy clean all` 不再「名不副实」——新增 `purge` 清零路径与 `XHY_KEEP_SNAP` / `XHY_KEEP_BAK` / `XHY_KEEP_TAR` / `XHY_KEEP_BIG` / `XHY_KEEP_RULES` 保留数覆盖。原先五个保留数硬编码在 `cmd_clean`，`all` 的含义是「跑完所有类别」而非「删光所有文件」，在「2 份快照 + 1 份小 `.bak`」时输出「本次没有删除任何文件（都在保留数内）」是预期行为，但没有任何参数或环境变量能把保留数设成 0。`purge` 把所有保留数归 0 并额外清掉扫描缓存与 `scan/` 历史结果；`all` 保持原语义，只补上此前完全视而不见的 `*.rules` 防火墙规则快照（留最新 3 份）。输出新增一行：状态快照含 `nodes/*.env` 明文凭证（UUID / REALITY privateKey / shortId），做镜像前请 `xhy clean purge`。另注：`backup_file()` 写入时就把同名 `.bak` 裁到 2 份，`keep_bak=20` 本就是磁盘兜底、不是清零工具。
+- fix(bbr): `bbr_ensure()` 不再只看运行时值判定「已就绪」——`/etc/sysctl.d/90-xray-hy.conf` + `add_sysctl` 是 v1.3.0（commit `56f2e7c`）才引入的，早期部署只写 `/etc/sysctl.conf`、开机即生效，于是每次 `bbr_ensure` 都命中 `cur=bbr && qd=fq` 直接 return，`90` 文件与 Alpine 的 `modules-load.d/xray-hy.conf` 静默漏一辈子；重启会丢 TFO 允许位、PMTU（`tcp_mtu_probing`）、MPTCP 缓解、端口范围、somaxconn、rmem/wmem，Alpine 还可能连 BBR 模块都不加载。新增 `bbr_persist_check()`：以 **90 文件存在性 + 13 个固定键 + 2 个条件键 + Alpine modules-load.d** 为主判据（**不能**拿 `tcp_mtu_probing` / `net.mptcp.enabled` 这类运行时值代理，否则恰好漏掉「文件缺失但运行时全对」这个本案例），「运行时已生效但持久化不全」时调 `tune_bbr` 重新下发；持久化完整时仍直接 return，不会每次 `update config` 重写 sysctl 文件堆备份；容器跳过。`xhy check` / `xhy bbr status` 新增「持久化配置 : 完整 / 缺失 / 不完整」行，缺失时提示 `xhy bbr on`。
+- **升级后的一步骤**：`xhy update script` 不调 `bbr_ensure`（接线只在 `cmd_install` / `xhy bbr on` / `update_config`），老部署升完脚本要跑一次 `xhy bbr on` 才会补文件；本次三台升级已带上该步，后续升级不需要。
+- test: 新增 `test/persist-test.sh`（14 项，真实文件夹具，不 stub 被测函数），`bbr-test` 14→25、`disk-test` 80→103；全量 **22 个测试文件、893 项断言**全绿。`install.sh` build `95aa6dd952df`。
+
 ## v1.14.7 — 2026-11-09
 
 - fix(cli): `xhy update`（不带子命令）不再直接崩 —— v1.14.6 把 `all)` 改成 `shift; update_all "$@"`，但 `main()` 开头已消费掉 `update`，`case "${1:-all}"` 命中默认 `all` 时 `$#=0`，这个 `shift` 在 `set -Eeuo pipefail` 下返回 1 直接终止脚本（实测 rc=1、无任何输出，默认全量更新入口整个没了）。改为 `if (( $# )); then shift; fi; update_all "$@"`。`xhy update all --yes` / `update script --yes` / `update _continue 1` 不受影响 —— 正好是 CI 与三台实机升级走的路径，所以没撞出来。新增 `test/cli-test.sh` 15 项断言覆盖 11 种参数形态 + `--version` / `--help` + 源码接线

@@ -119,18 +119,71 @@ EOF
     return 0
 }
 
+# 持久化配置是否完整。判据必须是「文件 + 关键键」，不能拿运行时值代理：
+# v1.3.0（commit 56f2e7c）之前只写 /etc/sysctl.conf 的老部署，运行时
+# bbr/fq 全对、tcp_mtu_probing=1、mptcp=0 也对，但 90-xray-hy.conf 和
+# modules-load.d 从未生成 —— 重启就丢 TFO / PMTU / MPTCP / 端口范围 / BBR 模块。
+# 输出人话原因；返回 0=完整，1=缺失或不全。
+bbr_persist_check() {
+    # 路径可覆盖仅为离线回归用；生产默认就是这两个标准位置。
+    local f="${XHY_SYSCTL_CONF:-/etc/sysctl.d/90-xray-hy.conf}"
+    local m="${XHY_MODULES_CONF:-/etc/modules-load.d/xray-hy.conf}"
+    local k miss=()
+    if [[ ! -f "$f" ]]; then
+        printf '缺失 %s\n' "$f"
+        return 1
+    fi
+    for k in net.core.default_qdisc net.ipv4.tcp_congestion_control \
+             net.core.somaxconn net.ipv4.tcp_fastopen \
+             net.ipv4.tcp_max_syn_backlog net.core.rmem_max net.core.wmem_max \
+             net.ipv4.ip_forward net.ipv4.tcp_mtu_probing \
+             net.ipv4.tcp_slow_start_after_idle net.ipv4.ip_local_port_range \
+             net.core.netdev_max_backlog net.ipv6.bindv6only; do
+        # add_sysctl 写的是 "key = value"；[.] 让 ERE 里的点只匹配字面点。
+        grep -qE "^[[:space:]]*${k//./[.]}[[:space:]]*=" "$f" 2>/dev/null || miss+=("$k")
+    done
+    # 条件键：内核暴露了就必须落盘，否则重启后 MPTCP 又回到默认开。
+    if [[ -e /proc/sys/net/mptcp/enabled ]] &&
+       ! grep -qE '^[[:space:]]*net[.]mptcp[.]enabled[[:space:]]*=' "$f" 2>/dev/null; then
+        miss+=("net.mptcp.enabled")
+    fi
+    if [[ -e /proc/sys/net/ipv4/tcp_migrate_req ]] &&
+       ! grep -qE '^[[:space:]]*net[.]ipv4[.]tcp_migrate_req[[:space:]]*=' "$f" 2>/dev/null; then
+        miss+=("net.ipv4.tcp_migrate_req")
+    fi
+    # Alpine 不在 boot 加载 tcp_bbr / sch_fq，缺这个文件连 BBR 本身都保不住。
+    if [[ "$XHY_DISTRO" == "alpine" && ! -f "$m" ]]; then
+        miss+=("modules-load.d/xray-hy.conf")
+    fi
+    if (( ${#miss[@]} )); then
+        printf '不完整（缺 %s）\n' "${miss[*]}"
+        return 1
+    fi
+    printf '完整\n'
+    return 0
+}
+
 # 幂等兜底：服务端本来就该开 BBR，发现没生效就重新下发。
 # BBR_ENABLED=off 是用户在安装时显式选的「不开」，此时完全不干预；
-# 未设置（老部署 / 默认）视为 on。只在实测未生效时才调 tune_bbr，
-# 避免每次 update config 都重写 sysctl 文件、堆备份。
+# 未设置（老部署 / 默认）视为 on。除了实测运行时值，还要查持久化文件：
+# 老部署靠 /etc/sysctl.conf 开机生效，运行时永远「已就绪」，只判运行时值
+# 就会永远跳过 tune_bbr，90-xray-hy.conf 静默漏一辈子。
+# 完整时仍直接 return，不会每次 update config 重写 sysctl 文件、堆备份。
 bbr_ensure() {
-    local cur qd
+    local cur qd persist
     if [[ "$(state_get BBR_ENABLED on)" == "off" ]]; then
         return 0
     fi
     cur="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
     qd="$(sysctl -n net.core.default_qdisc 2>/dev/null || true)"
     if [[ "$cur" == "bbr" && "$qd" == "fq" ]]; then
+        # 运行时生效 != 重启后还在。容器里 tune_bbr 本来就跳过，别反复空转。
+        if ! in_container; then
+            if ! persist="$(bbr_persist_check)"; then
+                info "BBR 运行时已生效，但内核参数持久化${persist}；重新下发…"
+                tune_bbr || return 1
+            fi
+        fi
         state_set BBR_STATUS "on"
         return 0
     fi
@@ -142,7 +195,7 @@ bbr_ensure() {
 }
 
 bbr_status() {
-    local cc qd
+    local cc qd persist
     cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
     qd="$(sysctl -n net.core.default_qdisc 2>/dev/null || true)"
     printf '拥塞控制 : %s\n' "${cc:-?}"
@@ -151,6 +204,14 @@ bbr_status() {
         printf '实际生效 : yes (congestion=bbr + qdisc=fq)\n'
     else
         printf '实际生效 : NO (congestion=%s qdisc=%s) → 执行 xhy bbr on\n' "${cc:-?}" "${qd:-?}"
+    fi
+    # xhy check 会原样打印这一段。老部署只写 /etc/sysctl.conf 时这里会提示
+    # 「缺失」，并给出补全命令，而不是让「实际生效 : yes」掩盖重启即丢。
+    if persist="$(bbr_persist_check)"; then
+        printf '持久化配置 : %s\n' "$persist"
+    else
+        printf '持久化配置 : %s\n' "$persist"
+        warn "内核参数重启后会丢失，执行 xhy bbr on 重新下发"
     fi
     printf '可用算法 : %s\n' "$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || echo '?')"
     printf 'MPTCP    : %s (应为 0)\n' "$(sysctl -n net.mptcp.enabled 2>/dev/null || echo '内核未暴露')"

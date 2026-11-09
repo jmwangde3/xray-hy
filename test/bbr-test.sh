@@ -16,6 +16,7 @@ load_libs
 
 FAKE_CC="cubic"; FAKE_QD="fq_codel"; FAKE_ENABLED="on"
 FAKE_TUNE=0; FAKE_TUNE_RC=0; FAKE_STATUS=""
+FAKE_PERSIST="完整"; FAKE_PERSIST_RC=0
 
 sysctl() {
     case "${2:-}" in
@@ -37,8 +38,11 @@ state_get() {
 }
 state_set() { FAKE_STATUS="${2:-}"; }
 tune_bbr() { FAKE_TUNE=$((FAKE_TUNE + 1)); return "$FAKE_TUNE_RC"; }
+# 持久化判据离线化：本机没有真的 90-xray-hy.conf，不能让它把决策表带偏。
+bbr_persist_check() { printf '%s\n' "$FAKE_PERSIST"; return "$FAKE_PERSIST_RC"; }
+in_container() { return 1; }
 info() { :; }
-warn() { :; }
+warn() { printf '%s\n' "$*"; }
 ok()   { :; }
 
 pass=0 fail=0
@@ -54,6 +58,7 @@ chk() {
 reset() {
     FAKE_CC="$1"; FAKE_QD="$2"; FAKE_ENABLED="$3"
     FAKE_TUNE=0; FAKE_TUNE_RC=0; FAKE_STATUS=""
+    FAKE_PERSIST="完整"; FAKE_PERSIST_RC=0
 }
 
 echo "=== bbr_ensure 决策表 ==="
@@ -86,6 +91,28 @@ reset cubic fq_codel on; FAKE_TUNE_RC=1
 bbr_ensure; rc=$?
 chk "tune_bbr 失败 -> 返回非 0"     "1/1"          "$rc/$FAKE_TUNE"
 
+echo "=== 持久化判据：运行时已生效也不能跳过 ==="
+reset bbr fq on; FAKE_PERSIST_RC=1; FAKE_PERSIST="缺失 /etc/sysctl.d/90-xray-hy.conf"
+bbr_ensure; rc=$?
+chk "bbr+fq 但 90 文件缺失 -> 重新下发"  "0/1"          "$rc/$FAKE_TUNE"
+chk "补下发后 BBR_STATUS=on"             "on"           "$FAKE_STATUS"
+
+reset bbr fq on; FAKE_PERSIST_RC=1; FAKE_PERSIST="不完整（缺 net.ipv4.tcp_mtu_probing）"
+bbr_ensure; rc=$?
+chk "关键键缺失 -> 重新下发"             "0/1"          "$rc/$FAKE_TUNE"
+
+reset bbr fq on; FAKE_PERSIST_RC=1; FAKE_TUNE_RC=1
+bbr_ensure; rc=$?
+chk "补下发失败 -> 返回非 0"             "1/1"          "$rc/$FAKE_TUNE"
+
+reset bbr fq on
+bbr_ensure; rc=$?
+chk "持久化完整 -> 不调 tune_bbr"        "0/0"          "$rc/$FAKE_TUNE"
+
+reset bbr fq off; FAKE_PERSIST_RC=1
+bbr_ensure; rc=$?
+chk "BBR_ENABLED=off 不查持久化"         "0/0"          "$rc/$FAKE_TUNE"
+
 echo "=== bbr_status 的实际生效判定 ==="
 reset bbr fq on
 out="$(bbr_status)"
@@ -94,6 +121,12 @@ reset cubic fq_codel on
 out="$(bbr_status)"
 chk "cubic+fq_codel -> NO"         "1" "$(printf '%s' "$out" | grep -c '实际生效 : NO')"
 chk "NO 行提示 xhy bbr on"          "1" "$(printf '%s' "$out" | grep -c 'xhy bbr on')"
+reset bbr fq on
+out="$(bbr_status)"
+chk "持久化完整时 check 打印完整"  "1" "$(printf '%s' "$out" | grep -c '持久化配置 : 完整')"
+reset bbr fq on; FAKE_PERSIST_RC=1; FAKE_PERSIST="缺失 /etc/sysctl.d/90-xray-hy.conf"
+out="$(bbr_status)"
+chk "缺失时打印补全命令"          "1" "$(printf '%s' "$out" | grep -c 'xhy bbr on 重新下发')"
 
 echo "=== 源码接线（防漏调用）==="
 if grep -q 'bbr_ensure || warn "BBR 未生效' lib/update.sh; then
@@ -115,6 +148,16 @@ if grep -q 'applied_cc' lib/hardening.sh; then
     printf '  PASS  tune_bbr 有实测校验\n'; pass=$((pass + 1))
 else
     printf '  FAIL  tune_bbr 缺实测校验\n'; fail=$((fail + 1))
+fi
+if grep -q '^bbr_persist_check()' lib/hardening.sh; then
+    printf '  PASS  定义 bbr_persist_check\n'; pass=$((pass + 1))
+else
+    printf '  FAIL  缺 bbr_persist_check\n'; fail=$((fail + 1))
+fi
+if grep -q '持久化配置 : ' lib/hardening.sh; then
+    printf '  PASS  bbr_status 输出持久化行\n'; pass=$((pass + 1))
+else
+    printf '  FAIL  bbr_status 未输出持久化行\n'; fail=$((fail + 1))
 fi
 
 echo ""
