@@ -361,7 +361,7 @@ render_hy2() {
         # 反代真站最像，但被扫描时未认证流量会经你机器转发 = 拿你的带宽
         masq_block="\"masquerade\": { \"type\": \"proxy\", \"url\": \"${masq}\", \"rewriteHost\": true }"
     else
-        masq_block="\"masquerade\": { \"type\": \"string\", \"statusCode\": 200, \"headers\": { \"content-type\": [\"text/html\"] }, \"content\": \"<html><head><title>Welcome to nginx!</title></head><body><h1>Welcome to nginx!</h1></body></html>\" }"
+        masq_block="\"masquerade\": { \"type\": \"string\", \"statusCode\": 200, \"headers\": { \"content-type\": \"text/html\" }, \"content\": \"<html><head><title>Welcome to nginx!</title></head><body><h1>Welcome to nginx!</h1></body></html>\" }"
     fi
     cat <<EOF
 {

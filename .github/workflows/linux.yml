@@ -30,4 +30,5 @@ jobs:
             eval "$1"
             bash test/run-all.sh
             bash test/real-core-test.sh
+            XHY_TEST_CORE_VERSION=v26.10.31 bash test/real-core-test.sh
           ' sh "$TEST_SETUP"

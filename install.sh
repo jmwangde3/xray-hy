@@ -145,7 +145,7 @@ fi
 set -Eeuo pipefail
 
 XHY_VERSION="1.14.6"
-XHY_BUILD="4940c37d6262"
+XHY_BUILD="a2739763e65a"
 
 # relay 渲染契约版本。改了 lib/relay.sh / nodes.sh 的 config 生成逻辑、
 # 或新增「函数体没变但 config.json 必须重建」的字段时，手工 +1。
@@ -4035,7 +4035,7 @@ render_hy2() {
         # 反代真站最像，但被扫描时未认证流量会经你机器转发 = 拿你的带宽
         masq_block="\"masquerade\": { \"type\": \"proxy\", \"url\": \"${masq}\", \"rewriteHost\": true }"
     else
-        masq_block="\"masquerade\": { \"type\": \"string\", \"statusCode\": 200, \"headers\": { \"content-type\": [\"text/html\"] }, \"content\": \"<html><head><title>Welcome to nginx!</title></head><body><h1>Welcome to nginx!</h1></body></html>\" }"
+        masq_block="\"masquerade\": { \"type\": \"string\", \"statusCode\": 200, \"headers\": { \"content-type\": \"text/html\" }, \"content\": \"<html><head><title>Welcome to nginx!</title></head><body><h1>Welcome to nginx!</h1></body></html>\" }"
     fi
     cat <<EOF
 {

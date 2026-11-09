@@ -6,6 +6,7 @@
 
 - Validate candidate configs, recover state on failure, and repair backup restore.
 - Preserve relay rules and geodata across upgrades; add Linux integration tests.
+- Fix the Hysteria2 masquerade header type and preserve snapshots created in the same second.
 
 ## v1.14.5 — 2026-11-09
 
