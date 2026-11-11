@@ -144,8 +144,8 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.14.9"
-XHY_BUILD="01a832da25db"
+XHY_VERSION="1.14.10"
+XHY_BUILD="37bd977debe3"
 
 # relay 渲染契约版本。改了 lib/relay.sh / nodes.sh 的 config 生成逻辑、
 # 或新增「函数体没变但 config.json 必须重建」的字段时，手工 +1。
@@ -177,7 +177,7 @@ fi
 # ===================== lib/common.sh =====================
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.14.9}"
+XHY_VERSION="${XHY_VERSION:-1.14.10}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -5919,9 +5919,9 @@ self_check() {
     # v1.4.2：tcpcongestion 按内核能力决定写不写，无 bbr 时该字段根本不出现。
     # 这里显示的是**实际渲染结果**而不是"应该是什么"，排查时少一层猜测。
     if sockopt_cc_available; then
-        printf 'sockopt   : keepAliveIdle=45 uto=10000 cc=bbr（内核可用）\n'
+        printf 'sockopt   : keepAliveIdle=45 uto=30000 cc=bbr（内核可用）\n'
     else
-        printf 'sockopt   : keepAliveIdle=45 uto=10000 cc=继承（内核无 bbr，字段省略）\n'
+        printf 'sockopt   : keepAliveIdle=45 uto=30000 cc=继承（内核无 bbr，字段省略）\n'
     fi
     # 中继（relay）只在配置过时才占一行，避免每台机器都多一行噪音
     if [[ -f "$XHY_NODES/relay.env" ]] && declare -F relay_status >/dev/null 2>&1; then
@@ -7033,7 +7033,12 @@ relay_reapply() { config_transaction _relay_reapply "$@"; }
 
 _relay_reapply() {
     relay_env_load || die "本机未配置 relay（先跑 xhy relay land / entry）"
-    relay_render_land || return 1
+    # 节点的 inbound 片段（confs/*.json）是渲染缓存，只有 add/edit 会重写；
+    # rebuild_config 只负责把它们拼起来。所以升级脚本后直接 relay_apply，
+    # 拼进去的还是**旧代码渲染的片段**——新默认值永远到不了 config.json
+    # （v1.14.9 就踩到了：出站 30000 生效，入站仍是 10000）。
+    # 这里按 .env 全量重渲染一遍，顺带包含 relay_render_land。
+    render_registered_fragments || return 1
     relay_apply || return 1
     if [[ "$RELAY_ROLE" == land ]]; then
         relay_fw_add "$RELAY_PORT" "$RELAY_ALLOW" >/dev/null || return 1

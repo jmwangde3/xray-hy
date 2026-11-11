@@ -373,6 +373,34 @@ relay_reapply >/dev/null
 chk "reapply 后 relay 在"             'grep -q "us-relay" "$XHY_ETC/config.json"'
 chk "reapply 后 JSON 合法"            'json_ok "$XHY_ETC/config.json"'
 
+echo "===== reapply 刷新节点片段（v1.14.10：片段是渲染缓存） ====="
+# 片段只由 add/edit 写入，rebuild_config 只做拼接。升级脚本后如果只 reapply，
+# 拼进去的还是旧代码渲染的片段 —— 新默认值永远到不了 config.json。
+# 这里故意放一个「旧片段」，reapply 必须把它按当前渲染器重写。
+cat >"$XHY_NODES/reality_9443.env" <<'NODEEOF'
+MODE=reality
+PORT=9443
+PUBLIC=1
+UUID=b831381d-6324-4d53-ad4f-8cda48b30811
+NODE_PATH=/abcdef1234567890
+NODE_HOST=node.example.com
+SNI=www.example.com
+TARGET=www.example.com:443
+PRIVATE_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+PUBLIC_KEY=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+SHORT_ID=01234567
+FP=chrome
+SECURITY=reality
+CREATED=2026-01-01
+NODEEOF
+printf '{"stale":true}
+' >"$XHY_CONFDIR/reality_9443.json"
+relay_reapply >/dev/null 2>&1
+chk "reapply 重渲染了旧片段"          '! grep -q stale "$XHY_CONFDIR/reality_9443.json"'
+chk "片段里是新 tcpUserTimeout"       'grep -q "\"tcpUserTimeout\":30000" "$XHY_CONFDIR/reality_9443.json"'
+rm -f "$XHY_NODES/reality_9443.env" "$XHY_CONFDIR/reality_9443.json"
+XHY_SKIP_SNAPSHOT=1 rebuild_config >/dev/null 2>&1
+
 echo "===== relay del（收尾） ====="
 relay_del >/dev/null
 chk "最终无 relay.env"                '! [ -f "$XHY_NODES/relay.env" ]'

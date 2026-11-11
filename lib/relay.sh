@@ -993,7 +993,12 @@ relay_reapply() { config_transaction _relay_reapply "$@"; }
 
 _relay_reapply() {
     relay_env_load || die "本机未配置 relay（先跑 xhy relay land / entry）"
-    relay_render_land || return 1
+    # 节点的 inbound 片段（confs/*.json）是渲染缓存，只有 add/edit 会重写；
+    # rebuild_config 只负责把它们拼起来。所以升级脚本后直接 relay_apply，
+    # 拼进去的还是**旧代码渲染的片段**——新默认值永远到不了 config.json
+    # （v1.14.9 就踩到了：出站 30000 生效，入站仍是 10000）。
+    # 这里按 .env 全量重渲染一遍，顺带包含 relay_render_land。
+    render_registered_fragments || return 1
     relay_apply || return 1
     if [[ "$RELAY_ROLE" == land ]]; then
         relay_fw_add "$RELAY_PORT" "$RELAY_ALLOW" >/dev/null || return 1

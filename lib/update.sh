@@ -421,9 +421,9 @@ self_check() {
     # v1.4.2：tcpcongestion 按内核能力决定写不写，无 bbr 时该字段根本不出现。
     # 这里显示的是**实际渲染结果**而不是"应该是什么"，排查时少一层猜测。
     if sockopt_cc_available; then
-        printf 'sockopt   : keepAliveIdle=45 uto=10000 cc=bbr（内核可用）\n'
+        printf 'sockopt   : keepAliveIdle=45 uto=30000 cc=bbr（内核可用）\n'
     else
-        printf 'sockopt   : keepAliveIdle=45 uto=10000 cc=继承（内核无 bbr，字段省略）\n'
+        printf 'sockopt   : keepAliveIdle=45 uto=30000 cc=继承（内核无 bbr，字段省略）\n'
     fi
     # 中继（relay）只在配置过时才占一行，避免每台机器都多一行噪音
     if [[ -f "$XHY_NODES/relay.env" ]] && declare -F relay_status >/dev/null 2>&1; then

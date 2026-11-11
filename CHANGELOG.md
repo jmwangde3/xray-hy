@@ -2,6 +2,12 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.14.10 — 2026-11-12
+
+- fix(relay): `relay reapply` 先按 .env 重渲染节点片段再重建 —— 片段是渲染缓存（只由 add/edit 写），只 rebuild 等于继续拼旧片段，v1.14.9 的新默认值到不了 config.json（现象：出站 30000、入站仍 10000）
+- fix(check): `xhy check` 的 sockopt 行文案 uto=10000 → 30000
+- test: relay-test +2（旧片段会被 reapply 覆盖）、update-relay-test +1（接线断言）；全量 **22 个测试文件、915 项断言**全绿。`install.sh` build `37bd977debe3`
+
 ## v1.14.9 — 2026-11-12
 
 - relay / 节点出站 `tcpUserTimeout` 10s → 30s：跨洋链路一次十几秒的丢包风暴不再被内核强杀成 RST（现象=ChatGPT 流式中断、生成图片卡死）

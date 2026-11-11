@@ -129,5 +129,6 @@ chk "指纹没变 → 不触发"                      '! update_script_relay_rea
 chk "无 relay.env → 不触发"                  '! update_script_relay_reapply_needed "$TEST_TMP/a.sh" "$TEST_TMP/c.sh" "$TEST_TMP/missing.env"'
 chk "旧脚本缺失 → 不触发（宁可不碰）"       '! update_script_relay_reapply_needed "$TEST_TMP/nope.sh" "$TEST_TMP/c.sh" "$RELAY_ENV"'
 chk "schema 变 → 需要"                       'update_script_relay_reapply_needed "$TEST_TMP/a.sh" "$TEST_TMP/d.sh" "$RELAY_ENV"'
+chk "reapply 先重渲染片段再重建（v1.14.10）" 'grep -A10 "^_relay_reapply()" lib/relay.sh | grep -q render_registered_fragments'
 
 summary

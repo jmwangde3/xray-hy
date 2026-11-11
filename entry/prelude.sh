@@ -144,7 +144,7 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.14.9"
+XHY_VERSION="1.14.10"
 XHY_BUILD="__XHY_BUILD__"
 
 # relay 渲染契约版本。改了 lib/relay.sh / nodes.sh 的 config 生成逻辑、
