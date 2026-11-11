@@ -34,7 +34,7 @@ ck() { # 布尔断言：$1=描述 $2=命令串
     fi
 }
 
-TAIL='"tcpNoDelay":true,"tcpKeepAliveIdle":45,"tcpUserTimeout":10000,"tcpMptcp":false'
+TAIL='"tcpNoDelay":true,"tcpKeepAliveIdle":45,"tcpUserTimeout":30000,"tcpMptcp":false'
 EXPECT_NO_BBR="\"sockopt\":{\"tcpFastOpen\":false,$TAIL}"
 EXPECT_BBR="\"sockopt\":{\"tcpFastOpen\":false,$TAIL,\"tcpcongestion\":\"bbr\"}"
 EXPECT_TFO="\"sockopt\":{\"tcpFastOpen\":true,$TAIL,\"tcpcongestion\":\"bbr\"}"
@@ -78,7 +78,7 @@ for cc in "" "reno cubic" "reno cubic bbr"; do
         cc_stub "$cc"; TFO="$tv"
         out="$(sockopt_json)"
         chk "cc=[$cc] tfo=$tv 保留 keepAliveIdle"  "1" "$(printf '%s' "$out" | grep -c '"tcpKeepAliveIdle":45')"
-        chk "cc=[$cc] tfo=$tv 保留 userTimeout"    "1" "$(printf '%s' "$out" | grep -c '"tcpUserTimeout":10000')"
+        chk "cc=[$cc] tfo=$tv 保留 userTimeout"    "1" "$(printf '%s' "$out" | grep -c '"tcpUserTimeout":30000')"
         chk "cc=[$cc] tfo=$tv 保留 tcpNoDelay"     "1" "$(printf '%s' "$out" | grep -c '"tcpNoDelay":true')"
         chk "cc=[$cc] tfo=$tv 保留 tcpMptcp"       "1" "$(printf '%s' "$out" | grep -c '"tcpMptcp":false')"
     done

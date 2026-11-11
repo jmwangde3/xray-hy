@@ -63,8 +63,11 @@
 #
 # ---- 三、其余四字段无条件写 ----
 #
-# tcpNoDelay / tcpKeepAliveIdle=45 / tcpUserTimeout=10000 / tcpMptcp=false
+# tcpNoDelay / tcpKeepAliveIdle=45 / tcpUserTimeout=30000 / tcpMptcp=false
 # 与 TFO、拥塞控制都无关，任何内核上都成立，砍 sockopt 时不得连带删掉。
+# userTimeout 取 30s（v1.14.9 由 10s 放宽）：它强杀的是「有未确认数据且
+# 滞留超过该时长」的连接，10s 会把一次跨洋丢包风暴直接变成 RST（客户端
+# 表现为流式响应中断 / 长连接掉线），30s 仍能对真正失联快速失败。
 # tcpMptcp 显式写 false：GODEBUG 已在进程级关掉 MPTCP，写出来让读代码的人
 # 一眼看到结论（字段存在性已在 26.3.27 + 26.10.31 上实测通过）。
 # tcpFastOpenQueueLength 不写：Xray 用默认队列长度即可，实测不影响启用。
@@ -218,5 +221,5 @@ sockopt_json() {
     if sockopt_cc_available; then
         cc=',"tcpcongestion":"bbr"'
     fi
-    printf '"sockopt":{"tcpFastOpen":%s,"tcpNoDelay":true,"tcpKeepAliveIdle":45,"tcpUserTimeout":10000,"tcpMptcp":false%s}' "$tfo" "$cc"
+    printf '"sockopt":{"tcpFastOpen":%s,"tcpNoDelay":true,"tcpKeepAliveIdle":45,"tcpUserTimeout":30000,"tcpMptcp":false%s}' "$tfo" "$cc"
 }

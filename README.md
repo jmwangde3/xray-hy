@@ -370,7 +370,7 @@ tools/bump-version.sh major --note "破坏性变更"   # 1.3.1 -> 2.0.0
 已在真实 VPS（Alpine 3.23 / OpenRC）上完成端到端部署：`install` 七步全过、REALITY 节点实测可连、`xhy scan` 实机扫出并应用了同机房伪装站；三台机跑 `xhy relay` 中继链路（东京 entry → 硅谷 land）并验收分流。下面的离线测试仍保留，任何机器上都能复跑（不需要 root、不需要网络、不需要真实 Xray）：
 
 ```sh
-bash test/run-all.sh     # 22 个测试文件、893 项断言（含 build.sh --check）
+bash test/run-all.sh     # 22 个测试文件、912 项断言（含 build.sh --check）
 ```
 
 覆盖：全部脚本语法与单文件产物一致性；五种节点模式的 inbound 片段与合并 `config.json` 合法性；`hy2` 自签证书与 `pinSHA256` 链接；`link --qr/--png`；`i18n` 按 tty 分中英；`add → snapshot → del → rollback` 状态恢复；跨模式端口冲突；伪装站扫描 / 打分 / 缓存；**`hardening` 的 iptables 规则行序**（`--rcheck` 在 `--set` 前、relay 放行在 `RETURN` 前）；**`relay` 的恒明文 / balancer / `burstObservatory` / `fallbackTag` / `streamSettings.sockopt` 层级 / config 与 relay.env 一致性**；**`geodata` 的默认源 / `--source` 切换 / 源标记 / 失败不写标记**；`core` 下载与 `.dgst` 校验；磁盘闸门与 `clean` 行为；`bootstrap` 单文件直装与软链自愈；**`update-relay`** 的 `node_env_files` 过滤（relay.env 不再被当节点）与 relay 指纹 / 自动 reapply 三分支判定；**`reliability`** 的事务回滚 / 旧格式备份恢复；**`cli`** 的 `xhy update` 无参数分发；**`disk`** 的 120 MB 写前闸门与峰值清理；**`persist`** 的 90-xray-hy.conf / modules-load.d 真实文件夹具三分支；**`clean purge`** 清零路径与 `XHY_KEEP_*` 保留数覆盖。

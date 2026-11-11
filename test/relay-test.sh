@@ -130,14 +130,15 @@ assert b["fallbackTag"]=="block", b
 assert b["strategy"]["type"]=="leastPing", b
 obs=cfg["burstObservatory"]
 assert obs["subjectSelector"]==["us-relay"], obs
-assert obs["pingConfig"]["sampling"]==3, obs
+assert obs["pingConfig"]["sampling"]==2, obs
+assert obs["pingConfig"]["timeout"]=="10s", obs
 PY
 }
 
 echo "===== v1.11.0：出站 sockopt ====="
 chk "出站带 sockopt"                  'grep -q "\"sockopt\":{\"tcpFastOpen\":true" "$XHY_ETC/config.json"'
 chk "sockopt 含 tcpNoDelay"           'grep -q "\"tcpNoDelay\":true" "$XHY_ETC/config.json"'
-chk "sockopt 含 tcpUserTimeout"       'grep -q "\"tcpUserTimeout\":10000" "$XHY_ETC/config.json"'
+chk "sockopt 含 tcpUserTimeout"       'grep -q "\"tcpUserTimeout\":30000" "$XHY_ETC/config.json"'
 chk "sockopt 带 BBR"                  'grep -q "\"tcpcongestion\":\"bbr\"" "$XHY_ETC/config.json"'
 chk "出站 sockopt 嵌在 streamSettings" 'relay_outbound_sockopt_nested'
 

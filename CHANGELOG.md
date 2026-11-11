@@ -2,6 +2,12 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.14.9 — 2026-11-12
+
+- relay / 节点出站 `tcpUserTimeout` 10s → 30s：跨洋链路一次十几秒的丢包风暴不再被内核强杀成 RST（现象=ChatGPT 流式中断、生成图片卡死）
+- relay 探活 `sampling` 3 → 2、`timeout` 5s → 10s：饱和下载时不再把「忙」误判成「死」，避免整组 AI 分流被切到 `block`
+- 测试同步：`sockopt-test`（57）/ `relay-test`（148）断言改为新值；全量 **22 个测试文件、912 项断言**全绿。`XHY_RELAY_SCHEMA` 5→6，已配 relay 的机器升脚本时自动 `relay reapply`（无需手工重建 config）。`install.sh` build `01a832da25db`
+
 ## v1.14.8 — 2026-11-09
 
 - fix(clean): `xhy clean all` 不再「名不副实」——新增 `purge` 清零路径与 `XHY_KEEP_SNAP` / `XHY_KEEP_BAK` / `XHY_KEEP_TAR` / `XHY_KEEP_BIG` / `XHY_KEEP_RULES` 保留数覆盖。原先五个保留数硬编码在 `cmd_clean`，`all` 的含义是「跑完所有类别」而非「删光所有文件」，在「2 份快照 + 1 份小 `.bak`」时输出「本次没有删除任何文件（都在保留数内）」是预期行为，但没有任何参数或环境变量能把保留数设成 0。`purge` 把所有保留数归 0 并额外清掉扫描缓存与 `scan/` 历史结果；`all` 保持原语义，只补上此前完全视而不见的 `*.rules` 防火墙规则快照（留最新 3 份）。输出新增一行：状态快照含 `nodes/*.env` 明文凭证（UUID / REALITY privateKey / shortId），做镜像前请 `xhy clean purge`。另注：`backup_file()` 写入时就把同名 `.bak` 裁到 2 份，`keep_bak=20` 本就是磁盘兜底、不是清零工具。

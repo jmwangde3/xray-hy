@@ -33,10 +33,14 @@ RELAY_DEFAULT_TAG="us-relay"
 # 要硬死指（连 balancer 都不建）用 --no-fallback；两者都不会东京直出。
 RELAY_FALLBACK_DEFAULT="on"
 RELAY_FALLBACK_TAG_DEFAULT="block"
+# 探活参数调过一轮（v1.14.9）：跨洋这一跳在持续下载时会连续丢包，
+# 5s 超时 + 3 次采样的组合容易被「忙」误判成「死」—— 一次误判就把
+# 整组 AI 分流丢给 block（用户侧表现为对话/生成图卡死后整页断）。
+# 现在 10s × 2：单次抖动不再触发，真死了最迟一个 interval 也能判出来。
 RELAY_PROBE_URL_DEFAULT="https://www.gstatic.com/generate_204"
 RELAY_PROBE_INTERVAL_DEFAULT="1m"
-RELAY_PROBE_SAMPLING_DEFAULT="3"
-RELAY_PROBE_TIMEOUT_DEFAULT="5s"
+RELAY_PROBE_SAMPLING_DEFAULT="2"
+RELAY_PROBE_TIMEOUT_DEFAULT="10s"
 
 # 全局状态（relay_env_save 之前由各子命令赋值；relay_env_load 从文件读回）
 RELAY_ROLE=""; RELAY_PORT=""; RELAY_ALLOW=""; RELAY_UUID=""
@@ -401,13 +405,20 @@ EOF
 
 # 中继这一跳的两端都是自己的机器，TFO 不存在「伪装站不支持」的兼容问题，
 # 默认打开：省掉每条新连接的一次 TCP 握手往返。BBR 跟随系统是否可用。
+#
+# tcpUserTimeout 用 30s 而不是 10s（v1.14.9）：这个字段的语义是「已发出但
+# 未被确认的数据最多滞留多久，超时就由内核强杀连接」。跨洋这一跳实测持续
+# 下载时 TCPLostRetransmit 4 分钟涨 1.3 万 —— 一次十几秒的丢包风暴很常见，
+# 10s 会把「还能自己恢复的停顿」变成 RST，浏览器侧就是 ChatGPT 对话流中断、
+# 生成图卡死。30s 仍能在落地机真死时快速失败，但不会误杀抖动中的连接。
+# （实测：满速下载 95s 期间 TCPAbortOnTimeout 增量为 0，说明它只在真停顿时触发。）
 relay_sockopt_json() {
     local tfo="true" cc=""
     if [[ "${RELAY_TFO:-on}" == "off" ]]; then tfo="false"; fi
     if declare -F sockopt_cc_available >/dev/null 2>&1 && sockopt_cc_available; then
         cc=',"tcpcongestion":"bbr"'
     fi
-    printf '{"tcpFastOpen":%s,"tcpNoDelay":true,"tcpKeepAliveIdle":45,"tcpUserTimeout":10000,"tcpMptcp":false%s}' "$tfo" "$cc"
+    printf '{"tcpFastOpen":%s,"tcpNoDelay":true,"tcpKeepAliveIdle":45,"tcpUserTimeout":30000,"tcpMptcp":false%s}' "$tfo" "$cc"
 }
 
 # entry 出站（转发到落地机中继端口）

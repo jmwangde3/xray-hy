@@ -144,19 +144,21 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.14.8"
+XHY_VERSION="1.14.9"
 XHY_BUILD="__XHY_BUILD__"
 
 # relay 渲染契约版本。改了 lib/relay.sh / nodes.sh 的 config 生成逻辑、
 # 或新增「函数体没变但 config.json 必须重建」的字段时，手工 +1。
 # 1 = v1.14.2 引入指纹；2 = v1.14.3 新增 firewall_extra_rules（链重建后补回
 # 落地机放行规则，非 relay_ 前缀）；3 = v1.14.4 修自动 reapply 的配置锁冲突；
-# 4 = v1.14.5 让 v1.14.4 的修锁代码真正被「下一次升级」执行到（自举链收尾）。
+# 4 = v1.14.5 让 v1.14.4 的修锁代码真正被「下一次升级」执行到（自举链收尾）；
+# 5 = v1.14.6 分段下载与断点续传校验；6 = v1.14.9 出站 tcpUserTimeout
+#     10s→30s、探活 sampling 3→2 / timeout 5s→10s（必须重建 config.json 才生效）。
 # 注意：改 update_script 自身的修复总要下一次升级才生效 —— 升级动作由旧脚本跑。
 # update script 会把它连同 relay_* / extra_* 函数体的指纹一起比对，
 # 变了且本机配了 relay 就自动 `relay reapply`，不用人记升级步骤。
 # 纯改文案 / 注释 / 其它模块不要动它（会让每次升级都无谓重载 Xray）。
-XHY_RELAY_SCHEMA="5"
+XHY_RELAY_SCHEMA="6"
 XHY_UPDATE_CHAIN="1"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
