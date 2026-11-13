@@ -406,19 +406,21 @@ EOF
 # 中继这一跳的两端都是自己的机器，TFO 不存在「伪装站不支持」的兼容问题，
 # 默认打开：省掉每条新连接的一次 TCP 握手往返。BBR 跟随系统是否可用。
 #
-# tcpUserTimeout 用 30s 而不是 10s（v1.14.9）：这个字段的语义是「已发出但
-# 未被确认的数据最多滞留多久，超时就由内核强杀连接」。跨洋这一跳实测持续
-# 下载时 TCPLostRetransmit 4 分钟涨 1.3 万 —— 一次十几秒的丢包风暴很常见，
-# 10s 会把「还能自己恢复的停顿」变成 RST，浏览器侧就是 ChatGPT 对话流中断、
-# 生成图卡死。30s 仍能在落地机真死时快速失败，但不会误杀抖动中的连接。
-# （实测：满速下载 95s 期间 TCPAbortOnTimeout 增量为 0，说明它只在真停顿时触发。）
+# tcpUserTimeout 取 0（v1.14.12，由 30s 改）：这个字段的语义是「已发出但未被
+# 确认的数据最多滞留多久，超时就由内核强杀连接」。2026-11-13 实测家宽国际出口
+# 是**突发型丢包**（国内 0%、东京 8%、1.1.1.1 6%、硅谷 9%，RTT 无抖动），
+# 一次风暴里同一段数据连丢 → RTO 退避到 25.6 s → 未确认数据超阈值就是 RST，
+# 而 h2 单连接承载全部并发流，一条 RST 打断所有在途 SSE（前端「消息流中的
+# 错误」）。取 0 = 不下发该选项（内核默认 0 = 不按此超时中止），风暴期间连接
+# 卡住而不是死掉；真死对端交给 keepalive（45 s idle + 每 15 s 探，≈2.7 min
+# 回收）。10s / 30s 都会在 8% 丢包链路上误杀能自愈的连接，一并作废。
 relay_sockopt_json() {
     local tfo="true" cc=""
     if [[ "${RELAY_TFO:-on}" == "off" ]]; then tfo="false"; fi
     if declare -F sockopt_cc_available >/dev/null 2>&1 && sockopt_cc_available; then
         cc=',"tcpcongestion":"bbr"'
     fi
-    printf '{"tcpFastOpen":%s,"tcpNoDelay":true,"tcpKeepAliveIdle":45,"tcpUserTimeout":30000,"tcpMptcp":false%s}' "$tfo" "$cc"
+    printf '{"tcpFastOpen":%s,"tcpNoDelay":true,"tcpKeepAliveIdle":45,"tcpKeepAliveInterval":15,"tcpUserTimeout":0,"tcpMptcp":false%s}' "$tfo" "$cc"
 }
 
 # entry 出站（转发到落地机中继端口）

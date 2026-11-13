@@ -2,6 +2,10 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.14.12 — 2026-11-13
+
+- sockopt 超时策略反转：tcpUserTimeout 30000→0（不下发，内核不按此超时中止）+ 新增 tcpKeepAliveInterval=15。家宽国际出口是突发型丢包（实测东京 8% / 硅谷 9% / 国内 0%，RTT 无抖动），一次风暴里 RTO 退避到 25.6 s、未确认数据超 30 s 就被内核 RST，而 h2 单连接承载全部并发流，一条 RST 打断所有在途 SSE → 前端「消息流中的错误」。取 0 后丢包期间连接卡住而非死掉，恢复后继续推；真死对端由 keepalive（45 s idle + 每 15 s 探，≈2.7 min）兜底。XHY_RELAY_SCHEMA 6→7，已配 relay 的机器升级时自动 reapply
+
 ## v1.14.11 — 2026-11-13
 
 - 路由 domainStrategy 按规则自动选择：无 geoip:cn 类规则时降级 AsIs，不再每连接白做一次 DNS 解析

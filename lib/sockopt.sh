@@ -61,13 +61,25 @@
 # （当前默认算法）：per-socket 只要算法可用就生效，也与 `xhy bbr on` 的
 # 判定依据一致。不可用时省略整个字段（继承内核默认，不写死 cubic）。
 #
-# ---- 三、其余四字段无条件写 ----
+# ---- 三、其余字段无条件写 ----
 #
-# tcpNoDelay / tcpKeepAliveIdle=45 / tcpUserTimeout=30000 / tcpMptcp=false
-# 与 TFO、拥塞控制都无关，任何内核上都成立，砍 sockopt 时不得连带删掉。
-# userTimeout 取 30s（v1.14.9 由 10s 放宽）：它强杀的是「有未确认数据且
-# 滞留超过该时长」的连接，10s 会把一次跨洋丢包风暴直接变成 RST（客户端
-# 表现为流式响应中断 / 长连接掉线），30s 仍能对真正失联快速失败。
+# tcpNoDelay / tcpKeepAliveIdle=45 / tcpKeepAliveInterval=15 /
+# tcpUserTimeout=0 / tcpMptcp=false，与 TFO、拥塞控制都无关，任何内核上都
+# 成立，砍 sockopt 时不得连带删掉。
+#
+# **userTimeout 取 0 = 不下发（v1.14.12 定，由 30000 改）**。该字段语义是
+# 「已发出但未被确认的数据最多滞留多久，超时内核直接 RST」。2026-11-13 实测
+# 家宽国际出口是**突发型丢包**：国内 223.5.5.5 0%、东京 8%、1.1.1.1 6%、
+# 硅谷 9%，且 RTT 全程无抖动（排除队列/MTU）。一次风暴会让同一段数据连续
+# 丢，RTO 指数退避到 25.6 s，累计未确认数据超过阈值就是一次 RST —— 而
+# 客户端把全部并发流压在一条 HTTP/2 连接上，一条 RST 会打断所有在途响应，
+# 表现为「消息流中的错误」/ 生成图卡死。
+# 取 0 后 xray 不调 setsockopt(TCP_USER_TIMEOUT)，内核默认 0 即「不按此
+# 超时中止」：丢包风暴期间连接只是卡住，链路恢复后继续推，把「断」降级成
+# 「卡一下」。真死的对端由 keepalive 兜底（idle 45 s 起探、每 15 s 一次、
+# 9 次失败回收 ≈ 2.7 min），有未确认数据时由内核 tcp_retries2 兜底。
+# 曾用 10s（≤v1.14.8）与 30s（v1.14.9–v1.14.11），两者都会在 8% 丢包链路上
+# 把还能自愈的连接强杀，故一并作废。
 # tcpMptcp 显式写 false：GODEBUG 已在进程级关掉 MPTCP，写出来让读代码的人
 # 一眼看到结论（字段存在性已在 26.3.27 + 26.10.31 上实测通过）。
 # tcpFastOpenQueueLength 不写：Xray 用默认队列长度即可，实测不影响启用。
@@ -221,5 +233,5 @@ sockopt_json() {
     if sockopt_cc_available; then
         cc=',"tcpcongestion":"bbr"'
     fi
-    printf '"sockopt":{"tcpFastOpen":%s,"tcpNoDelay":true,"tcpKeepAliveIdle":45,"tcpUserTimeout":30000,"tcpMptcp":false%s}' "$tfo" "$cc"
+    printf '"sockopt":{"tcpFastOpen":%s,"tcpNoDelay":true,"tcpKeepAliveIdle":45,"tcpKeepAliveInterval":15,"tcpUserTimeout":0,"tcpMptcp":false%s}' "$tfo" "$cc"
 }

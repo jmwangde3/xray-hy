@@ -144,8 +144,8 @@ fi
 # ===========================================================================
 set -Eeuo pipefail
 
-XHY_VERSION="1.14.11"
-XHY_BUILD="f838557e7c26"
+XHY_VERSION="1.14.12"
+XHY_BUILD="d19ee96ae79e"
 
 # relay 渲染契约版本。改了 lib/relay.sh / nodes.sh 的 config 生成逻辑、
 # 或新增「函数体没变但 config.json 必须重建」的字段时，手工 +1。
@@ -153,12 +153,14 @@ XHY_BUILD="f838557e7c26"
 # 落地机放行规则，非 relay_ 前缀）；3 = v1.14.4 修自动 reapply 的配置锁冲突；
 # 4 = v1.14.5 让 v1.14.4 的修锁代码真正被「下一次升级」执行到（自举链收尾）；
 # 5 = v1.14.6 分段下载与断点续传校验；6 = v1.14.9 出站 tcpUserTimeout
-#     10s→30s、探活 sampling 3→2 / timeout 5s→10s（必须重建 config.json 才生效）。
+#     10s→30s、探活 sampling 3→2 / timeout 5s→10s（必须重建 config.json 才生效）；
+# 7 = v1.14.12 sockopt 超时策略反转：tcpUserTimeout 30000→0（不中止）、
+#     新增 tcpKeepAliveInterval=15（突发丢包下把「断」降级为「卡」，必须重建）。
 # 注意：改 update_script 自身的修复总要下一次升级才生效 —— 升级动作由旧脚本跑。
 # update script 会把它连同 relay_* / extra_* 函数体的指纹一起比对，
 # 变了且本机配了 relay 就自动 `relay reapply`，不用人记升级步骤。
 # 纯改文案 / 注释 / 其它模块不要动它（会让每次升级都无谓重载 Xray）。
-XHY_RELAY_SCHEMA="6"
+XHY_RELAY_SCHEMA="7"
 XHY_UPDATE_CHAIN="1"
 
 # XHY_TRACE=1 xhy install —— 逐行打印，用来定位卡在哪一步。
@@ -177,7 +179,7 @@ fi
 # ===================== lib/common.sh =====================
 # xray-hy / common helpers. Sourced by the entrypoint, never executed directly.
 
-XHY_VERSION="${XHY_VERSION:-1.14.11}"
+XHY_VERSION="${XHY_VERSION:-1.14.12}"
 # 单文件发布时由 build.sh 写入真实构建号；仓库内运行就是 dev。
 XHY_BUILD="${XHY_BUILD:-dev}"
 
@@ -1087,13 +1089,25 @@ xhy_lang_banner() {
 # （当前默认算法）：per-socket 只要算法可用就生效，也与 `xhy bbr on` 的
 # 判定依据一致。不可用时省略整个字段（继承内核默认，不写死 cubic）。
 #
-# ---- 三、其余四字段无条件写 ----
+# ---- 三、其余字段无条件写 ----
 #
-# tcpNoDelay / tcpKeepAliveIdle=45 / tcpUserTimeout=30000 / tcpMptcp=false
-# 与 TFO、拥塞控制都无关，任何内核上都成立，砍 sockopt 时不得连带删掉。
-# userTimeout 取 30s（v1.14.9 由 10s 放宽）：它强杀的是「有未确认数据且
-# 滞留超过该时长」的连接，10s 会把一次跨洋丢包风暴直接变成 RST（客户端
-# 表现为流式响应中断 / 长连接掉线），30s 仍能对真正失联快速失败。
+# tcpNoDelay / tcpKeepAliveIdle=45 / tcpKeepAliveInterval=15 /
+# tcpUserTimeout=0 / tcpMptcp=false，与 TFO、拥塞控制都无关，任何内核上都
+# 成立，砍 sockopt 时不得连带删掉。
+#
+# **userTimeout 取 0 = 不下发（v1.14.12 定，由 30000 改）**。该字段语义是
+# 「已发出但未被确认的数据最多滞留多久，超时内核直接 RST」。2026-11-13 实测
+# 家宽国际出口是**突发型丢包**：国内 223.5.5.5 0%、东京 8%、1.1.1.1 6%、
+# 硅谷 9%，且 RTT 全程无抖动（排除队列/MTU）。一次风暴会让同一段数据连续
+# 丢，RTO 指数退避到 25.6 s，累计未确认数据超过阈值就是一次 RST —— 而
+# 客户端把全部并发流压在一条 HTTP/2 连接上，一条 RST 会打断所有在途响应，
+# 表现为「消息流中的错误」/ 生成图卡死。
+# 取 0 后 xray 不调 setsockopt(TCP_USER_TIMEOUT)，内核默认 0 即「不按此
+# 超时中止」：丢包风暴期间连接只是卡住，链路恢复后继续推，把「断」降级成
+# 「卡一下」。真死的对端由 keepalive 兜底（idle 45 s 起探、每 15 s 一次、
+# 9 次失败回收 ≈ 2.7 min），有未确认数据时由内核 tcp_retries2 兜底。
+# 曾用 10s（≤v1.14.8）与 30s（v1.14.9–v1.14.11），两者都会在 8% 丢包链路上
+# 把还能自愈的连接强杀，故一并作废。
 # tcpMptcp 显式写 false：GODEBUG 已在进程级关掉 MPTCP，写出来让读代码的人
 # 一眼看到结论（字段存在性已在 26.3.27 + 26.10.31 上实测通过）。
 # tcpFastOpenQueueLength 不写：Xray 用默认队列长度即可，实测不影响启用。
@@ -1247,7 +1261,7 @@ sockopt_json() {
     if sockopt_cc_available; then
         cc=',"tcpcongestion":"bbr"'
     fi
-    printf '"sockopt":{"tcpFastOpen":%s,"tcpNoDelay":true,"tcpKeepAliveIdle":45,"tcpUserTimeout":30000,"tcpMptcp":false%s}' "$tfo" "$cc"
+    printf '"sockopt":{"tcpFastOpen":%s,"tcpNoDelay":true,"tcpKeepAliveIdle":45,"tcpKeepAliveInterval":15,"tcpUserTimeout":0,"tcpMptcp":false%s}' "$tfo" "$cc"
 }
 
 # ===================== lib/platform.sh =====================
@@ -5933,9 +5947,9 @@ self_check() {
     # v1.4.2：tcpcongestion 按内核能力决定写不写，无 bbr 时该字段根本不出现。
     # 这里显示的是**实际渲染结果**而不是"应该是什么"，排查时少一层猜测。
     if sockopt_cc_available; then
-        printf 'sockopt   : keepAliveIdle=45 uto=30000 cc=bbr（内核可用）\n'
+        printf 'sockopt   : keepAliveIdle=45/Interval=15 uto=off(0) cc=bbr（内核可用）\n'
     else
-        printf 'sockopt   : keepAliveIdle=45 uto=30000 cc=继承（内核无 bbr，字段省略）\n'
+        printf 'sockopt   : keepAliveIdle=45/Interval=15 uto=off(0) cc=继承（内核无 bbr，字段省略）\n'
     fi
     # 中继（relay）只在配置过时才占一行，避免每台机器都多一行噪音
     if [[ -f "$XHY_NODES/relay.env" ]] && declare -F relay_status >/dev/null 2>&1; then
@@ -6460,19 +6474,21 @@ EOF
 # 中继这一跳的两端都是自己的机器，TFO 不存在「伪装站不支持」的兼容问题，
 # 默认打开：省掉每条新连接的一次 TCP 握手往返。BBR 跟随系统是否可用。
 #
-# tcpUserTimeout 用 30s 而不是 10s（v1.14.9）：这个字段的语义是「已发出但
-# 未被确认的数据最多滞留多久，超时就由内核强杀连接」。跨洋这一跳实测持续
-# 下载时 TCPLostRetransmit 4 分钟涨 1.3 万 —— 一次十几秒的丢包风暴很常见，
-# 10s 会把「还能自己恢复的停顿」变成 RST，浏览器侧就是 ChatGPT 对话流中断、
-# 生成图卡死。30s 仍能在落地机真死时快速失败，但不会误杀抖动中的连接。
-# （实测：满速下载 95s 期间 TCPAbortOnTimeout 增量为 0，说明它只在真停顿时触发。）
+# tcpUserTimeout 取 0（v1.14.12，由 30s 改）：这个字段的语义是「已发出但未被
+# 确认的数据最多滞留多久，超时就由内核强杀连接」。2026-11-13 实测家宽国际出口
+# 是**突发型丢包**（国内 0%、东京 8%、1.1.1.1 6%、硅谷 9%，RTT 无抖动），
+# 一次风暴里同一段数据连丢 → RTO 退避到 25.6 s → 未确认数据超阈值就是 RST，
+# 而 h2 单连接承载全部并发流，一条 RST 打断所有在途 SSE（前端「消息流中的
+# 错误」）。取 0 = 不下发该选项（内核默认 0 = 不按此超时中止），风暴期间连接
+# 卡住而不是死掉；真死对端交给 keepalive（45 s idle + 每 15 s 探，≈2.7 min
+# 回收）。10s / 30s 都会在 8% 丢包链路上误杀能自愈的连接，一并作废。
 relay_sockopt_json() {
     local tfo="true" cc=""
     if [[ "${RELAY_TFO:-on}" == "off" ]]; then tfo="false"; fi
     if declare -F sockopt_cc_available >/dev/null 2>&1 && sockopt_cc_available; then
         cc=',"tcpcongestion":"bbr"'
     fi
-    printf '{"tcpFastOpen":%s,"tcpNoDelay":true,"tcpKeepAliveIdle":45,"tcpUserTimeout":30000,"tcpMptcp":false%s}' "$tfo" "$cc"
+    printf '{"tcpFastOpen":%s,"tcpNoDelay":true,"tcpKeepAliveIdle":45,"tcpKeepAliveInterval":15,"tcpUserTimeout":0,"tcpMptcp":false%s}' "$tfo" "$cc"
 }
 
 # entry 出站（转发到落地机中继端口）

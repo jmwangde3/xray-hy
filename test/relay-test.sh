@@ -138,7 +138,8 @@ PY
 echo "===== v1.11.0：出站 sockopt ====="
 chk "出站带 sockopt"                  'grep -q "\"sockopt\":{\"tcpFastOpen\":true" "$XHY_ETC/config.json"'
 chk "sockopt 含 tcpNoDelay"           'grep -q "\"tcpNoDelay\":true" "$XHY_ETC/config.json"'
-chk "sockopt 含 tcpUserTimeout"       'grep -q "\"tcpUserTimeout\":30000" "$XHY_ETC/config.json"'
+chk "sockopt 含 tcpUserTimeout=0"     'grep -q "\"tcpUserTimeout\":0" "$XHY_ETC/config.json"'
+chk "sockopt 含 keepAliveInterval=15" 'grep -q "\"tcpKeepAliveInterval\":15" "$XHY_ETC/config.json"'
 chk "sockopt 带 BBR"                  'grep -q "\"tcpcongestion\":\"bbr\"" "$XHY_ETC/config.json"'
 chk "出站 sockopt 嵌在 streamSettings" 'relay_outbound_sockopt_nested'
 
@@ -397,7 +398,8 @@ printf '{"stale":true}
 ' >"$XHY_CONFDIR/reality_9443.json"
 relay_reapply >/dev/null 2>&1
 chk "reapply 重渲染了旧片段"          '! grep -q stale "$XHY_CONFDIR/reality_9443.json"'
-chk "片段里是新 tcpUserTimeout"       'grep -q "\"tcpUserTimeout\":30000" "$XHY_CONFDIR/reality_9443.json"'
+chk "片段里是新 userTimeout=0"        'grep -q "\"tcpUserTimeout\":0" "$XHY_CONFDIR/reality_9443.json"'
+chk "片段里有 keepAliveInterval=15"   'grep -q "\"tcpKeepAliveInterval\":15" "$XHY_CONFDIR/reality_9443.json"'
 rm -f "$XHY_NODES/reality_9443.env" "$XHY_CONFDIR/reality_9443.json"
 XHY_SKIP_SNAPSHOT=1 rebuild_config >/dev/null 2>&1
 
