@@ -2,6 +2,10 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.14.11 — 2026-11-13
+
+- 路由 domainStrategy 按规则自动选择：无 geoip:cn 类规则时降级 AsIs，不再每连接白做一次 DNS 解析
+
 ## v1.14.10 — 2026-11-12
 
 - fix(relay): `relay reapply` 先按 .env 重渲染节点片段再重建 —— 片段是渲染缓存（只由 add/edit 写），只 rebuild 等于继续拼旧片段，v1.14.9 的新默认值到不了 config.json（现象：出站 30000、入站仍 10000）

@@ -113,7 +113,21 @@ routing_json() {
     local joined="" sep=""
     local r
     for r in "${rules[@]}"; do joined+="$sep$r"; sep=","; done
-    printf '{"domainStrategy":"IPIfNonMatch","rules":[%s]}' "$joined"
+    # v1.14.11：只有在存在「按 IP 归属分流」的规则时，把域名解析成 IP 再匹配
+    # 才有意义。`geoip:private` 不算——目标是 IP 时 AsIs 照样直接比对，而「域名
+    # 解析到内网」这种场景不存在。`geoip:cn` 这类才是真的需要 IPIfNonMatch。
+    #
+    # 之前无条件写 IPIfNonMatch，等于每个新连接都白做一次 DNS 查询。实测东京
+    # 路由表只有 bittorrent / geoip:private 三轮，仍为此付出代价：DoH 每次
+    # 25–32 ms，且 `app/dns ... context canceled` 噪音全部来自这里（11-13 全天
+    # 126 条）。默认部署（BLOCK_CN=off）现在自动降级为 AsIs。
+    local ds="AsIs"
+    for r in "${rules[@]}"; do
+        case "$r" in
+            *geoip:*) [[ "$r" == *geoip:private* ]] || ds="IPIfNonMatch" ;;
+        esac
+    done
+    printf '{"domainStrategy":"%s","rules":[%s]}' "$ds" "$joined"
 }
 
 outbounds_json() {
