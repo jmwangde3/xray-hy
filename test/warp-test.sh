@@ -26,7 +26,12 @@ init_dirs
 
 # --- 桩：不下载、不注册、不起服务、不出网 --------------------------------
 warp_install_bin()     { return 0; }
-warp_create_account()  { WARP_PRIVATE_KEY="dGVzdC1wcml2YXRlLWtleS1vZmZsaW5l"; return 0; }
+warp_create_account()  {
+    WARP_PRIVATE_KEY="dGVzdC1wcml2YXRlLWtleS1vZmZsaW5l"
+    mkdir -p "$XHY_WARP_DIR"
+    printf 'PrivateKey = %s\nAddress = 172.16.0.2/32, 2606:4700:110::1234/128\n' "$WARP_PRIVATE_KEY" > "$XHY_WARP_DIR/wgcf-profile.conf"
+    return 0
+}
 warp_service_install() { return 0; }
 warp_service_remove()  { return 0; }
 warp_service_restart() { return 0; }
@@ -105,6 +110,8 @@ chk "warp.env 标记 on"                'grep -q "^WARP_ENABLE=on$" "$XHY_NODES/
 chk "wp.conf 已生成"                  '[ -f "$XHY_WARP_DIR/wp.conf" ]'
 chk "wp.conf 含 socks 端口"           'grep -q "BindAddress = 127.0.0.1:25344" "$XHY_WARP_DIR/wp.conf"'
 chk "wp.conf 含私钥"                  'grep -q "^PrivateKey = dGVzdC1wcml2YXRlLWtleS1vZmZsaW5l$" "$XHY_WARP_DIR/wp.conf"'
+chk "wp.conf 使用账号双栈地址"     'grep -q "^Address = 172.16.0.2/32, 2606:4700:110::1234/128$" "$XHY_WARP_DIR/wp.conf"'
+chk "wp.conf 允许 IPv6 出站"        'grep -q "^AllowedIPs = 0.0.0.0/0, ::/0$" "$XHY_WARP_DIR/wp.conf"'
 chk "config 合法"                     'json_ok "$XHY_ETC/config.json"'
 chk "出站与规则形状正确"              'warp_shape_ok'
 chk "仍保留直连与黑洞出站"            'grep -q "\"tag\":\"direct\"" "$XHY_ETC/config.json" && grep -q "\"tag\":\"block\"" "$XHY_ETC/config.json"'
@@ -122,6 +129,16 @@ before="$(cat "$XHY_ETC/config.json")"
 warp_cmd_on >/dev/null 2>&1
 after="$(cat "$XHY_ETC/config.json")"
 chk "重复 on 不改配置"                '[ "$before" = "$after" ]'
+
+echo "===== 账号资料缺失与恢复 ====="
+mv "$XHY_WARP_DIR/wgcf-profile.conf" "$XHY_WARP_DIR/profile.saved"
+chk "原配置有双栈时可继续使用" 'warp_cmd_on >/dev/null 2>&1 && grep -q "^AllowedIPs = 0.0.0.0/0, ::/0$" "$XHY_WARP_DIR/wp.conf"'
+sed -i 's/^Address = .*/Address = 172.16.0.2\/32/' "$XHY_WARP_DIR/wp.conf"
+before_missing="$(cat "$XHY_WARP_DIR/wp.conf")"
+chk "双栈地址缺失时安全拒绝" '! warp_cmd_on >/dev/null 2>&1'
+chk "失败时不覆盖原配置" '[ "$before_missing" = "$(cat "$XHY_WARP_DIR/wp.conf")" ]'
+mv "$XHY_WARP_DIR/profile.saved" "$XHY_WARP_DIR/wgcf-profile.conf"
+chk "资料恢复后重新生成双栈" 'warp_cmd_on >/dev/null 2>&1 && grep -q "^Address = 172.16.0.2/32, 2606:4700:110::1234/128$" "$XHY_WARP_DIR/wp.conf"'
 
 echo "===== 与 relay entry 共存 ====="
 relay_entry --to 203.0.113.10:14430 --uuid test-uuid-0000 --categories openai,anthropic >/dev/null 2>&1
