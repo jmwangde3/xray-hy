@@ -244,9 +244,20 @@ Usage: xhy <command> [options]
     relay status|test|export|reapply|del         Inspect / self-check / peer cmd / remove
     Hop is unencrypted: both ends are yours on a cloud backbone; client-to-site TLS
     is already end-to-end. --tls/--sni/--pin are retired no-ops (v1.11.0).
-    Fallback is on: the balancer probes the landing host and switches to direct
-    when unreachable. Open the cloud security group (inbound TCP <port>, entry IP).
+    Fallback is on: the balancer probes the landing host and drops relayed traffic
+    (block) when unreachable -- never leaks out from the entry IP. --no-fallback
+    hard-pins the outbound (also drops).
+    Open the cloud security group (inbound TCP <port>, entry IP).
     The relay survives xhy add/edit/del; reapply is only a fallback after a rollback.
+
+  WARP egress (for sites that block whole cloud ASNs)
+    warp on [--port N] [--domains domain:x.ai,domain:grok.com] [--tag warp]
+            [--endpoint HOST:PORT] [--reuse-account]
+    warp off|status|test|reapply|del
+    Runs wireproxy (WARP over WireGuard) on 127.0.0.1 as a socks5 outbound and
+    routes the listed domains through it. Needed because x.ai / grok.com answer
+    "403 Blocked due to abusive traffic patterns" to AS45102 (Alibaba) while
+    AS13335 (Cloudflare) is allowed. Bare names get the domain: prefix.
 
   Service & uninstall
     service [start|stop|restart|status]
@@ -371,9 +382,19 @@ xray-hy $XHY_VERSION - 模块化 Xray 部署管理 (Debian/Ubuntu, Alpine, RHEL 
     relay status|test|export|reapply|del        查状态 / 自检 / 对端命令 / 移除
     这一跳不加密：两端自有、走云内网，客户端到目标站 TLS 已端到端。
     --tls / --sni / --pin 已停用（v1.11.0 起只留参数位兼容老脚本）。
-    失联回落默认开：balancer 探活落地机，不可达时切 direct 出站。
+    失联回落默认开：balancer 探活落地机，不可达时把中继流量丢进 block（不直出）。
+    --no-fallback 则去掉 balancer、出站硬死指（同样是丢，绝不从入口机 IP 泄露）。
     云安全组要单独放行（入方向 TCP <端口>，源只填入口机 IP）。
     改造后 relay 不会被 xhy add/edit/del 覆盖；reapply 只在从快照回滚后兜底用。
+
+  WARP 旁路（对付按整段云 ASN 封站的站点）
+    warp on [--port N] [--domains domain:x.ai,domain:grok.com] [--tag warp]
+            [--endpoint HOST:端口] [--reuse-account]
+    warp off|status|test|reapply|del
+    本机跑 wireproxy（WARP over WireGuard），在 127.0.0.1 开 socks5，xray 按域名
+    把流量交给它。起因：x.ai / grok.com 对 AS45102（阿里云）一律
+    403 Blocked due to abusive traffic patterns，而 AS13335（Cloudflare）放行。
+    裸域名自动补 domain: 前缀（含所有子域）。
 
   服务与卸载
     service [start|stop|restart|status]
@@ -875,6 +896,7 @@ main() {
         edit)       node_edit "$@" ;;
         clean)      cmd_clean "$@" ;;
         relay)      cmd_relay "$@" ;;
+        warp)       cmd_warp "$@" ;;
         scan)       cmd_scan "$@" ;;
         firewall)   case "${1:-status}" in
                         # --quiet is passed by the boot unit; forward it so boot

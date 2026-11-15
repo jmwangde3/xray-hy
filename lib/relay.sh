@@ -386,6 +386,22 @@ relay_stream_server_json() {
 # TCPFastOpenActive=0 —— 这一跳的 TFO 全程没生效，省不到那一个 107 ms RTT。
 # 两端都是自有机器，不存在「伪装站不支持被动 TFO」的兼容问题，故默认恒开，
 # 与 relay_sockopt_json 共用同一套开关（--no-tfo / RELAY_TFO=off 可关）。
+# 落地机要不要从 TLS SNI 还原域名 —— 只有 warp 出站需要它。
+#
+# 为什么光有 domain 规则不够：这一跳的目标地址一路都是 **IP**。客户端解析域名
+# 拿 IP，路由器 PassWall 虽然嗅探 SNI，但 `routeOnly: true` 只拿它做路由、不改写
+# 目标（xray-hy 自己在入口机也是这么设的），于是 vless 里携带的始终是 IP。落地
+# 机拿 IP 去匹配 `domain:x.ai` 必然不中，规则形同不存在 —— 表现为「配置里有
+# warp 出站，流量还是从落地机直出」。
+#
+# routeOnly 保持 true：只借它做路由判断，不改写目标，对既有直连行为零影响。
+# 非 TLS 流量嗅探失败时沿用原目标，同样没有副作用。
+relay_land_sniffing_json() {
+    if declare -F warp_active >/dev/null 2>&1 && warp_active; then
+        printf ',%s' '"sniffing":{"enabled":true,"destOverride":["tls"],"routeOnly":true}'
+    fi
+}
+
 relay_fragment() {
     local port="$1" uuid="$2" stream so
     stream="$(relay_stream_server_json)"
@@ -398,7 +414,7 @@ relay_fragment() {
   "listen": "$(listen_addr)", "port": ${port}, "protocol": "vless",
   "tag": "in-relay-${port}",
   "settings": { "clients": [ { "id": "${uuid}" } ], "decryption": "none" },
-  "streamSettings":${stream}
+  "streamSettings":${stream}$(relay_land_sniffing_json)
 }
 EOF
 }
@@ -525,14 +541,30 @@ relay_entry_active() {
     [[ -n "$RELAY_UPSTREAM" && -n "$RELAY_UUID" ]]
 }
 
+# 聚合点：nodes.sh 的钩子只有一个函数名，warp.sh 又必须排在 relay 之后
+# （它要读 relay 的产物），所以由这里把两者的输出按「relay 在前、warp 在后」
+# 拼起来。relay 规则在前是有意的：entry 上 x.ai 若同时命中两类规则，应当先
+# 交给中继出站，再由落地机的 warp 规则接管，而不是在入口机就直连 CF。
 extra_outbounds_json() {
-    relay_entry_active || return 0
-    relay_outbound_json
+    local out="" x
+    if relay_entry_active; then out="$(relay_outbound_json)"; fi
+    x="$(warp_outbound_json 2>/dev/null || true)"
+    if [[ -n "$x" ]]; then
+        if [[ -n "$out" ]]; then out="${out},${x}"; else out="$x"; fi
+    fi
+    [[ -n "$out" ]] && printf '%s' "$out"
+    return 0
 }
 
 extra_routing_rules_json() {
-    relay_entry_active || return 0
-    relay_routing_rules_json
+    local out="" x
+    if relay_entry_active; then out="$(relay_routing_rules_json)"; fi
+    x="$(warp_routing_rules_json 2>/dev/null || true)"
+    if [[ -n "$x" ]]; then
+        if [[ -n "$out" ]]; then out="${out},${x}"; else out="$x"; fi
+    fi
+    [[ -n "$out" ]] && printf '%s' "$out"
+    return 0
 }
 
 # routing 对象内、rules 之前：balancer 定义

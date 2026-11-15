@@ -12,7 +12,9 @@ set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="$ROOT/install.sh"
-LIBS=(common i18n sockopt platform core service hardening target scanner nodes links export backup update relay)
+# warp 必须排在 relay 之后：relay.sh 的钩子会调用 warp_* 来聚合出站与路由，
+# 而钩子是同名覆盖 —— 顺序反了 x.ai 仍走本机直出（403）。
+LIBS=(common i18n sockopt platform core service hardening target scanner nodes links export backup update relay warp)
 PRELUDE="$ROOT/entry/prelude.sh"
 MAIN="$ROOT/entry/main.sh"
 TARGETS="$ROOT/conf/targets.tsv"

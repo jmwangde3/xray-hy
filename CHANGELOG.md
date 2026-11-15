@@ -2,6 +2,21 @@
 
 版本号规则见 README「版本号与发布」；改版本号请用 `tools/bump-version.sh`。
 
+## v1.15.2 — 2026-11-15
+
+- land 入站按需开启 sniffing。x.ai 这类按 ASN 封站的站点靠 warp 分流，但这一跳的目标地址一路都是 IP：客户端解析出 IP，入口机 PassWall 的 sniffing 是 `routeOnly: true`（只拿域名做路由、不改写目标），vless 里携带的始终是 IP。落地机拿 IP 去匹配 `domain:x.ai` 必然不中 —— 表现为「出站配好了、流量还是从落地机直出」。现在 warp 启用时给 relay 入站补 `sniffing.destOverride=["tls"]` + `routeOnly: true`；warp 关闭时不注入，现有 land 行为逐字节不变。
+
+## v1.15.1 — 2026-11-15
+
+- 修：warp 里直接调 `rc-service` / `rc-update` 时没关 fd 9。openrc 的 `supervise-daemon` 是常驻进程，会把 xhy 的 flock 文件描述符一路继承下去 —— 锁被一个不该管配置的进程永久持有，之后每条 `xhy` 命令都报「另一个实例正在修改配置」。改为统一走 `warp_svc` / `warp_upd` 包装（带 `9>&-`），与 service.sh 的 `svc_*` 同一套做法。
+
+## v1.15.0 — 2026-11-15
+
+- 新增 `warp` 子命令：落地机上跑 wireproxy（WARP over WireGuard），在 127.0.0.1 开 socks5，xray 按域名把流量交给它。起因：x.ai / grok.com 对 AS45102（阿里云）整段返回 403 Blocked due to abusive traffic patterns，而 AS13335（Cloudflare）放行。
+- relay.sh 的 `extra_outbounds_json` / `extra_routing_rules_json` 改为聚合 relay + warp：relay 规则在前、warp 在后。warp.sh 必须排在 LIBS 的 relay 之后。
+- warp 子命令：on / off / status / test / reapply / del；状态存 `nodes/warp.env`（0600，进快照），wireproxy 与 wp.conf 在 /usr/local/lib/xray-hy/warp（含私钥，不进快照）。openrc 用 supervise-daemon 托管，进程挂了 5 秒后自动重启。
+- 测试：新增 test/warp-test.sh（50 项），覆盖钩子空注入、规则顺序、域名转义、与 relay 共存、off/del 收尾、参数校验与幂等。
+
 ## v1.14.12 — 2026-11-13
 
 - sockopt 超时策略反转：tcpUserTimeout 30000→0（不下发，内核不按此超时中止）+ 新增 tcpKeepAliveInterval=15。家宽国际出口是突发型丢包（实测东京 8% / 硅谷 9% / 国内 0%，RTT 无抖动），一次风暴里 RTO 退避到 25.6 s、未确认数据超 30 s 就被内核 RST，而 h2 单连接承载全部并发流，一条 RST 打断所有在途 SSE → 前端「消息流中的错误」。取 0 后丢包期间连接卡住而非死掉，恢复后继续推；真死对端由 keepalive（45 s idle + 每 15 s 探，≈2.7 min）兜底。XHY_RELAY_SCHEMA 6→7，已配 relay 的机器升级时自动 reapply
